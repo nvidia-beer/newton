@@ -77,6 +77,9 @@ class ViewerBase:
         self.show_visual = True  # show visual shapes (non collider)
         self.show_static = False  # force static shapes to be visible
         self.show_inertia_boxes = False
+        
+        # Color settings
+        self.cloth_color = (0.4, 0.7, 1.0)  # Light blue for cloth/triangles
 
         self.model_shape_color: wp.array(dtype=wp.vec3) = None
         """Color of shapes created from ``self.model``, shape (model.shape_count,)"""
@@ -265,6 +268,7 @@ class ViewerBase:
 
         self._log_triangles(state)
         self._log_particles(state)
+        self._log_springs(state)
         self._log_joints(state)
 
         self.model_changed = False
@@ -530,6 +534,7 @@ class ViewerBase:
         indices: wp.array,
         normals: wp.array | None = None,
         uvs: wp.array | None = None,
+        colors: tuple | None = None,
         hidden=False,
         backface_culling=True,
     ):
@@ -977,6 +982,7 @@ class ViewerBase:
                 "/model/triangles",
                 state.particle_q,
                 self.model.tri_indices.flatten(),
+                colors=self.cloth_color,
                 hidden=not self.show_triangles,
                 backface_culling=False,
             )
@@ -996,6 +1002,44 @@ class ViewerBase:
                 colors=colors,
                 hidden=not self.show_particles,
             )
+
+    def _log_springs(self, state):
+        """Render springs as lines between connected particles."""
+        if not self.show_springs or self.model.spring_count == 0:
+            self.log_lines("/model/springs", None, None, None)
+            return
+
+        num_springs = self.model.spring_count
+        
+        # Allocate buffers once (lazy init)
+        if not hasattr(self, '_spring_starts') or len(self._spring_starts) != num_springs:
+            self._spring_starts = wp.zeros(num_springs, dtype=wp.vec3, device=self.device)
+            self._spring_ends = wp.zeros(num_springs, dtype=wp.vec3, device=self.device)
+        
+        # Use GPU kernel to build spring line endpoints
+        from .kernels import compute_spring_lines  # noqa: PLC0415
+        
+        wp.launch(
+            kernel=compute_spring_lines,
+            dim=num_springs,
+            inputs=[
+                self.model.spring_indices,
+                state.particle_q,
+            ],
+            outputs=[
+                self._spring_starts,
+                self._spring_ends,
+            ],
+            device=self.device,
+        )
+
+        # Log as lines with cyan color
+        self.log_lines(
+            "/model/springs",
+            self._spring_starts,
+            self._spring_ends,
+            (0.0, 0.8, 1.0),  # cyan color
+        )
 
     @staticmethod
     def _shape_color_map(i: int) -> list[float]:

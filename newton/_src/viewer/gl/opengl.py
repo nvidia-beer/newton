@@ -153,7 +153,7 @@ def fill_line_vertex_data(
 class MeshGL:
     """Encapsulates mesh data and OpenGL buffers for a shape."""
 
-    def __init__(self, num_points, num_indices, device, hidden=False, backface_culling=True):
+    def __init__(self, num_points, num_indices, device, hidden=False, backface_culling=True, color=None):
         """Initialize mesh data with vertices and indices."""
         gl = RendererGL.gl
 
@@ -164,6 +164,7 @@ class MeshGL:
         self.device = device
         self.hidden = hidden
         self.backface_culling = backface_culling
+        self._color = color if color is not None else (0.7, 0.5, 0.3)
 
         self.vertices = wp.zeros(num_points, dtype=RenderVertex, device=self.device)
         self.indices = None
@@ -221,8 +222,8 @@ class MeshGL:
         #   column 3  (0,0,0,1)
         gl.glVertexAttrib4f(6, 0.0, 0.0, 0.0, 1.0)
 
-        # albedo
-        gl.glVertexAttrib3f(7, 0.7, 0.5, 0.3)
+        # albedo (mesh color)
+        gl.glVertexAttrib3f(7, self._color[0], self._color[1], self._color[2])
         # material, roughness, metallic, checker, unused
         gl.glVertexAttrib4f(8, 0.5, 0.0, 0.0, 0.0)
 
@@ -233,6 +234,19 @@ class MeshGL:
             self.vertex_cuda_buffer = wp.RegisteredGLBuffer(int(self.vbo.value), self.device)
         else:
             self.vertex_cuda_buffer = None
+    
+    @property
+    def color(self):
+        return self._color
+    
+    @color.setter
+    def color(self, value):
+        """Set the mesh color (RGB tuple, 0-1 range)."""
+        self._color = value
+        gl = RendererGL.gl
+        gl.glBindVertexArray(self.vao)
+        gl.glVertexAttrib3f(7, value[0], value[1], value[2])
+        gl.glBindVertexArray(0)
 
     def destroy(self):
         """Clean up OpenGL resources."""

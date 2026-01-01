@@ -136,6 +136,7 @@ class ViewerRerun(ViewerBase):
         indices: wp.array,
         normals: wp.array | None = None,
         uvs: wp.array | None = None,
+        colors: tuple | None = None,
         hidden=False,
         backface_culling=True,
     ):
@@ -148,6 +149,7 @@ class ViewerRerun(ViewerBase):
             indices (wp.array): Triangle indices (wp.uint32).
             normals (wp.array, optional): Vertex normals (wp.vec3).
             uvs (wp.array, optional): UV coordinates (wp.vec2).
+            colors (tuple, optional): RGB color tuple (0-1 range).
             hidden (bool): Whether the mesh is hidden (unused).
             backface_culling (bool): Whether to enable backface culling (unused).
         """
@@ -184,11 +186,20 @@ class ViewerRerun(ViewerBase):
             "uvs": self._to_numpy(uvs).astype(np.float32) if uvs is not None else None,
         }
 
+        # Prepare vertex colors if provided
+        vertex_colors = None
+        if colors is not None:
+            # colors is a tuple like (r, g, b) in 0-1 range
+            # Create per-vertex colors array
+            color_rgb = np.array([int(c * 255) for c in colors[:3]], dtype=np.uint8)
+            vertex_colors = np.tile(color_rgb, (len(points_np), 1))
+
         # Log the mesh as a static asset
         mesh_3d = rr.Mesh3D(
             vertex_positions=points_np,
             triangle_indices=indices_np,
             vertex_normals=self._meshes[name]["normals"],
+            vertex_colors=vertex_colors,
         )
 
         rr.log(name, mesh_3d, static=static)

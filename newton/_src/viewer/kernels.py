@@ -433,3 +433,22 @@ def compute_joint_basis_lines(
     line_starts[tid] = world_pos
     line_ends[tid] = world_pos + axis_vec * scale_factor
     line_colors[tid] = color
+
+
+@wp.kernel
+def compute_spring_lines(
+    spring_indices: wp.array(dtype=int),
+    particle_q: wp.array(dtype=wp.vec3),
+    # outputs
+    line_starts: wp.array(dtype=wp.vec3),
+    line_ends: wp.array(dtype=wp.vec3),
+):
+    """Compute spring line endpoints from particle positions."""
+    tid = wp.tid()
+    
+    # Each spring has 2 indices stored sequentially
+    p0 = spring_indices[tid * 2]
+    p1 = spring_indices[tid * 2 + 1]
+    
+    line_starts[tid] = particle_q[p0]
+    line_ends[tid] = particle_q[p1]

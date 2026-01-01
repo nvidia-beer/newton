@@ -234,6 +234,7 @@ class ViewerGL(ViewerBase):
         indices: wp.array,
         normals: wp.array | None = None,
         uvs: wp.array | None = None,
+        colors: tuple | None = None,
         hidden=False,
         backface_culling=True,
     ):
@@ -246,6 +247,7 @@ class ViewerGL(ViewerBase):
             indices (wp.array): Triangle indices.
             normals (wp.array, optional): Vertex normals.
             uvs (wp.array, optional): Vertex UVs.
+            colors (tuple, optional): RGB color tuple (0-1 range).
             hidden (bool): Whether the mesh is hidden.
             backface_culling (bool): Enable backface culling.
         """
@@ -256,8 +258,10 @@ class ViewerGL(ViewerBase):
 
         if name not in self.objects:
             self.objects[name] = MeshGL(
-                len(points), len(indices), self.device, hidden=hidden, backface_culling=backface_culling
+                len(points), len(indices), self.device, hidden=hidden, backface_culling=backface_culling, color=colors
             )
+        elif colors is not None:
+            self.objects[name].color = colors
 
         self.objects[name].update(points, indices, normals, uvs)
         self.objects[name].hidden = hidden
@@ -1062,8 +1066,13 @@ class ViewerGL(ViewerBase):
                     imgui.text(f"Worlds: {self.model.num_worlds}")
                     axis_names = ["X", "Y", "Z"]
                     imgui.text(f"Up Axis: {axis_names[self.model.up_axis]}")
-                    gravity = self.model.gravity.numpy()[0]
-                    gravity_text = f"Gravity: ({gravity[0]:.2f}, {gravity[1]:.2f}, {gravity[2]:.2f})"
+                    g = self.model.gravity
+                    # Handle both wp.vec3 and array types
+                    if hasattr(g, 'numpy'):
+                        gravity = g.numpy()[0]
+                        gravity_text = f"Gravity: ({gravity[0]:.2f}, {gravity[1]:.2f}, {gravity[2]:.2f})"
+                    else:
+                        gravity_text = f"Gravity: ({g[0]:.2f}, {g[1]:.2f}, {g[2]:.2f})"
                     imgui.text(gravity_text)
 
                     # Pause simulation checkbox
