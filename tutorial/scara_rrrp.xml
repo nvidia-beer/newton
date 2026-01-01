@@ -1,0 +1,169 @@
+<mujoco model="RRRP_SCARA_Robot">
+  <compiler angle="radian" />
+  <option timestep="0.01" />
+  <option gravity="0 0 0"/>
+  
+  <!-- ========== ROBOT PARAMETERS ==========
+        TARGET_FINGER_HEIGHT = 0.100 (design requirement: finger tip height from table top)
+        TARGET_CLEARANCE_GAP = 0.010 (design requirement: gap between palm and sleeve when retracted)
+        
+        CALCULATED DIMENSIONS:
+        HEIGHT_TO_EE = 0.140 (calculated to achieve target finger height)
+        L0_HEIGHT = 0.430 (calculated: HEIGHT_TO_EE + prismatic_stroke + 2×link_height)
+        PISTON_LENGTH = 0.300 (calculated to ensure clearance when retracted)
+        FINGER_OFFSET = 0.045 (calculated: LINK_HEIGHT + FINGER_LENGTH/2, ensures fingers sit flush on palm)
+       
+        FIXED DIMENSIONS:
+       L1_LENGTH = 0.300 (ℓ₁: first horizontal arm length)
+       L2_LENGTH = 0.200 (ℓ₂: second arm length - positioned ABOVE L1 at end)
+       LINK_RADIUS = 0.050 (unified radius/width: L0_radius, L1_width, L2_width)
+       LINK_HEIGHT = 0.020 (unified height: L1_height, L2_height, sleeve_height, palm_height)
+       FINGER_LENGTH = 0.050 (vertical length of gripper fingers)
+       FINGER_WIDTH = 0.020 (horizontal width of fingers, extending inward from palm edges)
+       JOINT4_RANGE_MAX = 0.250 (prismatic joint stroke - vertical extension range)
+       TABLE_HEIGHT = 0.500 (table height, if 0 no table is generated)
+       
+       JOINT RANGES (radians/meters):
+       joint1 (L1 shoulder): [-1.5708, 1.5708] = [-π/2, π/2]
+       joint2 (L2 elbow): [-0.7854, 0.7854] = [-π/4, π/4]
+       joint3 (sleeve wrist rotation): [-2.0944, 3.1416] = [-2π/3, π]
+       joint4 (piston prismatic): [0.0000, 0.2500] = [0, 0.1m]
+       
+       COLOR SCHEME:
+       Table: 0.7 0.7 0.7 1.0 (Light gray)
+       Base: 0.3 0.3 0.3 1.0 (Dark gray)  
+       L0: 0.2 0.5 0.9 1.0 (Blue)
+       L1: 0.7 0.4 0.1 1.0 (Orange)
+       L2: 0.0 0.8 0.8 1.0 (Cyan)
+       Sleeve: 0.5 0.5 0.8 1.0 (Light purple/blue, radius=LINK_RADIUS/2)
+       Piston: 0.6 0.2 0.8 1.0 (Purple, radius=sleeve_radius/2)
+       Palm: 0.95 0.8 0.1 1.0 (Gold/Yellow, horizontal plate)
+       Left finger: 0.8 0.0 0.8 1.0 (Magenta, at right edge extending inward by FINGER_WIDTH)
+       Right finger: 0.4 0.6 0.9 1.0 (Cornflower blue, at left edge extending inward by FINGER_WIDTH)
+       
+       INITIAL STATE (Assignment requirements):
+       θ₁ = 0.0, θ₂ = 0.0, θ₃ = 0.0, θ₄ = 0.1
+       
+       STRUCTURE: [Base] -> L0(vertical FIXED, no joint) -> L1[joint1] -> L2[joint2] -> sleeve[joint3] -> piston[joint4] -> gripper
+                  - L0: Fixed vertical cylinder (calculated: ℓ₀=0.25m + prismatic_stroke=0.1m + 2×link_height=0.04m = 0.39m, no joint)
+                  - L1: Horizontal arm (ℓ₁=0.30m) with joint1 (shoulder rotation)
+                  - L2: Horizontal arm (ℓ₂=0.20m) with joint2 (elbow rotation)
+                  - sleeve: Cylinder with joint3 (wrist rotation to rotate hand)
+                  - piston: Prismatic joint4 (vertical extension 0-0.1m)
+                  - gripper: Palm + 2 fingers (rotates with sleeve via joint3)
+  ========================================= -->
+
+  <visual>
+    <headlight diffuse="0.8 0.8 0.8"/>
+    <scale framewidth="0.02" framelength="0.5"/>
+  </visual>
+
+  <worldbody>
+    <!-- Additional lighting for better visibility -->
+    <light pos="1.0 1.0 2.0" dir="-1 -1 -1" diffuse="0.5 0.5 0.5"/>
+    <light pos="-1.0 1.0 2.0" dir="1 -1 -1" diffuse="0.5 0.5 0.5"/>
+    <light pos="0 0 3.0" dir="0 0 -1" diffuse="0.4 0.4 0.4"/>
+
+    <!-- Table -->
+    <body name="table" pos="0 0 0">
+      <geom type="box" size="0.750 0.750 0.500" rgba="0.7 0.7 0.7 1.0"/>
+      
+      
+    </body>
+    <!-- Base with geometry only (no mass) -->
+    <body name="base" pos="0 0 0.520">
+      <!-- Base geometry: 3x LINK_RADIUS -->
+      <geom type="box" size="0.150 0.150 0.020" rgba="0.3 0.3 0.3 1.0"/>
+      
+      <!-- L0: Vertical link (child of base/robot_root) - FIXED, NO JOINT -->
+      <body name="L0" pos="0 0 0.020">
+        <inertial pos="0 0 0.215" mass="1.0" diaginertia="0.01 0.01 0.005"/>
+        <!-- L0 geometry: cylinder with specific radius -->
+        <geom type="cylinder" size="0.050 0.215" pos="0 0 0.215" rgba="0.2 0.5 0.9 1.0"/>
+        
+        <!-- L1: First horizontal arm -->
+        <body name="L1" pos="0 0 0.430">
+          <inertial pos="0.150 0 0" mass="0.8" diaginertia="0.005 0.02 0.02"/>
+          <!-- Joint 1: Shoulder joint (L1 rotates around Z-axis) -->
+          <joint name="joint1" type="hinge" axis="0 0 1" pos="0 0 0" range="-1.5708 1.5708" ref="0.0000" damping="10.0"/>
+          <!-- L1 geometry: main rectangular body -->
+          <geom type="box" size="0.150 0.050 0.020" pos="0.150 0 0" rgba="0.7 0.4 0.1 1.0"/>
+          
+          <!-- L1 cylindrical joints at both ends for better visualization -->
+          <geom name="L1_start_joint" type="cylinder" size="0.050 0.020" pos="0 0 0" rgba="0.7 0.4 0.1 1.0"/>
+          <geom name="L1_end_joint" type="cylinder" size="0.050 0.020" pos="0.300 0 0" rgba="0.7 0.4 0.1 1.0"/>
+          
+          <!-- L2: Positioned above L1 at end (unnecessary /2 removed) -->
+          <body name="L2" pos="0.300 0 0.040">
+            <inertial pos="0.100 0 0" mass="0.5" diaginertia="0.003 0.01 0.01"/>
+            <!-- Joint 2: Elbow joint (L2 rotates around Z-axis relative to L1) -->
+            <joint name="joint2" type="hinge" axis="0 0 1" pos="0 0 0" range="-0.7854 0.7854" ref="0.0000" damping="10.0"/>
+            
+            <!-- L2 geometry: main rectangular body -->
+            <geom type="box" size="0.100 0.050 0.020" pos="0.100 0 0" rgba="0.0 0.8 0.8 1.0"/>
+            
+          <!-- L2 cylindrical joints at both ends for better visualization -->
+          <!-- Size 0.0501 (vs L1's 0.050) prevents Rerun batching, enables correct cyan color -->
+          <geom name="L2_start_joint" type="cylinder" size="0.0501 0.0201" pos="0 0 0" rgba="0.0 0.8 0.8 1.0"/>
+          <geom name="L2_end_joint" type="cylinder" size="0.0501 0.0201" pos="0.200 0 0" rgba="0.0 0.8 0.8 1.0"/>
+            
+            <!-- Prismatic joint structure at end of L2, positioned below L2 -->
+            <body name="sleeve" pos="0.200 0 -0.040">
+              <inertial pos="0 0 0" mass="0.1" diaginertia="0.001 0.001 0.001"/>
+              <!-- Joint 3: Wrist rotation (sleeve/cylinder rotates hand/gripper around Z-axis) -->
+              <joint name="joint3" type="hinge" axis="0 0 1" pos="0 0 0" range="-2.0944 3.1416" ref="0.0000" damping="10.0"/>
+              <!-- Sleeve: Cylinder that rotates the hand -->
+              <!-- Size 0.0502 (vs L1's 0.050, L2's 0.0501) prevents Rerun batching -->
+              <geom type="cylinder" size="0.0502 0.0202" pos="0 0 0" rgba="0.5 0.5 0.8 1.0"/>
+              
+              <!-- Piston: Small cylinder that moves in sleeve -->
+              <body name="piston" pos="0 0 0">
+                <inertial pos="0 0 -0.075" mass="0.05" diaginertia="0.0005 0.0005 0.0005"/>
+                <!-- Joint 4: Prismatic joint - axis flipped: +Z means larger values = retract UP, smaller values = extend DOWN -->
+                <joint name="joint4" type="slide" axis="0 0 1" pos="0 0 0" range="0.0000 0.2500" ref="0.0000" damping="20.0"/>
+                
+                <!-- Piston geometry: connects sleeve bottom to EE -->
+                <geom type="cylinder" size="0.025 0.150" pos="0 0 -0.150" rgba="0.6 0.2 0.8 1.0"/>
+                
+                <!-- End-effector gripper attached to piston -->
+                <body name="ee" pos="0 0 -0.300">
+                  <inertial pos="0 0 0" mass="0.05" diaginertia="0.0005 0.0005 0.0005"/>
+                  <!-- Palm: horizontal rectangle at center (length=3*LINK_RADIUS, width=LINK_RADIUS) -->
+                  <geom name="palm" type="box" size="0.075 0.050 0.020" pos="0 0 0" rgba="0.95 0.8 0.1 1.0"/>
+                  
+                  <!-- Left finger: at right boundary, extends inward by FINGER_WIDTH -->
+                  <geom name="left_finger" type="box" size="0.010 0.050 0.025" pos="0.065 0  -0.045" rgba="0.8 0.0 0.8 1.0"/>
+                  
+                  <!-- Right finger: at left boundary, extends inward by FINGER_WIDTH -->
+                  <geom name="right_finger" type="box" size="0.010 0.050 0.025" pos="-0.065 0 -0.045" rgba="0.4 0.6 0.9 1.0"/>
+                  
+                  <!-- Site at tip of fingers for end-effector reference -->
+                  <site name="ee_site" pos="0 0 -0.070" size="0.003" rgba="0 1 0 1"/>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  
+  <!-- Keyframes -->
+  <keyframe>
+        <key name="initial" qpos="0.0000 0.0000 0.0000 0.1000" qvel="0 0 0 0" ctrl="0 0 0 0"/>
+    <key name="target" qpos="-1.5708 0.7854 -1.0472 0.0000" qvel="0 0 0 0" ctrl="0 0 0 0"/>
+  </keyframe>
+  
+  <!-- Actuators -->
+  <actuator>
+    <motor joint="joint1" gear="100"/>
+    <motor joint="joint2" gear="100"/>
+    <motor joint="joint3" gear="100"/>
+    <motor joint="joint4" gear="200"/>
+  </actuator>
+  
+  <!-- Sensor -->
+  <sensor>
+    <framepos name="ee_pos_sensor" objtype="site" objname="ee_site"/>
+  </sensor>
+</mujoco>

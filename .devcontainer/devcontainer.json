@@ -1,0 +1,59 @@
+{
+  "name": "isaac-lab-newton",
+  "containerUser": "root",
+  "containerEnv": {
+    "XAUTHORITY": "/root/.Xauthority",
+    "NVIDIA_VISIBLE_DEVICES": "all",
+    "NVIDIA_DRIVER_CAPABILITIES": "all",
+    "NEWTON_DISABLE_CUDA_INTEROP": "1",
+    "__GL_SYNC_TO_VBLANK": "0"
+  },
+  "mounts": [
+    "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind",
+    "source=/run/user/1000/dcv/session.xauth,target=/root/.Xauthority,type=bind"
+  ],
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "runArgs": [
+    "--network=host",
+    "--ipc=host",
+    "--gpus=all",
+    "--shm-size=16g",
+    "--privileged",
+    "--ulimit","memlock=-1",
+    "--ulimit","stack=67108864",
+    "--env-file","${localEnv:HOME}/.env"
+   ],
+   "postStartCommand": "echo 'Setting up Python environment...' && uv sync --extra sim --extra examples --dev && /workspaces/newton/.venv/bin/python -m ensurepip --upgrade && /workspaces/newton/.venv/bin/python -m pip install ipykernel tqdm ipywidgets matplotlib rerun-sdk rerun-notebook && echo 'source /workspaces/newton/.venv/bin/activate' >> ~/.bashrc",
+   "customizations": {
+     "vscode": {
+       "extensions": [
+         "ms-toolsai.jupyter",
+         "ms-toolsai.vscode-jupyter-powertoys",
+         "ms-vscode.cpptools",
+         "ms-python.python",
+         "ms-python.vscode-pylance",
+         "ms-toolsai.jupyter",
+         "ms-toolsai.jupyter-keymap",
+         "ms-toolsai.jupyter-renderers",
+         "vscode-icons-team.vscode-icons",
+         "ms-python.black-formatter",
+         "ms-toolsai.vscode-jupyter-cell-tags",
+         "ms-toolsai.vscode-jupyter-slideshow",
+         "ExecutableBookProject.myst-highlight",
+         "ms-python.debugpy"
+       ],
+       "settings": {
+         "python.defaultInterpreterPath": "${containerWorkspaceFolder}/.venv/bin/python",
+         "python.terminal.activateEnvironment": true,
+         "jupyter.kernels.filter": [
+           {
+             "path": "${containerWorkspaceFolder}/.venv/bin/python",
+             "type": "pythonEnvironment"
+           }
+         ]
+       }
+     }
+   }
+}
