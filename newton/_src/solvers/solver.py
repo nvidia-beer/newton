@@ -195,6 +195,7 @@ class SolverBase:
                 Defaults to 0.0.
         """
         if model.body_count:
+            gravity = self._get_gravity_array(model)
             wp.launch(
                 kernel=integrate_bodies,
                 dim=model.body_count,
@@ -207,13 +208,22 @@ class SolverBase:
                     model.body_inertia,
                     model.body_inv_mass,
                     model.body_inv_inertia,
-                    model.gravity,
+                    gravity,
                     angular_damping,
                     dt,
                 ],
                 outputs=[state_out.body_q, state_out.body_qd],
                 device=model.device,
             )
+
+    def _get_gravity_array(self, model: Model) -> wp.array:
+        """Get gravity as wp.array, handling both array and vec3 formats."""
+        g = model.gravity
+        # If gravity is already a warp array, return it
+        if isinstance(g, wp.array):
+            return g
+        # If it's a vec3, wrap it in an array
+        return wp.array([g], dtype=wp.vec3, device=model.device)
 
     def integrate_particles(
         self,
@@ -232,6 +242,7 @@ class SolverBase:
             dt (float): The time step (typically in seconds).
         """
         if model.particle_count:
+            gravity = self._get_gravity_array(model)
             wp.launch(
                 kernel=integrate_particles,
                 dim=model.particle_count,
@@ -241,7 +252,7 @@ class SolverBase:
                     state_in.particle_f,
                     model.particle_inv_mass,
                     model.particle_flags,
-                    model.gravity,
+                    gravity,
                     dt,
                     model.particle_max_velocity,
                 ],

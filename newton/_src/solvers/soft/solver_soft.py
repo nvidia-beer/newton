@@ -321,12 +321,31 @@ class SolverSoft(SolverBase):
         )
         return forces
 
+    def _get_gravity_vec3(self, model: Model) -> wp.vec3:
+        """Get gravity as wp.vec3, handling both array and vec3 formats."""
+        g = model.gravity
+        # If gravity is a warp array, extract the first element
+        if isinstance(g, wp.array):
+            g_np = g.numpy()
+            return wp.vec3(float(g_np[0][0]), float(g_np[0][1]), float(g_np[0][2]))
+        # If it's already a vec3, use it directly
+        return g
+
+    def _get_gravity_array(self, model: Model) -> wp.array:
+        """Get gravity as wp.array, handling both array and vec3 formats."""
+        g = model.gravity
+        # If gravity is already a warp array, return it
+        if isinstance(g, wp.array):
+            return g
+        # If it's a vec3, wrap it in an array
+        return wp.array([g], dtype=wp.vec3, device=model.device)
+
     def eval_gravity_forces(self, model: Model):
         """Evaluate gravity forces for all particles."""
         forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
         if model.particle_count:
-            # model.gravity is a wp.vec3, scale by mass
-            g = model.gravity
+            # Get gravity as vec3, scale by mass
+            g = self._get_gravity_vec3(model)
             gravity_force_wp = wp.vec3(g[0] * self.mass, g[1] * self.mass, g[2] * self.mass)
             wp.launch(
                 kernel=eval_gravity,
@@ -512,7 +531,13 @@ class SolverSoft(SolverBase):
         self.implicit_integration(model, state_in, state_out, dt)
         
         # Integrate rigid bodies if present
-        self.integrate_bodies(model, state_in, state_out, dt, 0.0)
+        # Use gravity array format for integrate_bodies kernel compatibility
+        if model.body_count:
+            gravity_array = self._get_gravity_array(model)
+            original_gravity = model.gravity
+            model.gravity = gravity_array
+            self.integrate_bodies(model, state_in, state_out, dt, 0.0)
+            model.gravity = original_gravity
         
         return state_out
 
