@@ -31,7 +31,8 @@ from .shaders import (
     ShadowShader,
 )
 
-ENABLE_CUDA_INTEROP = True
+import os
+ENABLE_CUDA_INTEROP = os.environ.get("NEWTON_DISABLE_CUDA_INTEROP", "0") != "1"
 ENABLE_GL_CHECKS = False
 
 wp.set_module_options({"enable_backward": False})

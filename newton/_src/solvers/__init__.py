@@ -18,19 +18,23 @@ from .flags import SolverNotifyFlags
 from .implicit_mpm import SolverImplicitMPM
 from .mujoco import SolverMuJoCo
 from .semi_implicit import SolverSemiImplicit
+from .soft import SolverSoft, FEMSphere, create_fem_sphere
 from .solver import SolverBase
 from .style3d import SolverStyle3D
 from .vbd import SolverVBD
 from .xpbd import SolverXPBD
 
 __all__ = [
+    "FEMSphere",
     "SolverBase",
     "SolverFeatherstone",
     "SolverImplicitMPM",
     "SolverMuJoCo",
     "SolverNotifyFlags",
     "SolverSemiImplicit",
+    "SolverSoft",
     "SolverStyle3D",
     "SolverVBD",
     "SolverXPBD",
+    "create_fem_sphere",
 ]

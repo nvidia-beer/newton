@@ -1557,7 +1557,7 @@ wheels = [
 
 [[package]]
 name = "mujoco"
-version = "3.4.0.dev839962392"
+version = "3.4.1.dev861763477"
 source = { registry = "https://py.mujoco.org/" }
 dependencies = [
     { name = "absl-py" },
@@ -1568,22 +1568,18 @@ dependencies = [
     { name = "pyopengl" },
 ]
 wheels = [
-    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.0.dev839962392-cp310-cp310-macosx_11_0_universal2.whl" },
-    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.0.dev839962392-cp310-cp310-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl" },
-    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.0.dev839962392-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" },
-    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.0.dev839962392-cp310-cp310-win_amd64.whl" },
-    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.0.dev839962392-cp311-cp311-macosx_11_0_universal2.whl" },
-    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.0.dev839962392-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl" },
-    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.0.dev839962392-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" },
-    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.0.dev839962392-cp311-cp311-win_amd64.whl" },
-    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.0.dev839962392-cp312-cp312-macosx_11_0_universal2.whl" },
-    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.0.dev839962392-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl" },
-    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.0.dev839962392-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" },
-    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.0.dev839962392-cp312-cp312-win_amd64.whl" },
-    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.0.dev839962392-cp313-cp313-macosx_11_0_universal2.whl" },
-    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.0.dev839962392-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl" },
-    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.0.dev839962392-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" },
-    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.0.dev839962392-cp313-cp313-win_amd64.whl" },
+    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.1.dev861763477-cp310-cp310-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl" },
+    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.1.dev861763477-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" },
+    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.1.dev861763477-cp310-cp310-win_amd64.whl" },
+    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.1.dev861763477-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl" },
+    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.1.dev861763477-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" },
+    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.1.dev861763477-cp311-cp311-win_amd64.whl" },
+    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.1.dev861763477-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl" },
+    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.1.dev861763477-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" },
+    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.1.dev861763477-cp312-cp312-win_amd64.whl" },
+    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.1.dev861763477-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl" },
+    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.1.dev861763477-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" },
+    { url = "https://py.mujoco.org/mujoco/mujoco-3.4.1.dev861763477-cp313-cp313-win_amd64.whl" },
 ]
 
 [[package]]
@@ -1878,11 +1874,11 @@ requires-dist = [
     { name = "imgui-bundle", marker = "extra == 'notebook'", specifier = ">=1.92.0" },
     { name = "imgui-bundle", marker = "extra == 'torch-cu12'", specifier = ">=1.92.0" },
     { name = "jupyterlab", marker = "extra == 'notebook'", specifier = ">=4.4.10" },
-    { name = "mujoco", marker = "extra == 'dev'", specifier = ">=3.4.0.dev839962392", index = "https://py.mujoco.org/" },
-    { name = "mujoco", marker = "extra == 'examples'", specifier = ">=3.4.0.dev839962392", index = "https://py.mujoco.org/" },
-    { name = "mujoco", marker = "extra == 'notebook'", specifier = ">=3.4.0.dev839962392", index = "https://py.mujoco.org/" },
-    { name = "mujoco", marker = "extra == 'sim'", specifier = ">=3.4.0.dev839962392", index = "https://py.mujoco.org/" },
-    { name = "mujoco", marker = "extra == 'torch-cu12'", specifier = ">=3.4.0.dev839962392", index = "https://py.mujoco.org/" },
+    { name = "mujoco", marker = "extra == 'dev'", specifier = ">=3.4.0", index = "https://py.mujoco.org/" },
+    { name = "mujoco", marker = "extra == 'examples'", specifier = ">=3.4.0", index = "https://py.mujoco.org/" },
+    { name = "mujoco", marker = "extra == 'notebook'", specifier = ">=3.4.0", index = "https://py.mujoco.org/" },
+    { name = "mujoco", marker = "extra == 'sim'", specifier = ">=3.4.0", index = "https://py.mujoco.org/" },
+    { name = "mujoco", marker = "extra == 'torch-cu12'", specifier = ">=3.4.0", index = "https://py.mujoco.org/" },
     { name = "mujoco-warp", marker = "extra == 'dev'", git = "https://github.com/google-deepmind/mujoco_warp" },
     { name = "mujoco-warp", marker = "extra == 'examples'", git = "https://github.com/google-deepmind/mujoco_warp" },
     { name = "mujoco-warp", marker = "extra == 'notebook'", git = "https://github.com/google-deepmind/mujoco_warp" },
@@ -3678,20 +3674,20 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp310-cp310-manylinux_2_28_aarch64.whl" },
-    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp311-cp311-manylinux_2_28_aarch64.whl" },
-    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp311-cp311-manylinux_2_28_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp312-cp312-manylinux_2_28_aarch64.whl" },
-    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp312-cp312-manylinux_2_28_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp313-cp313-manylinux_2_28_aarch64.whl" },
-    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp313-cp313-manylinux_2_28_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp313-cp313t-manylinux_2_28_aarch64.whl" },
-    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp313-cp313t-manylinux_2_28_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp314-cp314-manylinux_2_28_aarch64.whl" },
-    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp314-cp314-manylinux_2_28_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp314-cp314t-manylinux_2_28_aarch64.whl" },
-    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp314-cp314t-manylinux_2_28_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp310-cp310-manylinux_2_28_aarch64.whl", hash = "sha256:aa843d96289c3211a640d381aac50b1903b6a6f7367e7e04aacfb34732dced64" },
+    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:b8bf86419f37f226a925b4b55b0aa227d77ff685fec0a7703fa77533b19bdc4e" },
+    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp311-cp311-manylinux_2_28_aarch64.whl", hash = "sha256:5a990644f98b4db59630a5b9cf41711294fe621131dbc41e1488f3a665c8b320" },
+    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:a070a0c3d357b44a239810767f7509c3fce3146e051751410b50630b12486cc2" },
+    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:c501c66fe5b0e2fc70f9d8a18e17a265f92ad1d1009dba03f5938d2f15a9066f" },
+    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:9968834a95e4b09f702549285f6210eade0d268b3b7e52b35aff1c6529fb8022" },
+    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:ab44cf28e6ca2df679f0845fb4b950c81834431218840ca01c0a1583892a0986" },
+    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:5adb25576c9cff0a25aab7e859f44121a5b150a6e319e027c27b55bf1ed57524" },
+    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp313-cp313t-manylinux_2_28_aarch64.whl", hash = "sha256:794482180a4f2d92a960f470fcd47e066dbe2eeb27816880e618d3ce031805f7" },
+    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp313-cp313t-manylinux_2_28_x86_64.whl", hash = "sha256:0df90a06330f53bebb40b5740e5c24c0aad4e8b363d09b02379f1c12ab43564b" },
+    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:4559e1254e2c8e1a337758626d1cf33ca5a5ded3509fa012070334bf886b686b" },
+    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:5a2fd9c7b730ee44bfa0aa9731b025b4323ff512b84410a93ba88e8df5149c0b" },
+    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:cbe8955514ace826d3638a5d5dc1faa2f9dda1de4de74941d2e86b1a0859477c" },
+    { url = "https://download.pytorch.org/whl/cu129/torch-2.9.1%2Bcu129-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:5b12ee638825907c9dc4a700d84de7c01dcd2c4b30ae96b2f591d0fb7795c273" },
 ]
 
 [[package]]

@@ -1080,7 +1080,12 @@ class ViewerGL(ViewerBase):
                     imgui.text(f"Worlds: {self.model.num_worlds}")
                     axis_names = ["X", "Y", "Z"]
                     imgui.text(f"Up Axis: {axis_names[self.model.up_axis]}")
-                    gravity = self.model.gravity.numpy()[0]
+                    # Handle both array and vec3 gravity formats
+                    g = self.model.gravity
+                    if isinstance(g, wp.array):
+                        gravity = g.numpy()[0]
+                    else:
+                        gravity = (g[0], g[1], g[2])
                     gravity_text = f"Gravity: ({gravity[0]:.2f}, {gravity[1]:.2f}, {gravity[2]:.2f})"
                     imgui.text(gravity_text)
 
