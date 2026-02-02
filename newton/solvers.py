@@ -112,31 +112,33 @@ Supported Features
 
 # solver types
 from ._src.solvers import (
-    FEMSphere,
     SolverBase,
     SolverFeatherstone,
     SolverImplicitMPM,
+    SolverInflatable,
     SolverMuJoCo,
     SolverSemiImplicit,
     SolverSoft,
     SolverStyle3D,
     SolverVBD,
     SolverXPBD,
-    create_fem_sphere,
+    TetraSphere,
+    create_tetra_sphere,
 )
 
 __all__ = [
-    "FEMSphere",
     "SolverBase",
     "SolverFeatherstone",
     "SolverImplicitMPM",
+    "SolverInflatable",
     "SolverMuJoCo",
     "SolverSemiImplicit",
     "SolverSoft",
     "SolverStyle3D",
     "SolverVBD",
     "SolverXPBD",
-    "create_fem_sphere",
+    "TetraSphere",
+    "create_tetra_sphere",
 ]
 
 # solver flags

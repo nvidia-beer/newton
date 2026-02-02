@@ -13,10 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .solver_soft import SolverSoft
+from .solver_inflatable import SolverInflatable
 
 # Re-export from sim for backward compatibility
 from newton._src.sim import TetraSphere, create_tetra_sphere
 
-__all__ = ["SolverSoft", "TetraSphere", "create_tetra_sphere"]
-
+__all__ = ["SolverInflatable", "TetraSphere", "create_tetra_sphere"]

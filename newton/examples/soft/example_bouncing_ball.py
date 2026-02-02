@@ -29,14 +29,14 @@ import numpy as np
 import argparse
 
 import newton
-from newton.solvers import SolverSoft, FEMSphere
+from newton.solvers import SolverSoft, TetraSphere
 
 
 class Example:
     """
     Simple bouncing ball - drop and watch it bounce!
     
-    Uses FEMSphere to generate a tetrahedral mesh and SolverSoft
+    Uses TetraSphere to generate a tetrahedral mesh and SolverSoft
     for implicit integration with sparse matrix solvers.
     """
     
@@ -67,7 +67,7 @@ class Example:
         
         # Generate sphere mesh
         print(f"Creating bouncing ball...", flush=True)
-        self.sphere = FEMSphere(
+        self.sphere = TetraSphere(
             radius=radius,
             subdivisions=subdivisions,
             interior_layers=interior_layers

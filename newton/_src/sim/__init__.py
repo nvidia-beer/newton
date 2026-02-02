@@ -30,6 +30,7 @@ from .joints import (
 from .model import Model, ModelAttributeAssignment, ModelAttributeFrequency
 from .state import State
 from .style3d import Style3DModel, Style3DModelBuilder
+from .tetra_sphere import TetraSphere, create_tetra_sphere
 
 __all__ = [
     "JOINT_LIMIT_UNLIMITED",
@@ -47,8 +48,10 @@ __all__ = [
     "State",
     "Style3DModel",
     "Style3DModelBuilder",
+    "TetraSphere",
     "color_graph",
     "count_rigid_contact_points",
+    "create_tetra_sphere",
     "eval_fk",
     "eval_ik",
     "get_joint_dof_count",

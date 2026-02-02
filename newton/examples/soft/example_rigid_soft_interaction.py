@@ -16,7 +16,7 @@ import numpy as np
 import argparse
 import newton
 import newton.examples
-from newton.solvers import SolverMuJoCo, SolverSoft, SolverXPBD, FEMSphere
+from newton.solvers import SolverMuJoCo, SolverSoft, SolverXPBD, SolverInflatable, TetraSphere
 
 
 # Colors
@@ -37,11 +37,12 @@ class RigidSoftInteractionExample:
         ball_interior_layers: int = 2,
         soft_ball_mass: float = 1.0,
         rigid_ball_mass: float = 2.0,
-        k_mu: float = 4e4,
-        k_lambda: float = 4e4,
-        k_damp: float = 3.0,
+        k_mu: float = 5e4,
+        k_lambda: float = 5e4,
+        k_damp: float = 2.0,
         gravity: float = 9.81,
         substeps: int = 16,
+        max_pressure: float = 5.0,
     ):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -60,8 +61,8 @@ class RigidSoftInteractionExample:
         print(f"  BLUE ball: Soft/FEM")
         
         # Generate FEM mesh
-        print(f"\nGenerating FEM mesh...")
-        self.sphere = FEMSphere(
+        print(f"\nGenerating tetrahedral mesh...")
+        self.sphere = TetraSphere(
             radius=ball_radius,
             subdivisions=ball_subdivisions,
             interior_layers=ball_interior_layers,
@@ -163,9 +164,10 @@ class RigidSoftInteractionExample:
         # Create solvers
         print(f"\n--- Creating Solvers ---")
         
-        print(f"Creating SolverSoft...")
-        self.soft_solver = SolverSoft(
-            model=self.model, dt=self.sim_dt, mass=soft_ball_mass, solver_type="bicgstab"
+        print(f"Creating SolverInflatable...")
+        self.soft_solver = SolverInflatable(
+            model=self.model, dt=self.sim_dt, mass=soft_ball_mass, 
+            max_volume_ratio=max_pressure, solver_type="bicgstab"
         )
         
         if self.solver_type == "mujoco":
@@ -199,11 +201,79 @@ class RigidSoftInteractionExample:
                 self.rigid_shape_id: COLOR_GREEN,
             })
         
+        # Inflation state - manual control
+        self.current_pressure = 1.0
+        self.max_pressure = max_pressure
+        self.pressure_step = 0.1
+        
+        # Register keyboard controls if viewer supports it
+        if self.viewer:
+            if hasattr(self.viewer, 'renderer') and hasattr(self.viewer.renderer, 'register_key_press'):
+                self.viewer.renderer.register_key_press(self._on_key_press)
+                print(f"   [Keyboard controls registered on renderer]", flush=True)
+        
         print(f"\n  Solver: {self.solver_type.upper()}")
-        print(f"  RED:  Rigid ball")
-        print(f"  BLUE: Soft ball")
+        print(f"  GREEN: Rigid ball")
+        print(f"  BLUE:  Soft ball (inflatable)")
+        print(f"\n   Keyboard Controls:", flush=True)
+        print(f"   [I] or [=]     - Increase pressure (inflate)", flush=True)
+        print(f"   [K] or [-]     - Decrease pressure (deflate)", flush=True)
+        print(f"   [O]            - Reset to Original rest size", flush=True)
+    
+    def _on_key_press(self, symbol, modifiers):
+        """Handle keyboard input for pressure control."""
+        KEY_I = 105
+        KEY_K = 107
+        KEY_O = 111
+        KEY_EQUAL = 61
+        KEY_MINUS = 45
+        
+        if symbol in (KEY_I, KEY_EQUAL):
+            self.current_pressure = min(self.max_pressure, self.current_pressure + self.pressure_step)
+            print(f"   [Pressure: {self.current_pressure:.2f}x]", flush=True)
+        elif symbol in (KEY_K, KEY_MINUS):
+            self.current_pressure = max(0.5, self.current_pressure - self.pressure_step)
+            print(f"   [Pressure: {self.current_pressure:.2f}x]", flush=True)
+        elif symbol == KEY_O:
+            self.current_pressure = 1.0
+            print(f"   [Reset to rest size]", flush=True)
+    
+    def _check_keys(self):
+        """Poll keyboard state for pressure control."""
+        if not self.viewer or not hasattr(self.viewer, 'renderer'):
+            return
+        renderer = self.viewer.renderer
+        if not hasattr(renderer, 'is_key_down'):
+            return
+        
+        KEY_I, KEY_K, KEY_O, KEY_EQUAL, KEY_MINUS = 105, 107, 111, 61, 45
+        
+        if not hasattr(self, '_key_cooldown'):
+            self._key_cooldown = 0
+        if self._key_cooldown > 0:
+            self._key_cooldown -= 1
+            return
+            
+        if renderer.is_key_down(KEY_I) or renderer.is_key_down(KEY_EQUAL):
+            self.current_pressure = min(self.max_pressure, self.current_pressure + self.pressure_step)
+            print(f"   [Pressure: {self.current_pressure:.2f}x]", flush=True)
+            self._key_cooldown = 10
+        elif renderer.is_key_down(KEY_K) or renderer.is_key_down(KEY_MINUS):
+            self.current_pressure = max(0.5, self.current_pressure - self.pressure_step)
+            print(f"   [Pressure: {self.current_pressure:.2f}x]", flush=True)
+            self._key_cooldown = 10
+        elif renderer.is_key_down(KEY_O):
+            self.current_pressure = 1.0
+            print(f"   [Reset to rest size]", flush=True)
+            self._key_cooldown = 10
     
     def step(self):
+        # Check keyboard for pressure control
+        self._check_keys()
+        
+        # Apply current pressure
+        self.soft_solver.set_pressure(self.current_pressure)
+        
         for _ in range(self.substeps):
             self.state_0.clear_forces()
             self.contacts = self.model.collide(state=self.state_0)
@@ -257,6 +327,8 @@ def main():
     parser.add_argument("--drop-height", type=float, default=1.5)
     parser.add_argument("--substeps", type=int, default=16)
     parser.add_argument("--num-frames", type=int, default=600)
+    parser.add_argument("--max-pressure", type=float, default=5.0,
+                        help="Maximum inflation pressure (default: 5.0)")
     parser.add_argument("--headless", action="store_true")
     args = parser.parse_args()
     
@@ -276,6 +348,7 @@ def main():
         ball_radius=args.ball_radius,
         drop_height=args.drop_height,
         substeps=args.substeps,
+        max_pressure=args.max_pressure,
     )
     
     example.run(num_frames=args.num_frames)

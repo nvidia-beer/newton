@@ -16,19 +16,23 @@
 from .featherstone import SolverFeatherstone
 from .flags import SolverNotifyFlags
 from .implicit_mpm import SolverImplicitMPM
+from .inflatable import SolverInflatable
 from .mujoco import SolverMuJoCo
 from .semi_implicit import SolverSemiImplicit
-from .soft import SolverSoft, FEMSphere, create_fem_sphere
+from .soft import SolverSoft
+
+# Re-export from sim for backward compatibility
+from newton._src.sim import TetraSphere, create_tetra_sphere
 from .solver import SolverBase
 from .style3d import SolverStyle3D
 from .vbd import SolverVBD
 from .xpbd import SolverXPBD
 
 __all__ = [
-    "FEMSphere",
     "SolverBase",
     "SolverFeatherstone",
     "SolverImplicitMPM",
+    "SolverInflatable",
     "SolverMuJoCo",
     "SolverNotifyFlags",
     "SolverSemiImplicit",
@@ -36,5 +40,6 @@ __all__ = [
     "SolverStyle3D",
     "SolverVBD",
     "SolverXPBD",
-    "create_fem_sphere",
+    "TetraSphere",
+    "create_tetra_sphere",
 ]

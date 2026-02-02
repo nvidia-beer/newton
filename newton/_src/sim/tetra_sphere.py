@@ -14,7 +14,7 @@
 # limitations under the License.
 
 """
-FEM Sphere Generator
+Tetrahedral Sphere Generator
 
 Generates a tetrahedral mesh for a sphere using:
 1. Icosphere surface tessellation (geodesic subdivision)
@@ -29,9 +29,9 @@ import time
 from scipy.spatial import Delaunay, ConvexHull
 
 
-class FEMSphere:
+class TetraSphere:
     """
-    Generates a tetrahedral FEM mesh for a sphere.
+    Generates a tetrahedral mesh for a sphere.
     
     Uses icosphere subdivision for uniform surface tessellation,
     then fills the interior with radial layers and tetrahedralizes.
@@ -62,7 +62,7 @@ class FEMSphere:
     
     Example
     -------
-    >>> sphere = FEMSphere(radius=0.5, subdivisions=2, interior_layers=2)
+    >>> sphere = TetraSphere(radius=0.5, subdivisions=2, interior_layers=2)
     >>> print(f"Vertices: {len(sphere.vertices)}, Tetrahedra: {len(sphere.tetrahedra)}")
     """
     
@@ -377,7 +377,7 @@ class FEMSphere:
     
     def info(self):
         """Print mesh statistics."""
-        print(f"FEM Sphere Mesh:")
+        print(f"TetraSphere Mesh:")
         print(f"  Radius: {self.radius}")
         print(f"  Subdivisions: {self.subdivisions}")
         print(f"  Interior layers: {self.interior_layers}")
@@ -402,9 +402,9 @@ class FEMSphere:
             print(f"  WARNING: Degenerate tets: {validation['degenerate']}")
 
 
-def create_fem_sphere(radius: float = 1.0, subdivisions: int = 2, interior_layers: int = 2, verbose: bool = True):
+def create_tetra_sphere(radius: float = 1.0, subdivisions: int = 2, interior_layers: int = 2, verbose: bool = True):
     """
-    Convenience function to create a FEM sphere mesh.
+    Convenience function to create a tetrahedral sphere mesh.
     
     Parameters
     ----------
@@ -421,24 +421,23 @@ def create_fem_sphere(radius: float = 1.0, subdivisions: int = 2, interior_layer
     
     Returns
     -------
-    FEMSphere instance with vertices, tetrahedra, and surface_triangles
+    TetraSphere instance with vertices, tetrahedra, and surface_triangles
     """
-    return FEMSphere(radius=radius, subdivisions=subdivisions, interior_layers=interior_layers, verbose=verbose)
+    return TetraSphere(radius=radius, subdivisions=subdivisions, interior_layers=interior_layers, verbose=verbose)
 
 
 if __name__ == "__main__":
     # Demo: create and display mesh info
-    print("Creating FEM Sphere meshes with different parameters:\n")
+    print("Creating TetraSphere meshes with different parameters:\n")
     
     for subdivs in [1, 2, 3]:
         for layers in [1, 2, 3]:
-            sphere = FEMSphere(radius=1.0, subdivisions=subdivs, interior_layers=layers, verbose=False)
+            sphere = TetraSphere(radius=1.0, subdivisions=subdivs, interior_layers=layers, verbose=False)
             print(f"subdivisions={subdivs}, layers={layers}: "
                   f"{len(sphere.vertices)} verts, {len(sphere.tetrahedra)} tets")
     
     print("\n" + "="*50)
     print("Detailed info for default sphere (subdivs=2, layers=2):")
     print("="*50)
-    sphere = FEMSphere(radius=1.0, subdivisions=2, interior_layers=2, verbose=True)
+    sphere = TetraSphere(radius=1.0, subdivisions=2, interior_layers=2, verbose=True)
     sphere.info()
-
