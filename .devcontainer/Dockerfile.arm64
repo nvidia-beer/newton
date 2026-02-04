@@ -1,0 +1,59 @@
+# Newton with UV - ARM64 Build (CUDA Optimized)
+# Uses NVIDIA CUDA 13 base image to match warp-lang v1.11.0+cu13
+# Note: PyTorch uses CUDA 12.9 (cu129) which is forward-compatible with CUDA 13 runtime
+FROM nvidia/cuda:13.0.0-devel-ubuntu22.04 AS base
+
+WORKDIR /workspace/newton
+
+# Install Python 3.11 and system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    python3.10-dev \
+    python3-pip \
+    git \
+    curl \
+    ca-certificates \
+    build-essential \
+    # OpenGL (NVIDIA GPU-accelerated via GLVND - vendor neutral dispatch)
+    libglvnd-dev \
+    libgl1 \
+    libglx-dev \
+    libegl-dev \
+    libgles-dev \
+    # X11 packages for windowing
+    libxrender1 \
+    libxext6 \
+    libx11-6 \
+    libxrandr-dev \
+    libxinerama-dev \
+    libxcursor-dev \
+    libxi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy UV binary from official UV image (much more reliable!)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uvx /usr/local/bin/uvx
+
+# Copy dependency files only (for layer caching)
+COPY pyproject.toml uv.lock ./
+
+# Copy README files needed for metadata generation (referenced in pyproject.toml)
+COPY README.md README.md
+COPY newton/_version.py newton/_version.py
+
+# Install dependencies (without project source)
+# Note: Not using --frozen to allow platform-specific dependency resolution
+# On ARM64, warp-lang will be installed from GitHub releases
+RUN uv sync --no-install-workspace --extra dev
+
+# Copy source code
+COPY . ./
+
+# Install workspace packages
+RUN uv sync --extra dev
+
+ENV PATH="/workspace/newton/.venv/bin:$PATH"
+
+CMD ["/bin/bash"]
