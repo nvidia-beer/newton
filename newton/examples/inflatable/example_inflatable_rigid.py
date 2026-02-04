@@ -21,15 +21,19 @@ and the box settling back down as the soft body deflates.
 
 This combines:
 - Inflation via FEM rest configuration scaling (SolverInflatable)
-- Rigid body physics with XPBD solver
+- Rigid body physics with XPBD or MuJoCo solver
 - Soft-rigid contact interaction
 
 The demo shows a soft sphere on the ground with a rigid box resting on top.
 As the sphere inflates/deflates cyclically, the box rises and falls.
 
 Usage:
-    python -m newton.examples.inflatable.example_inflatable_rigid
-    python -m newton.examples.inflatable.example_inflatable_rigid --max_pressure 2.5 --rigid_mass 0.5
+    python -m newton.examples.inflatable.example_inflatable_rigid [--solver xpbd|mujoco]
+    python -m newton.examples.inflatable.example_inflatable_rigid --solver mujoco --max_pressure 2.5
+    
+Options:
+    --solver xpbd      : Use XPBD solver (default, unified model)
+    --solver mujoco    : Use MuJoCo solver (hybrid approach with unified model)
 """
 
 import warp as wp
@@ -42,7 +46,8 @@ from newton.solvers import SolverInflatable, SolverXPBD, TetraSphere
 
 
 # Colors
-COLOR_RED = (0.9, 0.2, 0.2)      # Rigid box
+COLOR_GREEN = (0.2, 0.9, 0.3)    # Rigid box (XPBD)
+COLOR_RED = (0.9, 0.2, 0.2)      # Rigid box (MuJoCo)
 COLOR_BLUE = (0.3, 0.5, 1.0)     # Soft ball (inflatable)
 
 
@@ -52,18 +57,20 @@ class Example:
     
     A soft sphere inflates/deflates while a rigid box sits on top,
     demonstrating the force transfer from inflation to rigid body dynamics.
+    Supports both XPBD and MuJoCo solvers for rigid body physics.
     """
     
     def __init__(
         self,
         viewer,
+        solver_type: str = "xpbd",  # "xpbd" or "mujoco"
         radius: float = 0.3,
         subdivisions: int = 2,
         interior_layers: int = 2,
         soft_mass: float = 1.0,
         rigid_width: float = 3.0,     # Rigid box width/length (5x soft body diameter)
-        rigid_mass: float = 0.001,    # Ultra-light plate (very easy to lift)
-        particle_radius: float = 0.03, # Soft body particle collision radius
+        rigid_mass: float = 0.01,     # Light plate (10 grams, was 1g - better for MuJoCo)
+        particle_radius: float = 0.015, # Soft body particle collision radius (was 0.03, reduced for MuJoCo)
         k_mu: float = 1.0e5,          # Shear modulus (same as inflatable.py)
         k_lambda: float = 1.0e5,      # Bulk modulus (same as inflatable.py)
         k_damp: float = 5.0,          # Slightly higher damping for contact stability
@@ -73,6 +80,7 @@ class Example:
         max_pressure: float = 5.0,    # Max 5x volume
         cycle_speed: float = 0.01,    # Cycle speed
         substeps: int = 16,           # More substeps for contact stability
+        use_mujoco_cpu: bool = False,
     ):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -85,6 +93,10 @@ class Example:
         self.particle_radius = particle_radius
         self.max_pressure = max_pressure
         self.cycle_speed = cycle_speed
+        self.solver_type = solver_type.lower()
+        
+        if self.solver_type not in ["xpbd", "mujoco"]:
+            raise ValueError(f"Invalid solver_type: {solver_type}. Choose 'xpbd' or 'mujoco'.")
         
         self.viewer = viewer
         
@@ -135,19 +147,35 @@ class Example:
         
         # Position rigid box above soft sphere
         # Box center is at soft_sphere_top + half_height + gap
-        rigid_z = soft_sphere_top + rigid_half_height + particle_radius
+        # Start with box just barely touching the soft body for better MuJoCo initialization
+        gap = particle_radius * 0.5 if self.solver_type == "mujoco" else particle_radius
+        rigid_z = soft_sphere_top + rigid_half_height + gap
         
         print(f"\n📐 Geometry-based positioning:", flush=True)
         print(f"   Mesh Z range: [{mesh_min_z:.3f}, {mesh_max_z:.3f}] (height={mesh_height:.3f}m)", flush=True)
         print(f"   Soft body offset: {soft_offset:.3f}m (bottom at z={particle_radius:.3f}m)", flush=True)
         print(f"   Soft sphere top at z={soft_sphere_top:.3f}m", flush=True)
         print(f"   Rigid box: {rigid_width}m x {rigid_width}m x {rigid_height:.4f}m (flat plate)", flush=True)
-        print(f"   Rigid box center at z={rigid_z:.3f}m", flush=True)
+        print(f"   Rigid box center at z={rigid_z:.3f}m (gap={gap:.3f}m)", flush=True)
         
-        self.rigid_body_id = builder.add_body(
-            xform=wp.transform(wp.vec3(0.0, 0.0, rigid_z), wp.quat_identity())
-        )
-        joint_id = builder.add_joint_free(self.rigid_body_id)
+        # Create rigid body (method differs between XPBD and MuJoCo)
+        color_name = "RED" if self.solver_type == "mujoco" else "GREEN"
+        print(f"\n📦 Adding rigid box ({color_name})...", flush=True)
+        
+        if self.solver_type == "mujoco":
+            # MuJoCo uses add_link
+            self.rigid_body_id = builder.add_link(mass=rigid_mass)
+            joint_id = builder.add_joint_free(
+                child=self.rigid_body_id,
+                parent_xform=wp.transform(wp.vec3(0.0, 0.0, rigid_z), wp.quat_identity())
+            )
+        else:
+            # XPBD uses add_body
+            self.rigid_body_id = builder.add_body(
+                xform=wp.transform(wp.vec3(0.0, 0.0, rigid_z), wp.quat_identity())
+            )
+            joint_id = builder.add_joint_free(self.rigid_body_id)
+        
         builder.add_articulation([joint_id], key="rigid_box")
         
         # Add flat box shape (width x width x height)
@@ -233,11 +261,12 @@ class Example:
         # Set gravity (Z is up, gravity pulls down)
         self.model.gravity = wp.array([wp.vec3(0.0, 0.0, -gravity)], dtype=wp.vec3, device=self.model.device)
         
-        # Contact parameters - moderate values to prevent bouncing
-        self.model.soft_contact_ke = 1.0e4   # Lower stiffness to prevent trampoline effect
-        self.model.soft_contact_kd = 500.0   # Higher damping to absorb energy
-        self.model.soft_contact_kf = 1.0e4   # Friction stiffness
-        self.model.soft_contact_mu = 0.5     # Moderate friction
+        # Soft contact parameters (controls force from soft body onto rigid body)
+        # Higher damping is critical for MuJoCo rigid-soft interaction
+        self.model.soft_contact_ke = 5e4      # Increased stiffness for better contact
+        self.model.soft_contact_kd = 2000.0   # Much higher damping (was 500.0) - critical for MuJoCo
+        self.model.soft_contact_kf = 1.0e4    # Friction stiffness
+        self.model.soft_contact_mu = 0.8      # Higher friction for better interaction
         
         # Particle constraint parameters
         self.model.particle_ke = 1.0e5
@@ -266,9 +295,28 @@ class Example:
             solver_type="bicgstab"
         )
         
-        # XPBD solver for rigid body
-        print(f"Creating SolverXPBD...", flush=True)
-        self.rigid_solver = SolverXPBD(self.model)
+        # Rigid body solver
+        if self.solver_type == "mujoco":
+            # Import MuJoCo solver only when needed
+            try:
+                from newton.solvers import SolverMuJoCo
+                print(f"Creating SolverMuJoCo...", flush=True)
+                self.rigid_solver = SolverMuJoCo(
+                    self.model,
+                    use_mujoco_cpu=use_mujoco_cpu,
+                    use_mujoco_contacts=False,  # Use Newton's contact system for rigid-soft interaction
+                )
+            except ImportError as e:
+                print("\n" + "=" * 70)
+                print("ERROR: MuJoCo dependencies not installed")
+                print("=" * 70)
+                print(f"\n{e}")
+                print("\nTo use MuJoCo solver, install:")
+                print("  pip install mujoco mujoco_warp")
+                raise
+        else:
+            print(f"Creating SolverXPBD...", flush=True)
+            self.rigid_solver = SolverXPBD(self.model)
         
         # Create states
         self.state_0 = self.model.state()
@@ -299,9 +347,10 @@ class Example:
         if self.viewer:
             self.viewer.set_model(self.model)
             self.viewer.show_particles = True
-            # Color the rigid box red
+            # Color the rigid box based on solver
+            rigid_color = COLOR_RED if self.solver_type == "mujoco" else COLOR_GREEN
             self.viewer.update_shape_colors({
-                self.rigid_shape_id: COLOR_RED,
+                self.rigid_shape_id: rigid_color,
             })
         
         # Inflation state - manual control only
@@ -327,7 +376,13 @@ class Example:
         expected_radius_at_max = radius * linear_scale_at_max
         
         print(f"\n🎈 Inflatable + Rigid Interaction Ready!", flush=True)
-        print(f"   RED plate will rise/fall as BLUE sphere inflates/deflates", flush=True)
+        if self.solver_type == "mujoco":
+            print(f"   Rigid Solver: MuJoCo {'(CPU)' if use_mujoco_cpu else '(GPU)'}", flush=True)
+            print(f"   Soft Solver: Newton SolverInflatable (Implicit FEM)", flush=True)
+            print(f"   RED box will rise/fall as BLUE sphere inflates/deflates", flush=True)
+        else:
+            print(f"   Solver: XPBD for rigid, SolverInflatable for soft", flush=True)
+            print(f"   GREEN box will rise/fall as BLUE sphere inflates/deflates", flush=True)
         print(f"   Max inflation: {max_pressure}x volume", flush=True)
         print(f"   Linear scale at max: {linear_scale_at_max:.2f}x", flush=True)
         print(f"   Expected radius: {radius:.2f}m -> {expected_radius_at_max:.2f}m", flush=True)
@@ -406,6 +461,116 @@ class Example:
             print(f"   [Wireframe: {mode}]", flush=True)
             self._key_cooldown = 10
     
+    def _apply_soft_contact_forces_to_bodies(self, state, contacts):
+        """
+        Apply soft contact reaction forces to rigid bodies.
+        
+        Critical for MuJoCo: Soft contacts apply forces to particles, but MuJoCo
+        rigid bodies need the equal/opposite reaction forces explicitly applied.
+        """
+        import warp as wp
+        import numpy as np
+        
+        contact_count = int(contacts.soft_contact_count.numpy()[0])
+        if contact_count == 0:
+            return
+        
+        # Get contact data
+        particle_idx = contacts.soft_contact_particle.numpy()[:contact_count]
+        shape_idx = contacts.soft_contact_shape.numpy()[:contact_count]
+        body_pos = contacts.soft_contact_body_pos.numpy()[:contact_count]
+        body_vel = contacts.soft_contact_body_vel.numpy()[:contact_count]
+        normals = contacts.soft_contact_normal.numpy()[:contact_count]
+        
+        # Get particle states
+        particle_q = state.particle_q.numpy()
+        particle_qd = state.particle_qd.numpy()
+        particle_radius = self.model.particle_radius.numpy()
+        
+        # Contact parameters - INCREASED for MuJoCo
+        ke = self.model.soft_contact_ke * 5.0  # 5x multiplier for MuJoCo reaction forces
+        kd = self.model.soft_contact_kd
+        kf = self.model.soft_contact_kf
+        mu = self.model.soft_contact_mu
+        
+        # Map shapes to bodies
+        shape_body = self.model.shape_body.numpy()
+        
+        # Accumulate forces per body
+        body_forces = {}
+        body_torques = {}
+        
+        for i in range(contact_count):
+            pid = particle_idx[i]
+            sid = shape_idx[i]
+            body_id = shape_body[sid]
+            
+            if body_id < 0:
+                continue  # Ground or invalid
+            
+            # Get particle state
+            x = particle_q[pid]
+            v = particle_qd[pid]
+            radius = particle_radius[pid]
+            n = normals[i]
+            b_pos = body_pos[i]
+            b_vel = body_vel[i]
+            
+            # Compute penetration
+            d = np.dot(x - b_pos, n)
+            penetration = radius - d
+            
+            if penetration > 0.0:
+                # Relative velocity
+                rel_v = v - b_vel
+                vn = np.dot(rel_v, n)
+                vt = rel_v - vn * n
+                vt_norm = np.linalg.norm(vt)
+                
+                # Normal force (spring + damping)
+                fn = ke * penetration - kd * vn
+                
+                # Friction force
+                if vt_norm > 1e-6:
+                    ft_dir = vt / vt_norm
+                    ft_mag = min(mu * abs(fn), kf * vt_norm)
+                    ft = -ft_mag * ft_dir
+                else:
+                    ft = np.zeros(3)
+                
+                # Total force on particle (from body)
+                f_particle = fn * n + ft
+                
+                # Reaction force on body (Newton's 3rd law)
+                f_body = -f_particle
+                
+                # Torque on body (r × F)
+                r = x - b_pos  # Contact point relative to body
+                torque = np.cross(r, f_body)
+                
+                # Accumulate
+                if body_id not in body_forces:
+                    body_forces[body_id] = np.zeros(3)
+                    body_torques[body_id] = np.zeros(3)
+                
+                body_forces[body_id] += f_body
+                body_torques[body_id] += torque
+        
+        # Apply accumulated forces to body_f
+        if body_forces:
+            body_f = state.body_f.numpy()
+            for body_id, force in body_forces.items():
+                body_f[body_id, 0:3] += force  # Linear force
+                body_f[body_id, 3:6] += body_torques[body_id]  # Angular torque
+            
+            # Copy back to device
+            state.body_f = wp.array(body_f, dtype=wp.spatial_vector, device=self.model.device)
+            
+            # Debug output
+            if hasattr(self, '_debug_step_count') and self._debug_step_count <= 30:
+                total_force = np.linalg.norm(list(body_forces.values())[0])
+                print(f"   [DEBUG MuJoCo] Applied reaction force to body: {total_force:.2f}N (contacts={contact_count})", flush=True)
+    
     def step(self):
         """Run one frame of simulation with inflation and rigid-soft interaction."""
         # Check keyboard for pressure control
@@ -417,28 +582,35 @@ class Example:
         for _ in range(self.substeps):
             self.state_0.clear_forces()
             
-            # Collision detection with larger soft_contact_margin
-            self.contacts = self.model.collide(
-                state=self.state_0,
-                soft_contact_margin=0.1  # Larger margin for better particle-rigid detection
-            )
+            # Unified collision detection (detects rigid-rigid, rigid-soft, soft-ground, etc.)
+            self.contacts = self.model.collide(state=self.state_0)
             
-            # Soft solver step (handles particles/soft body)
+            # Debug: Check soft contact count and rigid body position (only for MuJoCo, first few substeps)
+            if self.solver_type == "mujoco" and hasattr(self, '_debug_step_count'):
+                self._debug_step_count += 1
+                if self._debug_step_count <= 50:  # More debug output
+                    if self.contacts and hasattr(self.contacts, 'soft_contact_count'):
+                        count = int(self.contacts.soft_contact_count.numpy()[0])
+                        # Get rigid body position BEFORE stepping
+                        body_q = self.state_0.body_q.numpy()
+                        if len(body_q) > 0:
+                            rigid_pos = body_q[self.rigid_body_id]
+                            rigid_z = rigid_pos[2]
+                            body_vel = self.state_0.body_qd.numpy()[self.rigid_body_id]
+                            rigid_vz = body_vel[2]
+                            if self._debug_step_count % 10 == 0:  # Every 10 substeps
+                                print(f"   [DEBUG MuJoCo substep {self._debug_step_count}] z={rigid_z:.4f}m, vz={rigid_vz:.4f}m/s, contacts={count}", flush=True)
+            elif not hasattr(self, '_debug_step_count'):
+                self._debug_step_count = 0
+            
+            # Soft solver updates particles (SolverInflatable handles inflation + FEM)
             self.soft_solver.step(
-                state_in=self.state_0,
-                state_out=self.state_soft,
-                control=self.control,
-                contacts=self.contacts,
-                dt=self.sim_dt
+                self.state_0, self.state_soft, self.control, self.contacts, self.sim_dt
             )
             
-            # Rigid solver step (handles rigid bodies)
+            # Rigid solver updates bodies
             self.rigid_solver.step(
-                state_in=self.state_0,
-                state_out=self.state_rigid,
-                control=self.control,
-                contacts=self.contacts,
-                dt=self.sim_dt
+                self.state_0, self.state_rigid, self.control, self.contacts, self.sim_dt
             )
             
             # Combine results: particles from soft, bodies from rigid
@@ -467,7 +639,8 @@ class Example:
     def run(self, num_frames: int = 600):
         """Run simulation loop."""
         print(f"\n🎈 Starting inflation + rigid interaction demo...", flush=True)
-        print(f"   Watch the RED box rise and fall!", flush=True)
+        color_name = "RED" if self.solver_type == "mujoco" else "GREEN"
+        print(f"   Watch the {color_name} box rise and fall!", flush=True)
         
         for frame in range(num_frames):
             self.step()
@@ -516,7 +689,16 @@ class Example:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Inflatable + Rigid Interaction Demo')
+    parser = argparse.ArgumentParser(
+        description='Inflatable + Rigid Interaction Demo',
+        epilog='Choose between XPBD (default) or MuJoCo solver for rigid body dynamics'
+    )
+    
+    # Solver selection
+    parser.add_argument('--solver', type=str, default='xpbd', choices=['xpbd', 'mujoco'],
+                        help='Rigid body solver: "xpbd" (default) or "mujoco"')
+    parser.add_argument('--use-mujoco-cpu', action='store_true',
+                        help='Use MuJoCo CPU backend (MuJoCo only)')
     
     # Mesh parameters
     parser.add_argument('--radius', type=float, default=0.3,
@@ -589,6 +771,7 @@ def main():
         
         example = Example(
             viewer=viewer,
+            solver_type=args.solver,
             radius=args.radius,
             subdivisions=args.subdivisions,
             interior_layers=args.interior_layers,
@@ -605,6 +788,7 @@ def main():
             max_pressure=args.max_pressure,
             cycle_speed=args.cycle_speed,
             substeps=args.substeps,
+            use_mujoco_cpu=args.use_mujoco_cpu,
         )
         example.run(num_frames=args.num_frames)
         
@@ -613,4 +797,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ImportError as e:
+        import sys
+        if "mujoco" in str(e).lower():
+            print("\n" + "=" * 70)
+            print("ERROR: MuJoCo dependencies not installed")
+            print("=" * 70)
+            print(f"\n{e}")
+            print("\nTo use MuJoCo solver, install:")
+            print("  pip install mujoco mujoco_warp")
+            sys.exit(1)
+        else:
+            raise

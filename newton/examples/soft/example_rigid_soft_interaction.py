@@ -4,11 +4,19 @@
 Rigid-Soft Body Interaction Example
 
 Demonstrates a rigid ball interacting with a soft (FEM) ball.
-Choose between MuJoCo or XPBD for the rigid body solver.
+Supports both XPBD and MuJoCo solvers for rigid body physics.
 
 Usage:
-    python -m newton.examples.soft.example_rigid_soft_interaction --solver xpbd
-    python -m newton.examples.soft.example_rigid_soft_interaction --solver mujoco
+    python -m newton.examples.soft.example_rigid_soft_interaction [--solver xpbd|mujoco]
+
+Options:
+    --solver xpbd      : Use XPBD solver (default, unified model)
+    --solver mujoco    : Use MuJoCo solver (hybrid approach with unified model)
+
+Note:
+    - XPBD: Single unified model with particles and bodies
+    - MuJoCo: Unified model with hybrid solver (MuJoCo for bodies, Newton for particles)
+    - SolverSoft: Pure FEM solver without pressure control (use inflatable examples for pressure)
 """
 
 import warp as wp
@@ -16,21 +24,22 @@ import numpy as np
 import argparse
 import newton
 import newton.examples
-from newton.solvers import SolverMuJoCo, SolverSoft, SolverXPBD, SolverInflatable, TetraSphere
+from newton.solvers import SolverXPBD, SolverSoft, TetraSphere
 
 
 # Colors
-COLOR_GREEN = (0.2, 0.9, 0.3)    # Rigid ball
+COLOR_GREEN = (0.2, 0.9, 0.3)    # Rigid ball (XPBD)
+COLOR_RED = (0.9, 0.2, 0.2)      # Rigid ball (MuJoCo)
 COLOR_BLUE = (0.3, 0.5, 1.0)     # Soft ball
 
 
 class RigidSoftInteractionExample:
-    """Rigid-soft interaction with selectable rigid body solver."""
+    """Rigid-soft interaction with selectable rigid body solver (XPBD or MuJoCo)."""
     
     def __init__(
         self,
         viewer,
-        solver_type: str = "xpbd",  # "mujoco" or "xpbd"
+        solver_type: str = "xpbd",  # "xpbd" or "mujoco"
         ball_radius: float = 0.3,
         drop_height: float = 1.5,
         ball_subdivisions: int = 2,
@@ -42,7 +51,7 @@ class RigidSoftInteractionExample:
         k_damp: float = 2.0,
         gravity: float = 9.81,
         substeps: int = 16,
-        max_pressure: float = 5.0,
+        use_mujoco_cpu: bool = False,
     ):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -52,13 +61,24 @@ class RigidSoftInteractionExample:
         self.viewer = viewer
         self.solver_type = solver_type.lower()
         
+        if self.solver_type not in ["xpbd", "mujoco"]:
+            raise ValueError(f"Invalid solver_type: {solver_type}. Choose 'xpbd' or 'mujoco'.")
+        
         x_spacing = ball_radius * 2.5
         
         print("=" * 70)
-        print(f"  Rigid-Soft Interaction ({self.solver_type.upper()} solver)")
-        print("=" * 70)
-        print(f"\n  GREEN ball: Rigid ({self.solver_type.upper()})")
-        print(f"  BLUE ball: Soft/FEM")
+        if self.solver_type == "mujoco":
+            print(f"  MuJoCo Rigid-Soft Interaction (Hybrid Solver)")
+            print("=" * 70)
+            print(f"\n  RED ball: Rigid (MuJoCo)")
+            print(f"  BLUE ball: Soft/FEM (Newton)")
+            print(f"\n  Backend: {'MuJoCo CPU' if use_mujoco_cpu else 'MuJoCo Warp (GPU)'}")
+            print(f"\n  Using unified model with hybrid solver approach")
+        else:
+            print(f"  Rigid-Soft Interaction (XPBD solver)")
+            print("=" * 70)
+            print(f"\n  GREEN ball: Rigid (XPBD)")
+            print(f"  BLUE ball: Soft/FEM")
         
         # Generate FEM mesh
         print(f"\nGenerating tetrahedral mesh...")
@@ -70,10 +90,9 @@ class RigidSoftInteractionExample:
         )
         mesh_data = self.sphere.get_mesh_data()
         
-        # Build model
+        # Build unified model
+        print(f"\n--- Building Unified Model ---")
         builder = newton.ModelBuilder()
-        if self.solver_type == "mujoco":
-            SolverMuJoCo.register_custom_attributes(builder)
         
         # Ground plane
         builder.add_ground_plane(
@@ -89,18 +108,31 @@ class RigidSoftInteractionExample:
         soft_height = ball_radius * 1.1  # Slightly above ground
         vertices = [(v[0], v[1], v[2] + soft_height) for v in vertices]
         
-        # Rigid ball (GREEN) - falling from above, directly over soft ball
-        print(f"\nAdding rigid ball (GREEN)...")
-        self.rigid_body_id = builder.add_body(
-            xform=wp.transform(wp.vec3(0.0, 0.0, drop_height), wp.quat_identity())
-        )
-        joint_id = builder.add_joint_free(self.rigid_body_id)
+        # Rigid ball - falling from above, directly over soft ball
+        color_name = "RED" if self.solver_type == "mujoco" else "GREEN"
+        print(f"\nAdding rigid ball ({color_name})...")
+        
+        # Create body (method differs between XPBD and MuJoCo)
+        if self.solver_type == "mujoco":
+            # MuJoCo uses add_link
+            self.rigid_body_id = builder.add_link(mass=rigid_ball_mass)
+            joint_id = builder.add_joint_free(
+                child=self.rigid_body_id,
+                parent_xform=wp.transform(wp.vec3(0.0, 0.0, drop_height), wp.quat_identity())
+            )
+        else:
+            # XPBD uses add_body
+            self.rigid_body_id = builder.add_body(
+                xform=wp.transform(wp.vec3(0.0, 0.0, drop_height), wp.quat_identity())
+            )
+            joint_id = builder.add_joint_free(self.rigid_body_id)
+        
         builder.add_articulation([joint_id], key="rigid_ball")
         self.rigid_shape_id = builder.add_shape_sphere(
             body=self.rigid_body_id,
             radius=ball_radius,
             cfg=newton.ModelBuilder.ShapeConfig(
-                ke=5e5, kd=100.0, kf=1e4, mu=0.5,  # Bouncy
+                ke=5e5, kd=100.0, kf=1e4, mu=0.5,
                 density=rigid_ball_mass / ((4/3) * np.pi * ball_radius**3),
             )
         )
@@ -142,7 +174,7 @@ class RigidSoftInteractionExample:
                         builder.add_spring(start_particle + a, start_particle + b,
                                            spring_ke, spring_kd, 0.0)
         
-        # Finalize model
+        # Finalize unified model
         self.model = builder.finalize()
         self.model.gravity = wp.array([wp.vec3(0.0, 0.0, -gravity)], dtype=wp.vec3, device=self.model.device)
         
@@ -159,25 +191,34 @@ class RigidSoftInteractionExample:
                 dtype=wp.float32, device=self.model.device
             )
         
-        print(f"\nModel: {self.model.body_count} bodies, {self.model.particle_count} particles")
+        print(f"  Unified model: {self.model.body_count} bodies, {self.model.particle_count} particles, {self.model.shape_count} shapes")
         
         # Create solvers
         print(f"\n--- Creating Solvers ---")
         
-        print(f"Creating SolverInflatable...")
-        self.soft_solver = SolverInflatable(
-            model=self.model, dt=self.sim_dt, mass=soft_ball_mass, 
-            max_volume_ratio=max_pressure, solver_type="bicgstab"
+        print(f"Creating SolverSoft...")
+        self.soft_solver = SolverSoft(
+            model=self.model, dt=self.sim_dt, mass=soft_ball_mass, solver_type="bicgstab"
         )
         
         if self.solver_type == "mujoco":
-            print(f"Creating SolverMuJoCo...")
-            self.rigid_solver = SolverMuJoCo(
-                self.model,
-                use_mujoco_contacts=True,  # Use MuJoCo's own collision detection
-                ls_parallel=True,
-                njmax=50,
-            )
+            # Import MuJoCo solver only when needed
+            try:
+                from newton.solvers import SolverMuJoCo
+                print(f"Creating SolverMuJoCo...")
+                self.rigid_solver = SolverMuJoCo(
+                    self.model,
+                    use_mujoco_cpu=use_mujoco_cpu,
+                    use_mujoco_contacts=False,  # Use Newton's contact system for rigid-soft interaction
+                )
+            except ImportError as e:
+                print("\n" + "=" * 70)
+                print("ERROR: MuJoCo dependencies not installed")
+                print("=" * 70)
+                print(f"\n{e}")
+                print("\nTo use MuJoCo solver, install:")
+                print("  pip install mujoco mujoco_warp")
+                raise
         else:
             print(f"Creating SolverXPBD...")
             self.rigid_solver = SolverXPBD(self.model)
@@ -197,98 +238,40 @@ class RigidSoftInteractionExample:
         if self.viewer:
             self.viewer.set_model(self.model)
             self.viewer.show_particles = True  # Enable soft body visualization
+            rigid_color = COLOR_RED if self.solver_type == "mujoco" else COLOR_GREEN
             self.viewer.update_shape_colors({
-                self.rigid_shape_id: COLOR_GREEN,
+                self.rigid_shape_id: rigid_color,
             })
         
-        # Inflation state - manual control
-        self.current_pressure = 1.0
-        self.max_pressure = max_pressure
-        self.pressure_step = 0.1
-        
-        # Register keyboard controls if viewer supports it
-        if self.viewer:
-            if hasattr(self.viewer, 'renderer') and hasattr(self.viewer.renderer, 'register_key_press'):
-                self.viewer.renderer.register_key_press(self._on_key_press)
-                print(f"   [Keyboard controls registered on renderer]", flush=True)
-        
-        print(f"\n  Solver: {self.solver_type.upper()}")
-        print(f"  GREEN: Rigid ball")
-        print(f"  BLUE:  Soft ball (inflatable)")
-        print(f"\n   Keyboard Controls:", flush=True)
-        print(f"   [I] or [=]     - Increase pressure (inflate)", flush=True)
-        print(f"   [K] or [-]     - Decrease pressure (deflate)", flush=True)
-        print(f"   [O]            - Reset to Original rest size", flush=True)
-    
-    def _on_key_press(self, symbol, modifiers):
-        """Handle keyboard input for pressure control."""
-        KEY_I = 105
-        KEY_K = 107
-        KEY_O = 111
-        KEY_EQUAL = 61
-        KEY_MINUS = 45
-        
-        if symbol in (KEY_I, KEY_EQUAL):
-            self.current_pressure = min(self.max_pressure, self.current_pressure + self.pressure_step)
-            print(f"   [Pressure: {self.current_pressure:.2f}x]", flush=True)
-        elif symbol in (KEY_K, KEY_MINUS):
-            self.current_pressure = max(0.5, self.current_pressure - self.pressure_step)
-            print(f"   [Pressure: {self.current_pressure:.2f}x]", flush=True)
-        elif symbol == KEY_O:
-            self.current_pressure = 1.0
-            print(f"   [Reset to rest size]", flush=True)
-    
-    def _check_keys(self):
-        """Poll keyboard state for pressure control."""
-        if not self.viewer or not hasattr(self.viewer, 'renderer'):
-            return
-        renderer = self.viewer.renderer
-        if not hasattr(renderer, 'is_key_down'):
-            return
-        
-        KEY_I, KEY_K, KEY_O, KEY_EQUAL, KEY_MINUS = 105, 107, 111, 61, 45
-        
-        if not hasattr(self, '_key_cooldown'):
-            self._key_cooldown = 0
-        if self._key_cooldown > 0:
-            self._key_cooldown -= 1
-            return
-            
-        if renderer.is_key_down(KEY_I) or renderer.is_key_down(KEY_EQUAL):
-            self.current_pressure = min(self.max_pressure, self.current_pressure + self.pressure_step)
-            print(f"   [Pressure: {self.current_pressure:.2f}x]", flush=True)
-            self._key_cooldown = 10
-        elif renderer.is_key_down(KEY_K) or renderer.is_key_down(KEY_MINUS):
-            self.current_pressure = max(0.5, self.current_pressure - self.pressure_step)
-            print(f"   [Pressure: {self.current_pressure:.2f}x]", flush=True)
-            self._key_cooldown = 10
-        elif renderer.is_key_down(KEY_O):
-            self.current_pressure = 1.0
-            print(f"   [Reset to rest size]", flush=True)
-            self._key_cooldown = 10
+        if self.solver_type == "mujoco":
+            print(f"\n  Rigid Solver: MuJoCo {'(CPU)' if use_mujoco_cpu else '(GPU)'}")
+            print(f"  Soft Solver: Newton SolverSoft (Implicit FEM)")
+            print(f"  RED:  Rigid ball (MuJoCo)")
+            print(f"  BLUE: Soft ball (FEM)")
+            print(f"\n  Unified model enables rigid-soft interaction via Newton's contact system")
+        else:
+            print(f"\n  Solver: XPBD")
+            print(f"  GREEN: Rigid ball")
+            print(f"  BLUE:  Soft ball")
     
     def step(self):
-        # Check keyboard for pressure control
-        self._check_keys()
-        
-        # Apply current pressure
-        self.soft_solver.set_pressure(self.current_pressure)
-        
         for _ in range(self.substeps):
             self.state_0.clear_forces()
+            
+            # Unified collision detection (detects rigid-rigid, rigid-soft, soft-ground, etc.)
             self.contacts = self.model.collide(state=self.state_0)
             
-            # Soft solver for particles
+            # Soft solver updates particles
             self.soft_solver.step(
                 self.state_0, self.state_soft, self.control, self.contacts, self.sim_dt
             )
             
-            # Rigid solver for bodies
+            # Rigid solver updates bodies
             self.rigid_solver.step(
                 self.state_0, self.state_rigid, self.control, self.contacts, self.sim_dt
             )
             
-            # Combine: particles from soft, bodies from rigid
+            # Combine results: particles from soft, bodies from rigid
             wp.copy(self.state_1.particle_q, self.state_soft.particle_q)
             wp.copy(self.state_1.particle_qd, self.state_soft.particle_qd)
             wp.copy(self.state_1.body_q, self.state_rigid.body_q)
@@ -320,15 +303,18 @@ class RigidSoftInteractionExample:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Rigid-Soft Interaction")
-    parser.add_argument("--solver", type=str, default="xpbd", choices=["mujoco", "xpbd"],
-                        help="Rigid body solver: 'mujoco' or 'xpbd' (default: xpbd)")
+    parser = argparse.ArgumentParser(
+        description="Rigid-Soft Interaction with selectable solver",
+        epilog="Choose between XPBD (default) or MuJoCo solver for rigid body dynamics"
+    )
+    parser.add_argument("--solver", type=str, default="xpbd", choices=["xpbd", "mujoco"],
+                        help="Rigid body solver: 'xpbd' (default) or 'mujoco'")
     parser.add_argument("--ball-radius", type=float, default=0.3)
     parser.add_argument("--drop-height", type=float, default=1.5)
     parser.add_argument("--substeps", type=int, default=16)
     parser.add_argument("--num-frames", type=int, default=600)
-    parser.add_argument("--max-pressure", type=float, default=5.0,
-                        help="Maximum inflation pressure (default: 5.0)")
+    parser.add_argument("--use-mujoco-cpu", action="store_true",
+                        help="Use MuJoCo CPU backend (MuJoCo only)")
     parser.add_argument("--headless", action="store_true")
     args = parser.parse_args()
     
@@ -342,19 +328,33 @@ def main():
         viewer = newton.viewer.ViewerGL()
     
     # Create and run example
-    example = RigidSoftInteractionExample(
-        viewer=viewer,
-        solver_type=args.solver,
-        ball_radius=args.ball_radius,
-        drop_height=args.drop_height,
-        substeps=args.substeps,
-        max_pressure=args.max_pressure,
-    )
-    
-    example.run(num_frames=args.num_frames)
+    try:
+        example = RigidSoftInteractionExample(
+            viewer=viewer,
+            solver_type=args.solver,
+            ball_radius=args.ball_radius,
+            drop_height=args.drop_height,
+            substeps=args.substeps,
+            use_mujoco_cpu=args.use_mujoco_cpu,
+        )
+        
+        example.run(num_frames=args.num_frames)
+    except ImportError as e:
+        if args.solver == "mujoco":
+            print("\n" + "=" * 70)
+            print("ERROR: MuJoCo dependencies not installed")
+            print("=" * 70)
+            print(f"\n{e}")
+            print("\nTo use MuJoCo solver, install:")
+            print("  pip install mujoco mujoco_warp")
+            return 1
+        else:
+            raise
     
     if viewer:
         viewer.close()
+    
+    return 0
 
 
 if __name__ == "__main__":
