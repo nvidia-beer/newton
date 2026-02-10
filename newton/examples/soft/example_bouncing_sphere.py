@@ -14,14 +14,14 @@
 # limitations under the License.
 
 """
-Bouncing Ball Example
+Bouncing Sphere Example
 
 A simple soft sphere dropped from height - bounces like a basketball.
 Uses FEM tetrahedral mesh with implicit integration.
 
 Usage:
-    python -m newton.examples.soft.example_bouncing_ball
-    python -m newton.examples.soft.example_bouncing_ball --initial_height 3.0 --k_mu 5e5
+    python -m newton.examples.soft.example_bouncing_sphere
+    python -m newton.examples.soft.example_bouncing_sphere --initial_height 3.0 --k_mu 5e5
 """
 
 import warp as wp
@@ -34,7 +34,7 @@ from newton.solvers import SolverSoft, TetraSphere
 
 class Example:
     """
-    Simple bouncing ball - drop and watch it bounce!
+    Simple bouncing sphere - drop and watch it bounce!
     
     Uses TetraSphere to generate a tetrahedral mesh and SolverSoft
     for implicit integration with sparse matrix solvers.
@@ -66,7 +66,7 @@ class Example:
         self.viewer = viewer
         
         # Generate sphere mesh
-        print(f"Creating bouncing ball...", flush=True)
+        print(f"Creating bouncing sphere...", flush=True)
         self.sphere = TetraSphere(
             radius=radius,
             subdivisions=subdivisions,
@@ -193,9 +193,9 @@ class Example:
         self.was_falling = True
         self.max_height = 0.0
         
-        print(f"\n🏀 Bouncing Ball Ready!", flush=True)
+        print(f"\n🏀 Bouncing Sphere Ready!", flush=True)
         print(f"   Dropping from height: {initial_height}m", flush=True)
-        print(f"   Ball radius: {radius}m", flush=True)
+        print(f"   Sphere radius: {radius}m", flush=True)
         print(f"   Stiffness: μ={k_mu:.0e}, λ={k_lambda:.0e}", flush=True)
     
     def step(self):
@@ -232,7 +232,7 @@ class Example:
     
     def run(self, num_frames: int = 600):
         """Run simulation loop."""
-        print(f"\n🏀 Dropping the ball...", flush=True)
+        print(f"\n🏀 Dropping the sphere...", flush=True)
         
         for frame in range(num_frames):
             self.step()
@@ -264,11 +264,11 @@ class Example:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Bouncing Ball Simulation')
+    parser = argparse.ArgumentParser(description='Bouncing Sphere Simulation')
     
-    # Ball parameters
+    # Sphere parameters
     parser.add_argument('--radius', type=float, default=0.3,
-                        help='Ball radius (default: 0.3)')
+                        help='Sphere radius (default: 0.3)')
     parser.add_argument('--subdivisions', type=int, default=2,
                         help='Mesh detail 1-3 (default: 2)')
     parser.add_argument('--interior_layers', type=int, default=2,
@@ -278,7 +278,7 @@ def main():
     parser.add_argument('--initial_height', type=float, default=2.5,
                         help='Drop height (default: 2.5)')
     parser.add_argument('--mass', type=float, default=0.5,
-                        help='Ball mass (default: 0.5)')
+                        help='Sphere mass (default: 0.5)')
     parser.add_argument('--k_mu', type=float, default=2e5,
                         help='Shear modulus - higher = stiffer (default: 2e5)')
     parser.add_argument('--k_lambda', type=float, default=2e5,
@@ -309,7 +309,10 @@ def main():
         else:
             try:
                 # Use ViewerGL with default size (matches other examples)
-                viewer = newton.viewer.ViewerGL()
+                viewer = newton.viewer.ViewerGL(
+                    width=1920,
+                    height=1080,
+                )
             except Exception as e:
                 print(f"Could not create OpenGL viewer: {e}")
                 try:
@@ -333,7 +336,21 @@ def main():
             gravity=args.gravity,
             substeps=args.substeps,
         )
+        
+        # Render initial frame to ensure window is visible
+        if viewer:
+            example.render()
+        
+        # Run simulation
         example.run(num_frames=args.num_frames)
+        
+        # Keep viewer open if it exists (process events to keep window visible)
+        if viewer:
+            print("\nSimulation complete - viewer window will stay open")
+            print("Press ESC or close the window to exit")
+            while viewer.is_running():
+                viewer.end_frame()  # Process events and render
+            viewer.close()
 
 
 if __name__ == "__main__":

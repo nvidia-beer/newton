@@ -37,6 +37,8 @@ from ._src.utils.mesh import (
     create_ellipsoid_mesh,
     create_plane_mesh,
     create_sphere_mesh,
+    load_tetrahedral_mesh,
+    save_tetrahedral_mesh,
 )
 
 __all__ += [
@@ -47,6 +49,8 @@ __all__ += [
     "create_ellipsoid_mesh",
     "create_plane_mesh",
     "create_sphere_mesh",
+    "load_tetrahedral_mesh",
+    "save_tetrahedral_mesh",
 ]
 
 # ==================================================================================

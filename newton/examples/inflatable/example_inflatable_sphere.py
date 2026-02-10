@@ -14,9 +14,9 @@
 # limitations under the License.
 
 """
-Inflatable Soft Body Example - Box
+Inflatable Soft Body Example - Sphere
 
-Demonstrates inflation of a 3D tetrahedral soft body box using the SolverInflatable.
+Demonstrates inflation of a 3D tetrahedral soft body sphere using the SolverInflatable.
 The inflation mechanism works by scaling the FEM rest configuration,
 causing the material to naturally deform toward its new rest state.
 
@@ -24,14 +24,14 @@ This is adapted from the 2D balloon inflation demo in soft_robotics/warp
 to work with 3D tetrahedra in Newton.
 
 Features:
-- Inflatable box using TetraBox generator
+- Inflatable sphere using TetraSphere generator
 - Pressure control via rest configuration scaling
 - Cycle through different inflation levels
 - Real-time volume ratio tracking
 
 Usage:
-    python -m newton.examples.inflatable.example_inflatable
-    python -m newton.examples.inflatable.example_inflatable --size 0.4 0.4 0.4 --segments 3 3 3 --max_pressure 2.5
+    python -m newton.examples.inflatable.example_inflatable_sphere
+    python -m newton.examples.inflatable.example_inflatable_sphere --max_pressure 2.5 --cycle_speed 0.02
 """
 
 import warp as wp
@@ -40,22 +40,23 @@ import argparse
 import math
 
 import newton
-from newton.solvers import SolverInflatable, TetraBox
+from newton.solvers import SolverInflatable, TetraSphere
 
 
 class Example:
     """
-    Inflatable soft body box demonstration.
+    Inflatable soft body demonstration.
     
-    Creates a tetrahedral box mesh and inflates/deflates it
+    Creates a tetrahedral sphere mesh and inflates/deflates it
     using the SolverInflatable which scales the FEM rest configuration.
     """
     
     def __init__(
         self,
         viewer,
-        size=(0.4, 0.4, 0.4),
-        segments=(5, 5, 5),  # More segments = more particles (125 cubes = 750 tetrahedra)
+        radius: float = 0.3,
+        subdivisions: int = 2,
+        interior_layers: int = 2,
         initial_height: float = 0.5,
         mass: float = 1.0,
         k_mu: float = 1.0e5,         # Shear modulus (softer for visible deformation)
@@ -73,10 +74,7 @@ class Example:
         self.substeps = substeps
         self.sim_dt = self.frame_dt / substeps
         self.sim_time = 0.0
-        if isinstance(size, (int, float)):
-            self.size = (float(size), float(size), float(size))
-        else:
-            self.size = tuple(float(s) for s in size)
+        self.radius = radius
         self.initial_height = initial_height
         self.mass = mass
         self.max_pressure = max_pressure
@@ -84,14 +82,15 @@ class Example:
         
         self.viewer = viewer
         
-        # Generate FEM box mesh
-        print(f"\n📦 Generating tetrahedral box mesh...", flush=True)
-        box = TetraBox(
-            size=self.size,
-            segments=segments,
+        # Generate FEM sphere mesh
+        print(f"\n🎈 Generating tetrahedral sphere mesh...", flush=True)
+        sphere = TetraSphere(
+            radius=radius,
+            subdivisions=subdivisions,
+            interior_layers=interior_layers,
             verbose=True
         )
-        mesh_data = box.get_mesh_data()
+        mesh_data = sphere.get_mesh_data()
         
         vertices = mesh_data['vertices']
         indices = mesh_data['indices']
@@ -228,9 +227,8 @@ class Example:
                 self.viewer.register_key_press(self._on_key_press)
                 print(f"   [Keyboard controls registered on viewer]", flush=True)
         
-        print(f"\n📦 Inflatable Soft Body Box Ready!", flush=True)
-        print(f"   Size: {self.size[0]:.2f}×{self.size[1]:.2f}×{self.size[2]:.2f}m", flush=True)
-        print(f"   Segments: {segments[0]}×{segments[1]}×{segments[2]}", flush=True)
+        print(f"\n🎈 Inflatable Soft Body Ready!", flush=True)
+        print(f"   Radius: {radius}m", flush=True)
         print(f"   Max inflation: {max_pressure}x volume", flush=True)
         print(f"   Stiffness: μ={k_mu:.0e}, λ={k_lambda:.0e}", flush=True)
         print(f"\n   Keyboard Controls:", flush=True)
@@ -333,7 +331,7 @@ class Example:
     
     def run(self, num_frames: int = 1800):
         """Run simulation loop."""
-        print(f"\n📦 Starting inflation demo...", flush=True)
+        print(f"\n🎈 Starting inflation demo...", flush=True)
         print(f"   Cycling pressure from 1.0x to {self.max_pressure:.1f}x", flush=True)
         
         for frame in range(num_frames):
@@ -356,20 +354,22 @@ class Example:
         
         # Final statistics
         info = self.solver.get_inflation_info(self.state_0)
-        print(f"\n📦 Simulation complete!", flush=True)
+        print(f"\n🎈 Simulation complete!", flush=True)
         print(f"   Initial volume: {info['initial_volume']:.4f}", flush=True)
         print(f"   Final volume: {info['current_volume']:.4f}", flush=True)
         print(f"   Final ratio: {info['current_ratio']:.2f}x", flush=True)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Inflatable Soft Body Box Demo')
+    parser = argparse.ArgumentParser(description='Inflatable Soft Body Sphere Demo')
     
     # Mesh parameters
-    parser.add_argument('--size', type=float, nargs=3, default=[0.4, 0.4, 0.4],
-                        help='Box size (width, height, depth) (default: 0.4 0.4 0.4)')
-    parser.add_argument('--segments', type=int, nargs=3, default=[5, 5, 5],
-                        help='Segments per axis (default: 5 5 5 - 125 cubes = 750 tetrahedra)')
+    parser.add_argument('--radius', type=float, default=0.3,
+                        help='Sphere radius (default: 0.3)')
+    parser.add_argument('--subdivisions', type=int, default=2,
+                        help='Icosphere subdivisions (default: 2)')
+    parser.add_argument('--interior_layers', type=int, default=2,
+                        help='Interior radial layers (default: 2)')
     
     # Physics parameters
     parser.add_argument('--initial_height', type=float, default=0.5,
@@ -391,7 +391,7 @@ def main():
     
     # Inflation parameters
     parser.add_argument('--max_pressure', type=float, default=5.0,
-                        help='Maximum inflation ratio (default: 5.0)')
+                        help='Maximum inflation ratio (default: 2.0)')
     parser.add_argument('--cycle_speed', type=float, default=0.02,
                         help='Inflation cycle speed (default: 0.02)')
     
@@ -432,8 +432,9 @@ def main():
         
         example = Example(
             viewer=viewer,
-            size=args.size,
-            segments=args.segments,
+            radius=args.radius,
+            subdivisions=args.subdivisions,
+            interior_layers=args.interior_layers,
             initial_height=args.initial_height,
             mass=args.mass,
             k_mu=args.k_mu,

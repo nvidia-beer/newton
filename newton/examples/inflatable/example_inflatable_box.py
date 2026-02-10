@@ -331,7 +331,7 @@ class Example:
             self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
     
-    def run(self, num_frames: int = 1800):
+    def run(self, num_frames: int = 600):
         """Run simulation loop."""
         print(f"\n📦 Starting inflation demo...", flush=True)
         print(f"   Cycling pressure from 1.0x to {self.max_pressure:.1f}x", flush=True)
@@ -398,8 +398,8 @@ def main():
     # Simulation parameters
     parser.add_argument('--substeps', type=int, default=5,
                         help='Substeps per frame (default: 5)')
-    parser.add_argument('--num_frames', type=int, default=1800,
-                        help='Number of frames (default: 1800 = 30 seconds at 60fps)')
+    parser.add_argument('--num_frames', type=int, default=600,
+                        help='Number of frames (default: 600)')
     parser.add_argument('--device', type=str, default=None,
                         help='Compute device')
     parser.add_argument('--headless', action='store_true',

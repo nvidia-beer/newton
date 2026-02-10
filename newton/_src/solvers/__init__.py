@@ -22,7 +22,11 @@ from .semi_implicit import SolverSemiImplicit
 from .soft import SolverSoft
 
 # Re-export from sim for backward compatibility
-from newton._src.sim import TetraSphere, create_tetra_sphere
+from newton._src.sim import (
+    TetraSphere, create_tetra_sphere,
+    TetraCylinder, create_tetra_cylinder,
+    TetraBox, create_tetra_box,
+)
 from .solver import SolverBase
 from .style3d import SolverStyle3D
 from .vbd import SolverVBD
@@ -41,5 +45,9 @@ __all__ = [
     "SolverVBD",
     "SolverXPBD",
     "TetraSphere",
+    "TetraCylinder",
+    "TetraBox",
     "create_tetra_sphere",
+    "create_tetra_cylinder",
+    "create_tetra_box",
 ]

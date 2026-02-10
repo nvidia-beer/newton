@@ -530,3 +530,148 @@ def create_plane_mesh(width, length):
     ]
 
     return (np.array(vertices, dtype=np.float32), np.array(indices, dtype=np.uint32))
+
+
+def load_tetrahedral_mesh(mesh_file: str):
+    """
+    Load a tetrahedral mesh from a .mesh file (Medit format).
+
+    This function loads tetrahedral meshes used for soft body / FEM simulation.
+    The mesh format contains both surface vertices and interior volume elements (tetrahedra),
+    enabling realistic deformation physics.
+
+    The .mesh file format (Medit format) contains:
+        MeshVersionFormatted 1
+        Dimension 3
+
+        Vertices
+        <num_vertices>
+        x1 y1 z1 ref1
+        x2 y2 z2 ref2
+        ...
+
+        Tetrahedra
+        <num_tetrahedra>
+        v1 v2 v3 v4 ref1
+        v1 v2 v3 v4 ref2
+        ...
+
+        End
+
+    Note: Vertex indices in .mesh files are 1-based and are converted to 0-based for Newton.
+
+    Args:
+        mesh_file (str): Path to the .mesh file to load.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: A tuple containing:
+            - vertices (np.ndarray): Float32 array of shape (N, 3) - vertex positions
+            - tetrahedra (np.ndarray): Int32 array of shape (M, 4) - tetrahedron vertex indices (0-based)
+
+    Raises:
+        FileNotFoundError: If the mesh file does not exist.
+        ValueError: If the mesh file format is invalid or no tetrahedra are found.
+    """
+    import os
+
+    if not os.path.exists(mesh_file):
+        raise FileNotFoundError(f"Mesh file not found: {mesh_file}")
+
+    vertices = []
+    tetrahedra = []
+
+    with open(mesh_file, "r") as f:
+        lines = f.readlines()
+
+    # Find section markers
+    vertex_start = None
+    tetra_start = None
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "Vertices":
+            vertex_start = i + 2  # Skip count line
+        elif stripped == "Tetrahedra":
+            tetra_start = i + 2  # Skip count line
+
+    # Parse vertices
+    if vertex_start is not None:
+        for i in range(vertex_start, len(lines)):
+            line = lines[i].strip()
+            if not line or line == "Tetrahedra":
+                break
+            parts = line.split()
+            if len(parts) >= 3:
+                x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+                vertices.append([x, y, z])
+
+    # Parse tetrahedra
+    if tetra_start is not None:
+        for i in range(tetra_start, len(lines)):
+            line = lines[i].strip()
+            if not line or line == "End":
+                break
+            parts = line.split()
+            if len(parts) >= 4:
+                # Convert from 1-based to 0-based indexing
+                v1, v2, v3, v4 = (
+                    int(parts[0]) - 1,
+                    int(parts[1]) - 1,
+                    int(parts[2]) - 1,
+                    int(parts[3]) - 1,
+                )
+                tetrahedra.append([v1, v2, v3, v4])
+
+    if len(tetrahedra) == 0:
+        raise ValueError("No tetrahedra found in mesh file!")
+
+    return np.array(vertices, dtype=np.float32), np.array(tetrahedra, dtype=np.int32)
+
+
+def save_tetrahedral_mesh(mesh_file: str, vertices: np.ndarray, tetrahedra: np.ndarray):
+    """
+    Save a tetrahedral mesh to a .mesh file (Medit format).
+
+    Args:
+        mesh_file (str): Path where to save the .mesh file.
+        vertices (np.ndarray): Array of shape (N, 3) - vertex positions.
+        tetrahedra (np.ndarray): Array of shape (M, 4) - tetrahedron vertex indices (0-based).
+    
+    Note:
+        Vertex indices are converted from 0-based to 1-based for the file format.
+    """
+    import os
+    
+    vertices = np.asarray(vertices, dtype=np.float32)
+    tetrahedra = np.asarray(tetrahedra, dtype=np.int32)
+    
+    if vertices.shape[1] != 3:
+        raise ValueError(f"Vertices must have shape (N, 3), got {vertices.shape}")
+    if tetrahedra.shape[1] != 4:
+        raise ValueError(f"Tetrahedra must have shape (M, 4), got {tetrahedra.shape}")
+    
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(mesh_file) if os.path.dirname(mesh_file) else '.', exist_ok=True)
+    
+    with open(mesh_file, 'w') as f:
+        # Write header
+        f.write("MeshVersionFormatted 1\n")
+        f.write("Dimension 3\n")
+        f.write("\n")
+        
+        # Write vertices
+        f.write("Vertices\n")
+        f.write(f"{len(vertices)}\n")
+        for v in vertices:
+            f.write(f"{v[0]:.17g} {v[1]:.17g} {v[2]:.17g} 1\n")
+        f.write("\n")
+        
+        # Write tetrahedra (convert to 1-based indexing)
+        f.write("Tetrahedra\n")
+        f.write(f"{len(tetrahedra)}\n")
+        for tet in tetrahedra:
+            f.write(f"{tet[0]+1} {tet[1]+1} {tet[2]+1} {tet[3]+1} 1\n")
+        f.write("\n")
+        
+        # Write end marker
+        f.write("End\n")

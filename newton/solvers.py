@@ -123,7 +123,11 @@ from ._src.solvers import (
     SolverVBD,
     SolverXPBD,
     TetraSphere,
+    TetraCylinder,
+    TetraBox,
     create_tetra_sphere,
+    create_tetra_cylinder,
+    create_tetra_box,
 )
 
 __all__ = [
@@ -138,7 +142,11 @@ __all__ = [
     "SolverVBD",
     "SolverXPBD",
     "TetraSphere",
+    "TetraCylinder",
+    "TetraBox",
     "create_tetra_sphere",
+    "create_tetra_cylinder",
+    "create_tetra_box",
 ]
 
 # solver flags

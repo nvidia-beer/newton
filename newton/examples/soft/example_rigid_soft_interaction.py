@@ -325,7 +325,10 @@ def main():
     if args.headless:
         viewer = None
     else:
-        viewer = newton.viewer.ViewerGL()
+        viewer = newton.viewer.ViewerGL(
+            width=1920,
+            height=1080,
+        )
     
     # Create and run example
     try:

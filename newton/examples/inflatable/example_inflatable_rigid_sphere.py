@@ -757,8 +757,8 @@ def main():
         else:
             try:
                 viewer = newton.viewer.ViewerGL(
-                    width=1024,
-                    height=768,
+                    width=1920,
+                    height=1080,
                 )
             except Exception as e:
                 print(f"Could not create OpenGL viewer: {e}")

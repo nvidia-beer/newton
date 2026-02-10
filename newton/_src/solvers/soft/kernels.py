@@ -787,3 +787,171 @@ def eval_soft_contacts(
         
         # Accumulate force atomically
         wp.atomic_add(f, particle_idx, force)
+
+
+@wp.kernel
+def solve_soft_contacts_constraint(
+    particle_x: wp.array(dtype=wp.vec3),
+    particle_v: wp.array(dtype=wp.vec3),
+    particle_invmass: wp.array(dtype=float),
+    particle_radius: wp.array(dtype=float),
+    particle_flags: wp.array(dtype=wp.int32),
+    body_q: wp.array(dtype=wp.transform),
+    body_qd: wp.array(dtype=wp.spatial_vector),
+    body_com: wp.array(dtype=wp.vec3),
+    body_m_inv: wp.array(dtype=float),
+    body_I_inv: wp.array(dtype=wp.mat33),
+    shape_body: wp.array(dtype=int),
+    shape_material_mu: wp.array(dtype=float),
+    particle_mu: float,
+    particle_ka: float,
+    soft_contact_count: wp.array(dtype=wp.int32),
+    soft_contact_particle: wp.array(dtype=int),
+    soft_contact_shape: wp.array(dtype=int),
+    soft_contact_body_pos: wp.array(dtype=wp.vec3),
+    soft_contact_body_vel: wp.array(dtype=wp.vec3),
+    soft_contact_normal: wp.array(dtype=wp.vec3),
+    contact_max: int,
+    dt: float,
+    relaxation: float,
+    # outputs
+    delta: wp.array(dtype=wp.vec3),
+    body_delta: wp.array(dtype=wp.spatial_vector),
+):
+    """Constraint-based soft-rigid contact solver (prevents penetration!).
+    
+    Similar to XPBD's solve_particle_shape_contacts, but designed for SolverSoft.
+    This applies position corrections to prevent penetration, making it preventive
+    rather than reactive like eval_soft_contacts.
+    
+    Key differences from eval_soft_contacts:
+    - Preventive: applies corrections when c < particle_ka (before deep penetration)
+    - Constraint-based: applies position deltas, not forces
+    - Handles body transforms and velocities properly
+    """
+    tid = wp.tid()
+    
+    count = min(contact_max, soft_contact_count[0])
+    if tid >= count:
+        return
+    
+    shape_index = soft_contact_shape[tid]
+    body_index = shape_body[shape_index]
+    particle_index = soft_contact_particle[tid]
+    
+    if (particle_flags[particle_index] & 1) == 0:  # PARTICLE_FLAG_ACTIVE = 1
+        return
+    
+    px = particle_x[particle_index]
+    pv = particle_v[particle_index]
+    
+    # Get body transform (identity if static/ground)
+    X_wb = wp.transform_identity()
+    X_com = wp.vec3()
+    
+    if body_index >= 0:
+        X_wb = body_q[body_index]
+        X_com = body_com[body_index]
+    
+    # Body position in world space
+    bx = wp.transform_point(X_wb, soft_contact_body_pos[tid])
+    r = bx - wp.transform_point(X_wb, X_com)
+    
+    n = soft_contact_normal[tid]
+    c = wp.dot(n, px - bx) - particle_radius[particle_index]
+    
+    # Preventive: apply constraint when c < particle_ka (before deep penetration)
+    if c > particle_ka:
+        return
+    
+    # Take average material properties
+    mu = 0.5 * (particle_mu + shape_material_mu[shape_index])
+    
+    # Body velocity
+    body_v_s = wp.spatial_vector()
+    if body_index >= 0:
+        body_v_s = body_qd[body_index]
+    
+    body_w = wp.spatial_bottom(body_v_s)
+    body_v = wp.spatial_top(body_v_s)
+    
+    # Compute body velocity at particle position
+    bv = body_v + wp.cross(body_w, r) + wp.transform_vector(X_wb, soft_contact_body_vel[tid])
+    
+    # Relative velocity
+    v = pv - bv
+    
+    # Normal constraint
+    lambda_n = c  # Negative when penetrating
+    delta_n = n * lambda_n
+    
+    # Friction constraint
+    vn = wp.dot(n, v)
+    vt = v - n * vn
+    
+    # Compute inverse masses
+    w1 = particle_invmass[particle_index]
+    w2 = 0.0
+    if body_index >= 0:
+        angular = wp.cross(r, n)
+        q = wp.transform_get_rotation(X_wb)
+        rot_angular = wp.quat_rotate_inv(q, angular)
+        I_inv = body_I_inv[body_index]
+        w2 = body_m_inv[body_index] + wp.dot(rot_angular, I_inv * rot_angular)
+    denom = w1 + w2
+    if denom == 0.0:
+        return
+    
+    # Friction constraint
+    lambda_f = wp.max(mu * lambda_n, -wp.length(vt) * dt)
+    if wp.length(vt) > 1e-6:
+        delta_f = wp.normalize(vt) * lambda_f
+    else:
+        delta_f = wp.vec3(0.0)
+    
+    # Total constraint correction (friction opposes motion, normal pushes away)
+    delta_total = (delta_f - delta_n) / denom * relaxation
+    
+    # Apply correction weighted by inverse mass
+    wp.atomic_add(delta, particle_index, w1 * delta_total)
+    
+    # Apply reaction to body (if not static)
+    if body_index >= 0:
+        delta_t = wp.cross(r, delta_total)
+        wp.atomic_sub(body_delta, body_index, wp.spatial_vector(delta_total, delta_t))
+
+
+@wp.kernel
+def apply_particle_corrections(
+    x_orig: wp.array(dtype=wp.vec3),
+    x_current: wp.array(dtype=wp.vec3),
+    delta: wp.array(dtype=wp.vec3),
+    particle_flags: wp.array(dtype=wp.int32),
+    dt: float,
+    v_max: float,
+    x_out: wp.array(dtype=wp.vec3),
+    v_out: wp.array(dtype=wp.vec3),
+):
+    """Apply constraint corrections to particle positions and update velocities.
+    
+    Similar to XPBD's apply_particle_deltas, but simpler for SolverSoft.
+    """
+    tid = wp.tid()
+    if (particle_flags[tid] & PARTICLE_FLAG_ACTIVE) == 0:
+        return
+    
+    x0 = x_orig[tid]
+    xp = x_current[tid]
+    d = delta[tid]
+    
+    # Apply correction
+    x_new = xp + d
+    v_new = (x_new - x0) / dt
+    
+    # Enforce velocity limit to prevent instability
+    v_new_mag = wp.length(v_new)
+    if v_new_mag > v_max:
+        v_new *= v_max / v_new_mag
+    
+    x_out[tid] = x_new
+    v_out[tid] = v_new

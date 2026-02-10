@@ -14,14 +14,14 @@
 # limitations under the License.
 
 """
-Inflatable Table - Four Independently Inflatable Soft Bodies
+Inflatable Table - Four Independently Inflatable Soft Body Boxes
 
-Demonstrates four inflatable soft bodies at each corner of a rigid plate,
-each with INDEPENDENT pressure control. Press 1-4 to select a ball,
-then I/K to inflate/deflate that specific ball.
+Demonstrates four inflatable soft body boxes at each corner of a rigid plate,
+each with INDEPENDENT pressure control. Press 1-4 to select a box,
+then I/K to inflate/deflate that specific box.
 
 This combines:
-- Per-ball inflation via FEM rest configuration scaling
+- Per-box inflation via FEM rest configuration scaling
 - Rigid body physics with XPBD solver
 - Multiple soft-rigid contact interactions
 
@@ -35,7 +35,7 @@ import numpy as np
 import argparse
 
 import newton
-from newton.solvers import SolverInflatable, SolverXPBD, TetraSphere
+from newton.solvers import SolverInflatable, SolverXPBD, TetraBox
 
 
 # Warp kernels for per-range scaling
@@ -77,25 +77,24 @@ def scale_tet_range_kernel(
 
 # Colors (RGB tuples)
 COLOR_GREY_TRANSPARENT = (0.6, 0.6, 0.6)  # Rigid plate wireframe (grey)
-COLOR_PARTICLE_SELECTED = (0.3, 0.6, 1.0) # Light blue particles for selected ball
+COLOR_PARTICLE_SELECTED = (0.3, 0.6, 1.0) # Light blue particles for selected box
 
 
 class Example:
     """
-    Inflatable table with four INDEPENDENTLY inflatable soft bodies at corners.
+    Inflatable table with four INDEPENDENTLY inflatable soft body boxes at corners.
     
-    Each ball can be inflated/deflated separately using keyboard controls.
+    Each box can be inflated/deflated separately using keyboard controls.
     """
     
     def __init__(
         self,
         viewer,
-        radius: float = 0.25,
-        subdivisions: int = 2,
-        interior_layers: int = 2,
+        size=(0.25, 0.25, 0.25),  # Box size (width, height, depth)
+        segments=(3, 3, 3),  # Box segments per axis
         soft_mass: float = 1.0,
         rigid_width: float = 3.0,
-        rigid_mass: float = 0.004,
+        rigid_mass: float = 0.001,
         particle_radius: float = 0.03,
         k_mu: float = 1.0e5,
         k_lambda: float = 1.0e5,
@@ -111,26 +110,28 @@ class Example:
         self.substeps = substeps
         self.sim_dt = self.frame_dt / substeps
         self.sim_time = 0.0
-        self.radius = radius
+        if isinstance(size, (int, float)):
+            self.size = (float(size), float(size), float(size))
+        else:
+            self.size = tuple(float(s) for s in size)
         self.max_pressure = max_pressure
         self.particle_radius = particle_radius
         
         self.viewer = viewer
         
-        # Per-ball state - initialize BEFORE any method calls
-        self.selected_ball = 0  # Currently selected ball (0-3)
-        self.ball_pressures = [1.0, 1.0, 1.0, 1.0]  # Per-ball pressure
+        # Per-box state - initialize BEFORE any method calls
+        self.selected_ball = 0  # Currently selected box (0-3)
+        self.ball_pressures = [1.0, 1.0, 1.0, 1.0]  # Per-box pressure
         self.pressure_step = 0.1
         
-        # Generate FEM sphere mesh
-        print(f"\n🎈 Generating tetrahedral sphere mesh...", flush=True)
-        sphere = TetraSphere(
-            radius=radius,
-            subdivisions=subdivisions,
-            interior_layers=interior_layers,
+        # Generate FEM box mesh
+        print(f"\n📦 Generating tetrahedral box mesh...", flush=True)
+        box = TetraBox(
+            size=self.size,
+            segments=segments,
             verbose=True
         )
-        mesh_data = sphere.get_mesh_data()
+        mesh_data = box.get_mesh_data()
         
         vertices = mesh_data['vertices']
         indices = mesh_data['indices']
@@ -154,24 +155,25 @@ class Example:
         mesh_max_z = vertices_np[:, 2].max()
         
         soft_offset = -mesh_min_z + particle_radius
-        soft_sphere_top = mesh_max_z + soft_offset
+        soft_box_top = mesh_max_z + soft_offset
         
         rigid_height = rigid_width / 50.0
         rigid_half_width = rigid_width / 2.0
         rigid_half_height = rigid_height / 2.0
-        rigid_z = soft_sphere_top + rigid_half_height + particle_radius
+        rigid_z = soft_box_top + rigid_half_height + particle_radius
         
         # Store for wireframe rendering
         self.rigid_half_width = rigid_half_width
         self.rigid_half_height = rigid_half_height
         
-        # Corner positions
-        corner_offset = rigid_half_width - radius * 2.0
+        # Corner positions - use box width instead of radius
+        box_width = self.size[0]  # Use width dimension
+        corner_offset = rigid_half_width - box_width * 1.5
         corner_positions = [
-            ( corner_offset,  corner_offset),  # Ball 1
-            ( corner_offset, -corner_offset),  # Ball 2
-            (-corner_offset,  corner_offset),  # Ball 3
-            (-corner_offset, -corner_offset),  # Ball 4
+            ( corner_offset,  corner_offset),  # Box 1
+            ( corner_offset, -corner_offset),  # Box 2
+            (-corner_offset,  corner_offset),  # Box 3
+            (-corner_offset, -corner_offset),  # Box 4
         ]
         
         print(f"\n📐 Positioning:", flush=True)
@@ -191,15 +193,15 @@ class Example:
             hy=rigid_half_width,
             hz=rigid_half_height,
             cfg=newton.ModelBuilder.ShapeConfig(
-                ke=5e5, kd=100.0, kf=1e4, mu=0.5,
+                ke=5e5, kd=500.0, kf=1e5, mu=5.0,  # Very high friction to prevent sliding
                 density=rigid_mass / box_volume,
             )
         )
         
         self.initial_rigid_z = rigid_z
         
-        # Add four soft spheres - track ranges for each
-        print(f"\n🎈 Adding 4 inflatable soft spheres...", flush=True)
+        # Add four soft boxes - track ranges for each
+        print(f"\n📦 Adding 4 inflatable soft boxes...", flush=True)
         
         self.soft_start_particles = []
         self.soft_particle_counts = []
@@ -210,7 +212,7 @@ class Example:
         
         for i, (cx, cy) in enumerate(corner_positions):
             color_name = ["Red", "Green", "Blue", "Yellow"][i]
-            print(f"   Ball {i+1} ({color_name}): ({cx:.2f}, {cy:.2f})", flush=True)
+            print(f"   Box {i+1} ({color_name}): ({cx:.2f}, {cy:.2f})", flush=True)
             
             positioned_vertices = [(v[0] + cx, v[1] + cy, v[2] + soft_offset) for v in vertices]
             
@@ -274,16 +276,16 @@ class Example:
         
         print(f"\nModel: {self.model.particle_count} particles, {self.model.tet_count} tets, {self.model.spring_count} springs", flush=True)
         
-        # Store ORIGINAL rest configurations for per-ball scaling
+        # Store ORIGINAL rest configurations for per-box scaling
         self.original_tet_poses = wp.clone(self.model.tet_poses)
         self.original_spring_rest_length = wp.clone(self.model.spring_rest_length)
         
         # Set physics parameters
         self.model.gravity = wp.array([wp.vec3(0.0, 0.0, -gravity)], dtype=wp.vec3, device=self.model.device)
         self.model.soft_contact_ke = 1.0e4
-        self.model.soft_contact_kd = 500.0
-        self.model.soft_contact_kf = 1.0e4
-        self.model.soft_contact_mu = 0.5
+        self.model.soft_contact_kd = 2000.0  # Increased damping for better friction response
+        self.model.soft_contact_kf = 1.0e5  # Very high friction stiffness to prevent sliding
+        self.model.soft_contact_mu = 5.0  # Very high friction coefficient to prevent sliding
         self.model.particle_ke = 1.0e5
         self.model.particle_kd = 1.0
         
@@ -342,27 +344,27 @@ class Example:
             if hasattr(self.viewer, 'renderer') and hasattr(self.viewer.renderer, 'register_key_press'):
                 self.viewer.renderer.register_key_press(self._on_key_press)
         
-        print(f"\n🎈 Inflatable Table Ready!", flush=True)
-        print(f"   Solid mesh for soft bodies, particles for selected ball", flush=True)
+        print(f"\n📦 Inflatable Table Ready!", flush=True)
+        print(f"   Solid mesh for soft bodies, particles for selected box", flush=True)
         print(f"   Grey wireframe plate (transparent effect)", flush=True)
         print(f"\n   Keyboard Controls:", flush=True)
-        print(f"   [1-4]          - Select ball (shows its particles)", flush=True)
-        print(f"   [I] or [=]     - Inflate SELECTED ball", flush=True)
-        print(f"   [K] or [-]     - Deflate SELECTED ball", flush=True)
-        print(f"   [A]            - Inflate ALL balls", flush=True)
-        print(f"   [Z]            - Deflate ALL balls", flush=True)
+        print(f"   [1-4]          - Select box (shows its particles)", flush=True)
+        print(f"   [I] or [=]     - Inflate SELECTED box", flush=True)
+        print(f"   [K] or [-]     - Deflate SELECTED box", flush=True)
+        print(f"   [A]            - Inflate ALL boxes", flush=True)
+        print(f"   [Z]            - Deflate ALL boxes", flush=True)
         print(f"   [O]            - Reset ALL to original size", flush=True)
         print(f"   [F]            - Toggle wireframe mode", flush=True)
     
     def _init_particle_colors(self):
-        """Initialize particle colors - only selected ball shows particles."""
+        """Initialize particle colors - only selected box shows particles."""
         self._update_particle_colors()
     
     def _update_particle_colors(self):
-        """Update particle colors - only show particles for selected ball."""
+        """Update particle colors - only show particles for selected box."""
         colors_np = np.zeros((self.model.particle_count, 3), dtype=np.float32)
         
-        # Only color the selected ball's particles
+        # Only color the selected box's particles
         start = self.soft_start_particles[self.selected_ball]
         count = self.soft_particle_counts[self.selected_ball]
         colors_np[start:start+count] = COLOR_PARTICLE_SELECTED
@@ -375,10 +377,10 @@ class Example:
         self.particle_radii_array = wp.array(self.particle_radii, dtype=wp.float32, device=self.model.device)
     
     def _apply_ball_pressure(self, ball_idx: int, pressure: float):
-        """Apply pressure to a specific ball by scaling its rest configuration."""
+        """Apply pressure to a specific box by scaling its rest configuration."""
         linear_scale = float(np.cbrt(pressure))
         
-        # Scale tetrahedra for this ball
+        # Scale tetrahedra for this box
         start_tet = self.soft_start_tets[ball_idx]
         tet_count = self.soft_tet_counts[ball_idx]
         
@@ -396,7 +398,7 @@ class Example:
                 device=self.model.device,
             )
         
-        # Scale springs for this ball
+        # Scale springs for this box
         start_spring = self.soft_start_springs[ball_idx]
         spring_count = self.soft_spring_counts[ball_idx]
         
@@ -415,60 +417,60 @@ class Example:
             )
     
     def _apply_all_pressures(self):
-        """Apply current pressure settings to all balls."""
+        """Apply current pressure settings to all boxes."""
         for ball_idx in range(4):
             self._apply_ball_pressure(ball_idx, self.ball_pressures[ball_idx])
     
     def _on_key_press(self, symbol, modifiers):
-        """Handle keyboard input for per-ball pressure control."""
+        """Handle keyboard input for per-box pressure control."""
         KEY_1, KEY_2, KEY_3, KEY_4 = 49, 50, 51, 52
         KEY_A, KEY_Z = 97, 122
         KEY_I, KEY_K, KEY_O, KEY_F = 105, 107, 111, 102
         KEY_EQUAL, KEY_MINUS = 61, 45
         
-        # Ball selection
+        # Box selection
         if symbol == KEY_1:
             self.selected_ball = 0
             self._update_particle_colors()
-            print(f"   [Selected: Ball 1 (Red) - pressure: {self.ball_pressures[0]:.2f}x]", flush=True)
+            print(f"   [Selected: Box 1 (Red) - pressure: {self.ball_pressures[0]:.2f}x]", flush=True)
         elif symbol == KEY_2:
             self.selected_ball = 1
             self._update_particle_colors()
-            print(f"   [Selected: Ball 2 (Green) - pressure: {self.ball_pressures[1]:.2f}x]", flush=True)
+            print(f"   [Selected: Box 2 (Green) - pressure: {self.ball_pressures[1]:.2f}x]", flush=True)
         elif symbol == KEY_3:
             self.selected_ball = 2
             self._update_particle_colors()
-            print(f"   [Selected: Ball 3 (Blue) - pressure: {self.ball_pressures[2]:.2f}x]", flush=True)
+            print(f"   [Selected: Box 3 (Blue) - pressure: {self.ball_pressures[2]:.2f}x]", flush=True)
         elif symbol == KEY_4:
             self.selected_ball = 3
             self._update_particle_colors()
-            print(f"   [Selected: Ball 4 (Yellow) - pressure: {self.ball_pressures[3]:.2f}x]", flush=True)
+            print(f"   [Selected: Box 4 (Yellow) - pressure: {self.ball_pressures[3]:.2f}x]", flush=True)
         
-        # Inflate/deflate SELECTED ball
+        # Inflate/deflate SELECTED box
         elif symbol in (KEY_I, KEY_EQUAL):
             ball = self.selected_ball
             self.ball_pressures[ball] = min(self.max_pressure, self.ball_pressures[ball] + self.pressure_step)
             self._apply_ball_pressure(ball, self.ball_pressures[ball])
             name = ["Red", "Green", "Blue", "Yellow"][ball]
-            print(f"   [Ball {ball+1} ({name}): {self.ball_pressures[ball]:.2f}x]", flush=True)
+            print(f"   [Box {ball+1} ({name}): {self.ball_pressures[ball]:.2f}x]", flush=True)
         elif symbol in (KEY_K, KEY_MINUS):
             ball = self.selected_ball
             self.ball_pressures[ball] = max(0.5, self.ball_pressures[ball] - self.pressure_step)
             self._apply_ball_pressure(ball, self.ball_pressures[ball])
             name = ["Red", "Green", "Blue", "Yellow"][ball]
-            print(f"   [Ball {ball+1} ({name}): {self.ball_pressures[ball]:.2f}x]", flush=True)
+            print(f"   [Box {ball+1} ({name}): {self.ball_pressures[ball]:.2f}x]", flush=True)
         
-        # Inflate/deflate ALL balls
+        # Inflate/deflate ALL boxes
         elif symbol == KEY_A:
             for i in range(4):
                 self.ball_pressures[i] = min(self.max_pressure, self.ball_pressures[i] + self.pressure_step)
             self._apply_all_pressures()
-            print(f"   [ALL balls: {self.ball_pressures}]", flush=True)
+            print(f"   [ALL boxes: {self.ball_pressures}]", flush=True)
         elif symbol == KEY_Z:
             for i in range(4):
                 self.ball_pressures[i] = max(0.5, self.ball_pressures[i] - self.pressure_step)
             self._apply_all_pressures()
-            print(f"   [ALL balls: {self.ball_pressures}]", flush=True)
+            print(f"   [ALL boxes: {self.ball_pressures}]", flush=True)
         
         # Reset ALL
         elif symbol == KEY_O:
@@ -505,20 +507,20 @@ class Example:
             ball = self.selected_ball
             self.ball_pressures[ball] = min(self.max_pressure, self.ball_pressures[ball] + self.pressure_step)
             self._apply_ball_pressure(ball, self.ball_pressures[ball])
-            print(f"   [Ball {ball+1}: {self.ball_pressures[ball]:.2f}x]", flush=True)
+            print(f"   [Box {ball+1}: {self.ball_pressures[ball]:.2f}x]", flush=True)
             self._key_cooldown = 10
         elif renderer.is_key_down(KEY_K) or renderer.is_key_down(KEY_MINUS):
             ball = self.selected_ball
             self.ball_pressures[ball] = max(0.5, self.ball_pressures[ball] - self.pressure_step)
             self._apply_ball_pressure(ball, self.ball_pressures[ball])
-            print(f"   [Ball {ball+1}: {self.ball_pressures[ball]:.2f}x]", flush=True)
+            print(f"   [Box {ball+1}: {self.ball_pressures[ball]:.2f}x]", flush=True)
             self._key_cooldown = 10
     
     def step(self):
         """Run one frame of simulation."""
         self._check_keys()
         
-        # Note: We apply per-ball pressures directly to model arrays,
+        # Note: We apply per-box pressures directly to model arrays,
         # so we don't use soft_solver.set_pressure() anymore
         
         for _ in range(self.substeps):
@@ -576,7 +578,7 @@ class Example:
                 backface_culling=False,
             )
         
-        # Render particles ONLY for selected ball
+        # Render particles ONLY for selected box
         if self.model.particle_count and hasattr(self, 'particle_radii_array'):
             self.viewer.log_points(
                 name="/model/particles",
@@ -644,9 +646,9 @@ class Example:
     
     def run(self, num_frames: int = 600):
         """Run simulation loop."""
-        print(f"\n🎈 Starting inflatable table demo...", flush=True)
-        print(f"   Solid mesh + particles for selected ball, wireframe plate!", flush=True)
-        print(f"   Press 1-4 to select balls, I/K to inflate/deflate!", flush=True)
+        print(f"\n📦 Starting inflatable table demo...", flush=True)
+        print(f"   Solid mesh + particles for selected box, wireframe plate!", flush=True)
+        print(f"   Press 1-4 to select boxes, I/K to inflate/deflate!", flush=True)
         
         for frame in range(num_frames):
             self.step()
@@ -659,23 +661,24 @@ class Example:
             
             if frame % 60 == 0:
                 name = ["Red", "Green", "Blue", "Yellow"][self.selected_ball]
-                print(f"   Frame {frame}: selected=Ball {self.selected_ball+1} ({name}), "
+                print(f"   Frame {frame}: selected=Box {self.selected_ball+1} ({name}), "
                       f"pressures={[f'{p:.1f}' for p in self.ball_pressures]}, "
                       f"plate_z={rigid_height:.3f}m", flush=True)
         
-        print(f"\n🎈 Simulation complete!", flush=True)
+        print(f"\n📦 Simulation complete!", flush=True)
         print(f"   Max plate height: {self.max_rigid_height:.3f}m", flush=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description='Inflatable Table - Per-Ball Inflation')
     
-    parser.add_argument('--radius', type=float, default=0.25)
-    parser.add_argument('--subdivisions', type=int, default=2)
-    parser.add_argument('--interior_layers', type=int, default=2)
+    parser.add_argument('--size', type=float, nargs=3, default=[0.25, 0.25, 0.25],
+                        help='Box size (width, height, depth) (default: 0.25 0.25 0.25)')
+    parser.add_argument('--segments', type=int, nargs=3, default=[3, 3, 3],
+                        help='Box segments per axis (default: 3 3 3)')
     parser.add_argument('--soft_mass', type=float, default=1.0)
     parser.add_argument('--rigid_width', type=float, default=3.0)
-    parser.add_argument('--rigid_mass', type=float, default=0.004)
+    parser.add_argument('--rigid_mass', type=float, default=0.001)
     parser.add_argument('--particle_radius', type=float, default=0.03)
     parser.add_argument('--k_mu', type=float, default=5.0e4)
     parser.add_argument('--k_lambda', type=float, default=5.0e4)
@@ -698,16 +701,15 @@ def main():
             viewer = None
         else:
             try:
-                viewer = newton.viewer.ViewerGL(width=1024, height=768)
+                viewer = newton.viewer.ViewerGL(width=1920, height=1080)
             except Exception as e:
                 print(f"Could not create viewer: {e}")
                 viewer = None
         
         example = Example(
             viewer=viewer,
-            radius=args.radius,
-            subdivisions=args.subdivisions,
-            interior_layers=args.interior_layers,
+            size=args.size,
+            segments=args.segments,
             soft_mass=args.soft_mass,
             rigid_width=args.rigid_width,
             rigid_mass=args.rigid_mass,

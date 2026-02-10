@@ -31,6 +31,8 @@ from .model import Model, ModelAttributeAssignment, ModelAttributeFrequency
 from .state import State
 from .style3d import Style3DModel, Style3DModelBuilder
 from .tetra_sphere import TetraSphere, create_tetra_sphere
+from .tetra_cylinder import TetraCylinder, create_tetra_cylinder
+from .tetra_box import TetraBox, create_tetra_box
 
 __all__ = [
     "JOINT_LIMIT_UNLIMITED",
@@ -49,9 +51,13 @@ __all__ = [
     "Style3DModel",
     "Style3DModelBuilder",
     "TetraSphere",
+    "TetraCylinder",
+    "TetraBox",
     "color_graph",
     "count_rigid_contact_points",
     "create_tetra_sphere",
+    "create_tetra_cylinder",
+    "create_tetra_box",
     "eval_fk",
     "eval_ik",
     "get_joint_dof_count",

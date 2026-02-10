@@ -28,6 +28,8 @@ from .kernels import (
     eval_triangles_contact,
     eval_gravity,
     eval_soft_contacts,
+    solve_soft_contacts_constraint,
+    apply_particle_corrections,
     update_state,
     eval_barycentric_constraints,
     clear_barycentric_constraints,
@@ -80,12 +82,18 @@ class SolverSoft(SolverBase):
         mass: float = 1.0,
         preconditioner_type: str = "id",
         solver_type: str = "bicgstab",
+        use_constraint_contacts: bool = False,
+        contact_relaxation: float = 0.9,
     ):
         super().__init__(model=model)
         
         self.friction_smoothing = 2.0
         self.mass = mass
         self.Minv = 1.0 / self.mass
+        
+        # Constraint-based contact settings (like XPBD)
+        self.use_constraint_contacts = use_constraint_contacts
+        self.contact_relaxation = contact_relaxation
         
         # Pre-allocate arrays for BSR matrix construction
         num_blocks = model.spring_count * 4  # Each edge contributes 4 blocks
@@ -548,6 +556,10 @@ class SolverSoft(SolverBase):
         # Implicit integration
         self.implicit_integration(model, state_in, state_out, dt)
         
+        # Apply constraint-based contact corrections (like XPBD) if enabled
+        if self.use_constraint_contacts and contacts is not None:
+            self.apply_constraint_contact_corrections(model, state_in, state_out, contacts, dt)
+        
         if self._debug_step_count <= 3:
             import numpy as np
             pos_out = state_out.particle_q.numpy()
@@ -565,4 +577,93 @@ class SolverSoft(SolverBase):
             model.gravity = original_gravity
         
         return state_out
+    
+    def apply_constraint_contact_corrections(
+        self, model: Model, state_in: State, state_out: State, contacts: Contacts, dt: float
+    ):
+        """Apply constraint-based contact corrections (like XPBD) to prevent penetration.
+        
+        This method applies position corrections after integration to prevent particles
+        from penetrating rigid shapes. It's similar to XPBD's constraint-based approach
+        but works with SolverSoft's force-based integration.
+        
+        Args:
+            model: The physics model
+            state_in: Input state (before integration)
+            state_out: Output state (after integration, will be corrected)
+            contacts: Contact information from collision detection
+            dt: Timestep
+        """
+        if not hasattr(contacts, 'soft_contact_count'):
+            return
+        
+        contact_count = int(contacts.soft_contact_count.numpy()[0])
+        if contact_count == 0:
+            return
+        
+        # Allocate arrays for constraint corrections
+        particle_deltas = wp.zeros(
+            model.particle_count, dtype=wp.vec3, device=model.device
+        )
+        body_deltas = None
+        if model.body_count > 0:
+            body_deltas = wp.zeros(
+                model.body_count, dtype=wp.spatial_vector, device=model.device
+            )
+        
+        # Apply constraint corrections iteratively (like XPBD)
+        for iteration in range(2):  # Standard 2 iterations
+            particle_deltas.zero_()
+            if body_deltas is not None:
+                body_deltas.zero_()
+            
+            # Solve constraint corrections
+            wp.launch(
+                kernel=solve_soft_contacts_constraint,
+                dim=contacts.soft_contact_max,
+                inputs=[
+                    state_out.particle_q,  # Current integrated state
+                    state_out.particle_qd,
+                    model.particle_inv_mass,
+                    model.particle_radius,
+                    model.particle_flags,
+                    state_out.body_q,
+                    state_out.body_qd,
+                    model.body_com,
+                    model.body_inv_mass,
+                    model.body_inv_inertia,
+                    model.shape_body,
+                    model.shape_material_mu,
+                    model.soft_contact_mu,
+                    model.particle_adhesion,
+                    contacts.soft_contact_count,
+                    contacts.soft_contact_particle,
+                    contacts.soft_contact_shape,
+                    contacts.soft_contact_body_pos,
+                    contacts.soft_contact_body_vel,
+                    contacts.soft_contact_normal,
+                    contacts.soft_contact_max,
+                    dt,
+                    self.contact_relaxation,
+                ],
+                outputs=[particle_deltas, body_deltas] if body_deltas is not None else [particle_deltas],
+                device=model.device,
+            )
+            
+            # Apply position corrections directly
+            # Simple correction: x_new = x_old + delta, v_new = (x_new - x_orig) / dt
+            wp.launch(
+                kernel=apply_particle_corrections,
+                dim=model.particle_count,
+                inputs=[
+                    state_in.particle_q,  # Original state before integration
+                    state_out.particle_q,  # Current integrated state
+                    particle_deltas,
+                    model.particle_flags,
+                    dt,
+                    model.particle_max_velocity,
+                ],
+                outputs=[state_out.particle_q, state_out.particle_qd],
+                device=model.device,
+            )
 
