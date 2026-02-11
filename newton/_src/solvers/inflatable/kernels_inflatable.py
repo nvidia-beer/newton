@@ -16,10 +16,12 @@
 """
 Warp kernels for inflatable soft body simulation.
 
-These kernels implement the rest configuration scaling approach for inflation:
-- Scale spring rest lengths for inflation
-- Scale tetrahedra rest poses (Dm_inv) for inflation
-- Compute volume from tetrahedra
+Rest-configuration scaling for inflation:
+- **Isotropic**: scale_spring_rest_lengths_kernel, scale_tet_poses_kernel (single scale).
+- **Anisotropic**: scale_tet_poses_anisotropic_kernel (per-axis scale; single pressure).
+- **Per-chamber**: scale_tet_poses_per_chamber_anisotropic_kernel, scale_spring_rest_lengths_per_chamber_kernel
+  (each tet/spring uses its chamber's pressure and optional anisotropy).
+- **Volume**: compute_volume_kernel for current volume from tetrahedra.
 """
 
 import warp as wp
@@ -82,6 +84,90 @@ def scale_tet_poses_kernel(
         orig[1, 0] * inv_scale, orig[1, 1] * inv_scale, orig[1, 2] * inv_scale,
         orig[2, 0] * inv_scale, orig[2, 1] * inv_scale, orig[2, 2] * inv_scale
     )
+
+
+@wp.kernel
+def scale_tet_poses_anisotropic_kernel(
+    original_poses: wp.array(dtype=wp.mat33),
+    inv_scale_x: wp.float32,
+    inv_scale_y: wp.float32,
+    inv_scale_z: wp.float32,
+    scaled_poses: wp.array(dtype=wp.mat33),
+):
+    """
+    Scale tetrahedra rest poses (Dm_inv) anisotropically per axis.
+    
+    Column 0 of Dm_inv is scaled by inv_scale_x, column 1 by inv_scale_y, column 2 by inv_scale_z.
+    This produces different expansion along X, Y, Z (e.g. elongate more in Z for chamber inflation).
+    
+    Parameters
+    ----------
+    original_poses : array
+        Original (unscaled) rest poses (Dm_inv matrices)
+    inv_scale_x, inv_scale_y, inv_scale_z : float
+        Inverse linear scale per axis (1/scale for each direction)
+    scaled_poses : array (output)
+        Scaled rest poses
+    """
+    tid = wp.tid()
+    orig = original_poses[tid]
+    # Scale column 0 by inv_scale_x, column 1 by inv_scale_y, column 2 by inv_scale_z
+    scaled_poses[tid] = wp.mat33(
+        orig[0, 0] * inv_scale_x, orig[0, 1] * inv_scale_y, orig[0, 2] * inv_scale_z,
+        orig[1, 0] * inv_scale_x, orig[1, 1] * inv_scale_y, orig[1, 2] * inv_scale_z,
+        orig[2, 0] * inv_scale_x, orig[2, 1] * inv_scale_y, orig[2, 2] * inv_scale_z,
+    )
+
+
+@wp.kernel
+def scale_tet_poses_per_chamber_anisotropic_kernel(
+    original_poses: wp.array(dtype=wp.mat33),
+    tet_chamber_mask: wp.array(dtype=wp.int32),
+    chamber_pressures: wp.array(dtype=wp.float32),
+    num_chambers: int,
+    anisotropy_x: wp.float32,
+    anisotropy_y: wp.float32,
+    anisotropy_z: wp.float32,
+    scaled_poses: wp.array(dtype=wp.mat33),
+):
+    """
+    Scale tetrahedra rest poses per chamber with anisotropy.
+    Each tet is assigned to a chamber; its rest pose is scaled by that chamber's
+    pressure and global anisotropy. Chambers are spatially separate (e.g. slices along Z).
+    """
+    tid = wp.tid()
+    c = tet_chamber_mask[tid]
+    c = wp.max(0, wp.min(c, num_chambers - 1))
+    pressure = chamber_pressures[c]
+    pressure = wp.max(1.0e-6, wp.min(pressure, 100.0))
+    linear_scale = wp.cbrt(pressure)
+    inv_scale_x = 1.0 / (linear_scale * anisotropy_x)
+    inv_scale_y = 1.0 / (linear_scale * anisotropy_y)
+    inv_scale_z = 1.0 / (linear_scale * anisotropy_z)
+    orig = original_poses[tid]
+    scaled_poses[tid] = wp.mat33(
+        orig[0, 0] * inv_scale_x, orig[0, 1] * inv_scale_y, orig[0, 2] * inv_scale_z,
+        orig[1, 0] * inv_scale_x, orig[1, 1] * inv_scale_y, orig[1, 2] * inv_scale_z,
+        orig[2, 0] * inv_scale_x, orig[2, 1] * inv_scale_y, orig[2, 2] * inv_scale_z,
+    )
+
+
+@wp.kernel
+def scale_spring_rest_lengths_per_chamber_kernel(
+    original_rest_lengths: wp.array(dtype=wp.float32),
+    spring_chamber_mask: wp.array(dtype=wp.int32),
+    chamber_pressures: wp.array(dtype=wp.float32),
+    num_chambers: int,
+    scaled_rest_lengths: wp.array(dtype=wp.float32),
+):
+    """Scale spring rest lengths per chamber (isotropic scale per spring from its chamber pressure)."""
+    sid = wp.tid()
+    c = spring_chamber_mask[sid]
+    c = wp.max(0, wp.min(c, num_chambers - 1))
+    pressure = chamber_pressures[c]
+    pressure = wp.max(1.0e-6, wp.min(pressure, 100.0))
+    scale = wp.cbrt(pressure)
+    scaled_rest_lengths[sid] = original_rest_lengths[sid] * scale
 
 
 @wp.kernel

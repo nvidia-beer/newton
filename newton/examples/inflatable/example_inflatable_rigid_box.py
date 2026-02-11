@@ -65,7 +65,7 @@ class Example:
         viewer,
         solver_type: str = "xpbd",  # "xpbd" or "mujoco"
         size=(0.3, 0.3, 0.3),  # Box size (width, height, depth)
-        segments=(3, 3, 3),  # Box segments per axis
+        subdivisions=(3, 3, 3),  # Subdivisions per axis
         soft_mass: float = 1.0,
         rigid_width: float = 3.0,     # Rigid box width/length (5x soft body diameter)
         rigid_mass: float = 0.01,     # Light plate (10 grams, was 1g - better for MuJoCo)
@@ -106,7 +106,7 @@ class Example:
         print(f"\n📦 Generating tetrahedral box mesh...", flush=True)
         box = TetraBox(
             size=self.size,
-            segments=segments,
+            subdivisions=subdivisions,
             verbose=True
         )
         mesh_data = box.get_mesh_data()
@@ -697,8 +697,8 @@ def main():
     # Mesh parameters
     parser.add_argument('--size', type=float, nargs=3, default=[0.3, 0.3, 0.3],
                         help='Box size (width, height, depth) (default: 0.3 0.3 0.3)')
-    parser.add_argument('--segments', type=int, nargs=3, default=[3, 3, 3],
-                        help='Box segments per axis (default: 3 3 3)')
+    parser.add_argument('--subdivisions', type=int, nargs=3, default=[3, 3, 3],
+                        help='Subdivisions per axis (default: 3 3 3)')
     
     # Physics parameters
     parser.add_argument('--soft_mass', type=float, default=1.0,
@@ -765,7 +765,7 @@ def main():
             viewer=viewer,
             solver_type=args.solver,
             size=args.size,
-            segments=args.segments,
+            subdivisions=args.subdivisions,
             soft_mass=args.soft_mass,
             rigid_width=args.rigid_width,
             rigid_mass=args.rigid_mass,

@@ -91,7 +91,7 @@ class Example:
         self,
         viewer,
         size=(0.25, 0.25, 0.25),  # Box size (width, height, depth)
-        segments=(3, 3, 3),  # Box segments per axis
+        subdivisions=(3, 3, 3),  # Subdivisions per axis
         soft_mass: float = 1.0,
         rigid_width: float = 3.0,
         rigid_mass: float = 0.001,
@@ -128,7 +128,7 @@ class Example:
         print(f"\n📦 Generating tetrahedral box mesh...", flush=True)
         box = TetraBox(
             size=self.size,
-            segments=segments,
+            subdivisions=subdivisions,
             verbose=True
         )
         mesh_data = box.get_mesh_data()
@@ -674,8 +674,8 @@ def main():
     
     parser.add_argument('--size', type=float, nargs=3, default=[0.25, 0.25, 0.25],
                         help='Box size (width, height, depth) (default: 0.25 0.25 0.25)')
-    parser.add_argument('--segments', type=int, nargs=3, default=[3, 3, 3],
-                        help='Box segments per axis (default: 3 3 3)')
+    parser.add_argument('--subdivisions', type=int, nargs=3, default=[3, 3, 3],
+                        help='Subdivisions per axis (default: 3 3 3)')
     parser.add_argument('--soft_mass', type=float, default=1.0)
     parser.add_argument('--rigid_width', type=float, default=3.0)
     parser.add_argument('--rigid_mass', type=float, default=0.001)
@@ -709,7 +709,7 @@ def main():
         example = Example(
             viewer=viewer,
             size=args.size,
-            segments=args.segments,
+            subdivisions=args.subdivisions,
             soft_mass=args.soft_mass,
             rigid_width=args.rigid_width,
             rigid_mass=args.rigid_mass,

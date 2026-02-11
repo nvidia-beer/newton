@@ -28,6 +28,7 @@ declare -a EXAMPLES=(
     "inflatable_rigid_sphere"
     "inflatable_table_box"
     "inflatable_table_sphere"
+    "chambers"
 )
 
 declare -A EXAMPLE_DESCRIPTIONS=(
@@ -43,6 +44,7 @@ declare -A EXAMPLE_DESCRIPTIONS=(
     ["inflatable_rigid_sphere"]="Inflatable sphere with rigid plate on top (supports --solver xpbd|mujoco)"
     ["inflatable_table_box"]="4 inflatable boxes at corners with rigid table top (Press I/K/O)"
     ["inflatable_table_sphere"]="4 inflatable spheres at corners with rigid table top (Press I/K/O)"
+    ["chambers"]="N-chamber anisotropic inflatable box (Press I/K inflate/deflate, C chamber, N num chambers, A anisotropy)"
 )
 
 declare -A EXAMPLE_SOLVER_OPTIONS=(
@@ -137,17 +139,70 @@ if [ "$EXAMPLE" == "bouncing_box" ] && [ -z "$*" ]; then
         box_size="0.6 0.8 1.0"
     fi
     
-    read -p "Segments per axis - width height depth (default: 3 5 7): " box_segments
-    if [ -z "$box_segments" ]; then
-        box_segments="3 5 7"
+    read -p "Subdivisions per axis - width height depth (default: 3 5 7): " box_subdivisions
+    if [ -z "$box_subdivisions" ]; then
+        box_subdivisions="3 5 7"
     fi
     
     echo ""
-    echo "Using box size: $box_size, segments: $box_segments"
+    echo "Using box size: $box_size, subdivisions: $box_subdivisions"
     echo ""
     
     # Use default values for other parameters
-    BOX_ARGS="--size $box_size --initial_height 2.5 --mass 0.5 --k_mu 2e5 --k_lambda 2e5 --k_damp 0.5 --substeps 8 --segments $box_segments --num_frames 600"
+    BOX_ARGS="--size $box_size --initial_height 2.5 --mass 0.5 --k_mu 2e5 --k_lambda 2e5 --k_damp 0.5 --substeps 8 --subdivisions $box_subdivisions --num_frames 600"
+fi
+
+# Interactive parameter selection for chambers
+CHAMBERS_ARGS=""
+if [ "$EXAMPLE" == "chambers" ] && [ -z "$*" ]; then
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "              Chambers - Parameters"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo ""
+    read -p "Number of chambers (default: 2): " num_chambers
+    if [ -z "$num_chambers" ]; then
+        num_chambers=2
+    fi
+    read -p "Length (X) in m (default: 1): " length
+    if [ -z "$length" ]; then
+        length=1
+    fi
+    read -p "Width (Y) in m (default: 2): " width
+    if [ -z "$width" ]; then
+        width=2
+    fi
+    read -p "Height (Z) in m (default: 0.06): " height
+    if [ -z "$height" ]; then
+        height=0.06
+    fi
+    read -p "Subdivisions X (default: 10): " subdivisions_x
+    if [ -z "$subdivisions_x" ]; then
+        subdivisions_x=10
+    fi
+    read -p "Subdivisions Y (default: 30): " subdivisions_y
+    if [ -z "$subdivisions_y" ]; then
+        subdivisions_y=30
+    fi
+    read -p "Subdivisions Z (default: 2): " subdivisions_z
+    if [ -z "$subdivisions_z" ]; then
+        subdivisions_z=2
+    fi
+    read -p "Anisotropy X - orthogonal to chamber axis (default: 1.2): " anisotropy_x
+    if [ -z "$anisotropy_x" ]; then
+        anisotropy_x=1.2
+    fi
+    read -p "Anisotropy Y - along chamber axis, keep 1.0 (default: 1.0): " anisotropy_y
+    if [ -z "$anisotropy_y" ]; then
+        anisotropy_y=1.0
+    fi
+    read -p "Anisotropy Z - orthogonal to chamber axis (default: 1.2): " anisotropy_z
+    if [ -z "$anisotropy_z" ]; then
+        anisotropy_z=1.2
+    fi
+    echo ""
+    echo "Using: num_chambers=$num_chambers length=$length width=$width height=$height subdivisions_x=$subdivisions_x subdivisions_y=$subdivisions_y subdivisions_z=$subdivisions_z anisotropy_x=$anisotropy_x anisotropy_y=$anisotropy_y anisotropy_z=$anisotropy_z"
+    echo ""
+    CHAMBERS_ARGS="--num_chambers $num_chambers --chamber_axis y --length $length --width $width --height $height --subdivisions_x $subdivisions_x --subdivisions_y $subdivisions_y --subdivisions_z $subdivisions_z --anisotropy_x $anisotropy_x --anisotropy_y $anisotropy_y --anisotropy_z $anisotropy_z --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 7200"
 fi
 
 # Default stable parameters for examples that need them
@@ -168,10 +223,10 @@ if [ -z "$EXTRA_ARGS" ]; then
                 EXTRA_ARGS="$BOX_ARGS"
             else
                 # Box bouncing and tumbling - subdivided into multiple cubic elements
-                # Larger non-uniform box: size=(0.6, 0.8, 1.0), segments=(3, 5, 7)
+                # Larger non-uniform box: size=(0.6, 0.8, 1.0), subdivisions=(3, 5, 7)
                 # Creates 105 cubic elements (630 tetrahedra) with non-uniform subdivision
                 # Each cube uses stable 6-tet pattern (all share v6 corner vertex)
-                EXTRA_ARGS="--size 0.6 0.8 1.0 --initial_height 2.5 --mass 0.5 --k_mu 2e5 --k_lambda 2e5 --k_damp 0.5 --substeps 8 --segments 3 5 7 --num_frames 600"
+                EXTRA_ARGS="--size 0.6 0.8 1.0 --initial_height 2.5 --mass 0.5 --k_mu 2e5 --k_lambda 2e5 --k_damp 0.5 --substeps 8 --subdivisions 3 5 7 --num_frames 600"
             fi
             ;;
         rigid_soft_interaction)
@@ -196,8 +251,8 @@ if [ -z "$EXTRA_ARGS" ]; then
         inflatable_box)
             # Inflatable soft body box with manual pressure control
             # Press I to inflate, K to deflate, O to reset
-            # Using 5x5x5 segments for more particles (125 cubes = 750 tetrahedra)
-            EXTRA_ARGS="--size 0.4 0.4 0.4 --initial_height 0.5 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --max_pressure 5.0 --substeps 5 --segments 5 5 5 --num_frames 1800"
+            # Using 5x5x5 subdivisions for more particles (125 cells = 750 tetrahedra)
+            EXTRA_ARGS="--size 0.4 0.4 0.4 --initial_height 0.5 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --max_pressure 5.0 --substeps 5 --subdivisions 5 5 5 --num_frames 1800"
             ;;
         inflatable_sphere)
             # Inflatable soft body sphere with manual pressure control
@@ -208,7 +263,7 @@ if [ -z "$EXTRA_ARGS" ]; then
             # Inflatable soft body box with large flat rigid plate on top
             # Plate is 5x the soft body size (3.0m for 0.3m box)
             # Note: Using heavier mass (0.01kg) and smaller particle radius (0.015m) for better MuJoCo interaction
-            EXTRA_ARGS="--size 0.3 0.3 0.3 --rigid_width 3.0 --rigid_mass 0.01 --particle_radius 0.015 --k_mu 1e5 --k_lambda 1e5 --k_damp 5.0 --spring_ke 5e4 --spring_kd 5.0 --max_pressure 5.0 --substeps 16 --segments 3 3 3 --num_frames 800"
+            EXTRA_ARGS="--size 0.3 0.3 0.3 --rigid_width 3.0 --rigid_mass 0.01 --particle_radius 0.015 --k_mu 1e5 --k_lambda 1e5 --k_damp 5.0 --spring_ke 5e4 --spring_kd 5.0 --max_pressure 5.0 --substeps 16 --subdivisions 3 3 3 --num_frames 800"
             ;;
         inflatable_rigid_sphere)
             # Inflatable soft body sphere with large flat rigid plate on top
@@ -220,13 +275,21 @@ if [ -z "$EXTRA_ARGS" ]; then
             # Inflatable table: 4 soft body boxes at corners supporting a rigid plate
             # Press I to inflate, K to deflate, O to reset
             # Note: plate is ultra-light (0.001kg) with high friction to prevent sliding
-            EXTRA_ARGS="--size 0.25 0.25 0.25 --rigid_width 3.0 --rigid_mass 0.001 --particle_radius 0.03 --k_mu 5e4 --k_lambda 5e4 --k_damp 50.0 --spring_ke 2e4 --spring_kd 20.0 --max_pressure 5.0 --substeps 32 --segments 3 3 3 --num_frames 800"
+            EXTRA_ARGS="--size 0.25 0.25 0.25 --rigid_width 3.0 --rigid_mass 0.001 --particle_radius 0.03 --k_mu 5e4 --k_lambda 5e4 --k_damp 50.0 --spring_ke 2e4 --spring_kd 20.0 --max_pressure 5.0 --substeps 32 --subdivisions 3 3 3 --num_frames 800"
             ;;
         inflatable_table_sphere)
             # Inflatable table: 4 soft body spheres at corners supporting a rigid plate
             # Press I to inflate, K to deflate, O to reset
             # Note: plate must be ultra-light (0.004kg) for contact forces to work
             EXTRA_ARGS="--radius 0.25 --rigid_width 3.0 --rigid_mass 0.004 --particle_radius 0.03 --k_mu 5e4 --k_lambda 5e4 --k_damp 50.0 --spring_ke 2e4 --spring_kd 20.0 --max_pressure 5.0 --substeps 32 --subdivisions 2 --interior_layers 2 --num_frames 800"
+            ;;
+        chambers)
+            # Flat rectangular slab, 2 chambers side-by-side (bends with differential pressure)
+            if [ -n "$CHAMBERS_ARGS" ]; then
+                EXTRA_ARGS="$CHAMBERS_ARGS"
+            else
+                EXTRA_ARGS="--length 1 --width 2 --height 0.06 --subdivisions_x 10 --subdivisions_y 30 --subdivisions_z 2 --num_chambers 2 --chamber_axis y --anisotropy_x 1.2 --anisotropy_z 1.2 --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 7200"
+            fi
             ;;
     esac
 fi

@@ -31,7 +31,7 @@ Features:
 
 Usage:
     python -m newton.examples.inflatable.example_inflatable
-    python -m newton.examples.inflatable.example_inflatable --size 0.4 0.4 0.4 --segments 3 3 3 --max_pressure 2.5
+    python -m newton.examples.inflatable.example_inflatable --size 0.4 0.4 0.4 --subdivisions 3 3 3 --max_pressure 2.5
 """
 
 import warp as wp
@@ -55,7 +55,7 @@ class Example:
         self,
         viewer,
         size=(0.4, 0.4, 0.4),
-        segments=(5, 5, 5),  # More segments = more particles (125 cubes = 750 tetrahedra)
+        subdivisions=(5, 5, 5),  # Subdivisions per axis
         initial_height: float = 0.5,
         mass: float = 1.0,
         k_mu: float = 1.0e5,         # Shear modulus (softer for visible deformation)
@@ -88,7 +88,7 @@ class Example:
         print(f"\n📦 Generating tetrahedral box mesh...", flush=True)
         box = TetraBox(
             size=self.size,
-            segments=segments,
+            subdivisions=subdivisions,
             verbose=True
         )
         mesh_data = box.get_mesh_data()
@@ -230,7 +230,7 @@ class Example:
         
         print(f"\n📦 Inflatable Soft Body Box Ready!", flush=True)
         print(f"   Size: {self.size[0]:.2f}×{self.size[1]:.2f}×{self.size[2]:.2f}m", flush=True)
-        print(f"   Segments: {segments[0]}×{segments[1]}×{segments[2]}", flush=True)
+        print(f"   Subdivisions: {subdivisions[0]}×{subdivisions[1]}×{subdivisions[2]}", flush=True)
         print(f"   Max inflation: {max_pressure}x volume", flush=True)
         print(f"   Stiffness: μ={k_mu:.0e}, λ={k_lambda:.0e}", flush=True)
         print(f"\n   Keyboard Controls:", flush=True)
@@ -368,8 +368,8 @@ def main():
     # Mesh parameters
     parser.add_argument('--size', type=float, nargs=3, default=[0.4, 0.4, 0.4],
                         help='Box size (width, height, depth) (default: 0.4 0.4 0.4)')
-    parser.add_argument('--segments', type=int, nargs=3, default=[5, 5, 5],
-                        help='Segments per axis (default: 5 5 5 - 125 cubes = 750 tetrahedra)')
+    parser.add_argument('--subdivisions', type=int, nargs=3, default=[5, 5, 5],
+                        help='Subdivisions per axis (default: 5 5 5 - 125 cells = 750 tetrahedra)')
     
     # Physics parameters
     parser.add_argument('--initial_height', type=float, default=0.5,
@@ -433,7 +433,7 @@ def main():
         example = Example(
             viewer=viewer,
             size=args.size,
-            segments=args.segments,
+            subdivisions=args.subdivisions,
             initial_height=args.initial_height,
             mass=args.mass,
             k_mu=args.k_mu,

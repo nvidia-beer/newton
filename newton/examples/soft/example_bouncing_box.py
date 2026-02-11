@@ -44,7 +44,7 @@ class Example:
         self,
         viewer,
         size=(0.6, 0.8, 1.0),  # Larger non-uniform box: width=0.6, height=0.8, depth=1.0
-        segments=(3, 5, 7),  # Non-uniform: width=3, height=5, depth=7
+        subdivisions=(3, 5, 7),  # Subdivisions per axis (non-uniform: width=3, height=5, depth=7)
         initial_height: float = 2.5,
         mass: float = 0.5,
         k_mu: float = 2e5,
@@ -56,20 +56,20 @@ class Example:
         self.fps = 60
         # Auto-adjust parameters for coarse meshes and non-uniform meshes
         # Coarse meshes and non-uniform meshes need lower stiffness and higher damping for stability
-        total_elements = segments[0] * segments[1] * segments[2]
-        max_segment = max(segments)
-        min_segment = min(segments)
-        is_uniform = segments[0] == segments[1] == segments[2]
+        total_elements = subdivisions[0] * subdivisions[1] * subdivisions[2]
+        max_segment = max(subdivisions)
+        min_segment = min(subdivisions)
+        is_uniform = subdivisions[0] == subdivisions[1] == subdivisions[2]
         aspect_ratio = max_segment / min_segment if min_segment > 0 else 1.0
         
-        if segments == (1, 1, 1):
+        if subdivisions == (1, 1, 1):
             if k_mu >= 1e5:  # Only adjust if using default high stiffness
                 k_mu = k_mu / 4  # Reduce stiffness 4x
                 k_lambda = k_lambda / 4
                 k_damp = k_damp * 4  # Increase damping 4x
                 if substeps < 16:
                     substeps = 16  # More substeps for stability
-                print(f"  Auto-adjusted parameters for coarse mesh (segments=1,1,1):")
+                print(f"  Auto-adjusted parameters for coarse mesh (subdivisions=1,1,1):")
                 print(f"    k_mu={k_mu:.0e}, k_lambda={k_lambda:.0e}, k_damp={k_damp:.1f}, substeps={substeps}")
         elif min_segment <= 2 and max_segment <= 4:
             # For coarse meshes (any dimension <= 2, max <= 4), adjust parameters
@@ -88,7 +88,7 @@ class Example:
                     k_damp = k_damp * 2  # Increase damping 2x
                     if substeps < 12:
                         substeps = 12
-                print(f"  Auto-adjusted parameters for coarse mesh (segments={segments[0]},{segments[1]},{segments[2]}):")
+                print(f"  Auto-adjusted parameters for coarse mesh (subdivisions={subdivisions[0]},{subdivisions[1]},{subdivisions[2]}):")
                 print(f"    k_mu={k_mu:.0e}, k_lambda={k_lambda:.0e}, k_damp={k_damp:.1f}, substeps={substeps}")
         elif not is_uniform and aspect_ratio > 1.5:
             # For non-uniform meshes with significant aspect ratio, adjust parameters
@@ -109,13 +109,13 @@ class Example:
                     k_damp = k_damp * 1.5  # Increase damping 1.5x
                     if substeps < 10:
                         substeps = 10
-                print(f"  Auto-adjusted parameters for non-uniform mesh (segments={segments[0]},{segments[1]},{segments[2]}, aspect_ratio={aspect_ratio:.2f}):")
+                print(f"  Auto-adjusted parameters for non-uniform mesh (subdivisions={subdivisions[0]},{subdivisions[1]},{subdivisions[2]}, aspect_ratio={aspect_ratio:.2f}):")
                 print(f"    k_mu={k_mu:.0e}, k_lambda={k_lambda:.0e}, k_damp={k_damp:.1f}, substeps={substeps}")
         
         # Print mesh info
-        is_uniform = segments[0] == segments[1] == segments[2]
+        is_uniform = subdivisions[0] == subdivisions[1] == subdivisions[2]
         mesh_type = "uniform" if is_uniform else "non-uniform"
-        print(f"  Using {mesh_type} subdivided mesh: {segments[0]}×{segments[1]}×{segments[2]} = "
+        print(f"  Using {mesh_type} subdivided mesh: {subdivisions[0]}×{subdivisions[1]}×{subdivisions[2]} = "
               f"{total_elements} cubic elements ({total_elements * 6} tetrahedra)")
         self.frame_dt = 1.0 / self.fps
         self.substeps = substeps
@@ -134,7 +134,7 @@ class Example:
         print(f"Creating bouncing box...", flush=True)
         self.box = TetraBox(
             size=self.size,
-            segments=segments
+            subdivisions=subdivisions,
         )
         self.box.info()
         
@@ -333,8 +333,8 @@ def main():
     # Box parameters
     parser.add_argument('--size', type=float, nargs=3, default=[0.6, 0.8, 1.0],
                         help='Box size (width, height, depth) (default: 0.6 0.8 1.0 - larger non-uniform)')
-    parser.add_argument('--segments', type=int, nargs=3, default=[3, 5, 7],
-                        help='Segments per axis (default: 3 5 7 - non-uniform: width×height×depth)')
+    parser.add_argument('--subdivisions', type=int, nargs=3, default=[3, 5, 7],
+                        help='Subdivisions per axis (default: 3 5 7 - non-uniform: width×height×depth)')
     
     # Physics parameters
     parser.add_argument('--initial_height', type=float, default=2.5,
@@ -386,7 +386,7 @@ def main():
         example = Example(
             viewer=viewer,
             size=tuple(args.size),
-            segments=tuple(args.segments),
+            subdivisions=tuple(args.subdivisions),
             initial_height=args.initial_height,
             mass=args.mass,
             k_mu=args.k_mu,

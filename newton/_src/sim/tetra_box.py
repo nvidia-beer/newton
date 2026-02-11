@@ -40,7 +40,7 @@ class TetraBox:
     ----------
     size : tuple[float, float, float] or float
         Box dimensions (width, height, depth) or uniform size (default: (1.0, 1.0, 1.0))
-    segments : tuple[int, int, int] or int
+    subdivisions : tuple[int, int, int] or int
         Number of subdivisions per axis (default: (4, 4, 4))
         Each cell is divided into 2 tetrahedra
     
@@ -54,16 +54,16 @@ class TetraBox:
         Surface triangle indices for rendering
     """
     
-    def __init__(self, size=(1.0, 1.0, 1.0), segments=(4, 4, 4), verbose: bool = True):
+    def __init__(self, size=(1.0, 1.0, 1.0), subdivisions=(4, 4, 4), verbose: bool = True):
         if isinstance(size, (int, float)):
             self.size = (float(size), float(size), float(size))
         else:
             self.size = tuple(float(s) for s in size)
         
-        if isinstance(segments, int):
-            self.segments = (segments, segments, segments)
+        if isinstance(subdivisions, int):
+            self.subdivisions = (subdivisions, subdivisions, subdivisions)
         else:
-            self.segments = tuple(int(s) for s in segments)
+            self.subdivisions = tuple(int(s) for s in subdivisions)
         
         self.verbose = verbose
         
@@ -80,7 +80,7 @@ class TetraBox:
         total_start = time.time()
         
         # Step 1: Create box surface (already creates full structured grid)
-        self._log(f"[1/4] Creating box surface (segments={self.segments})...")
+        self._log(f"[1/4] Creating box surface (subdivisions={self.subdivisions})...")
         t0 = time.time()
         all_vertices, surface_faces = self._create_box_surface()
         self._log(f"      Done: {len(all_vertices)} vertices (full grid), "
@@ -94,8 +94,8 @@ class TetraBox:
         t0 = time.time()
         
         # Debug: For multiple cubes, show alternating pattern distribution
-        if self.segments != (1, 1, 1) and self.verbose:
-            sx, sy, sz = self.segments
+        if self.subdivisions != (1, 1, 1) and self.verbose:
+            sx, sy, sz = self.subdivisions
             pattern1_count = sum(1 for i in range(sx) for j in range(sy) for k in range(sz) 
                                 if (i & 1) ^ (j & 1) ^ (k & 1))
             pattern2_count = sx * sy * sz - pattern1_count
@@ -103,7 +103,7 @@ class TetraBox:
                      f"{pattern2_count} cubes use Pattern 2 (v1-v7 diagonal)")
         
         # Debug: For single cube, verify vertex positions and test pattern
-        if self.segments == (1, 1, 1) and self.verbose:
+        if self.subdivisions == (1, 1, 1) and self.verbose:
             print(f"\n[DEBUG] Single cube - verifying vertex positions:")
             for (i, j, k), idx in sorted(self._vertex_map.items()):
                 pos = all_vertices[idx]
@@ -126,7 +126,7 @@ class TetraBox:
         t0 = time.time()
         
         # Debug: Check volumes after filtering (for single cube)
-        if self.segments == (1, 1, 1) and self.verbose:
+        if self.subdivisions == (1, 1, 1) and self.verbose:
             print(f"\n[DEBUG] After filtering - checking final tetrahedra:")
             filtered_tets = self._filter_tetrahedra(all_vertices, tetrahedra)
             for i, tet in enumerate(filtered_tets):
@@ -170,7 +170,7 @@ class TetraBox:
     def _create_box_surface(self):
         """Create box surface with 6 faces using unified vertex structure."""
         w, h, d = self.size
-        sx, sy, sz = self.segments
+        sx, sy, sz = self.subdivisions
         
         # Create unified vertex grid (no duplicates)
         # Grid: (sx+1) x (sy+1) x (sz+1) vertices
@@ -296,10 +296,10 @@ class TetraBox:
         """
         Generate tetrahedra from structured hexahedral mesh.
         
-        For single cube (segments=1): Uses center-point method for maximum stability.
+        For single cube (subdivisions=1): Uses center-point method for maximum stability.
         For multiple cubes: Uses alternating diagonal pattern for connectivity.
         """
-        sx, sy, sz = self.segments
+        sx, sy, sz = self.subdivisions
         vertex_map = self._vertex_map
         tetrahedra = []
         
@@ -568,7 +568,7 @@ class TetraBox:
         """Print mesh statistics."""
         print(f"TetraBox Mesh:")
         print(f"  Size: {self.size}")
-        print(f"  Segments: {self.segments}")
+        print(f"  Subdivisions: {self.subdivisions}")
         print(f"  Vertices: {len(self.vertices)}")
         print(f"  Tetrahedra: {len(self.tetrahedra)}")
         print(f"  Surface triangles: {len(self.surface_triangles)}")
@@ -588,9 +588,9 @@ class TetraBox:
             print(f"  WARNING: Degenerate tets: {validation['degenerate']}")
 
 
-def create_tetra_box(size=(1.0, 1.0, 1.0), segments=(4, 4, 4), verbose: bool = True):
+def create_tetra_box(size=(1.0, 1.0, 1.0), subdivisions=(4, 4, 4), verbose: bool = True):
     """Convenience function to create a tetrahedral box mesh."""
-    return TetraBox(size=size, segments=segments, verbose=verbose)
+    return TetraBox(size=size, subdivisions=subdivisions, verbose=verbose)
 
 
 def debug_single_cube():

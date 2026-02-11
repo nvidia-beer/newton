@@ -41,6 +41,9 @@ from newton._src.solvers.soft import SolverSoft
 from .kernels_inflatable import (
     scale_spring_rest_lengths_kernel,
     scale_tet_poses_kernel,
+    scale_tet_poses_anisotropic_kernel,
+    scale_tet_poses_per_chamber_anisotropic_kernel,
+    scale_spring_rest_lengths_per_chamber_kernel,
     compute_volume_kernel,
 )
 
@@ -54,6 +57,14 @@ class SolverInflatable(SolverSoft):
     Extends SolverSoft with the ability to inflate/deflate soft bodies by scaling
     their FEM rest configuration. The material naturally deforms toward the new
     rest state, providing stable inflation behavior.
+    
+    Modes
+    -----
+    - **Single pressure**: Call ``set_pressure(p)`` or ``set_pressure_anisotropic(p, ax, ay, az)``.
+      Same pressure and optional anisotropy for the whole body.
+    - **Multi-chamber**: Call ``set_chamber_mask(tet_mask, spring_mask, num_chambers)`` once,
+      then ``set_chamber_pressures([p0, p1, ...])`` to set per-chamber pressures. Use for
+      bending actuators (e.g. two chambers side-by-side with different pressures).
     
     Parameters
     ----------
@@ -97,6 +108,15 @@ class SolverInflatable(SolverSoft):
         self.max_volume_ratio = max_volume_ratio
         self.current_pressure = 1.0  # Current pressure (rest config ratio)
         self.target_pressure = 1.0   # Target pressure for PID control
+        # Anisotropic expansion: scale per axis (1.0 = isotropic)
+        self.anisotropy_x = 1.0
+        self.anisotropy_y = 1.0
+        self.anisotropy_z = 1.0
+        # Per-chamber: optional masks and pressures (chambers are spatially separate regions)
+        self.tet_chamber_mask = None  # wp.array(dtype=int), length tet_count
+        self.spring_chamber_mask = None  # wp.array(dtype=int), length spring_count
+        self.num_chambers = 0
+        self._chamber_pressures_array = None  # wp.array(dtype=float), length num_chambers
         
         # Store original rest configuration for scaling
         self._store_original_rest_config(model)
@@ -195,22 +215,106 @@ class SolverInflatable(SolverSoft):
             return 1.0
         return self.compute_volume(state) / initial
     
+    def set_chamber_mask(
+        self,
+        tet_chamber_mask: "wp.array",
+        spring_chamber_mask: "wp.array | None" = None,
+        num_chambers: int = 0,
+    ):
+        """
+        Set per-chamber masks so different regions can have different pressures.
+        Chambers are spatially separate (e.g. slices along height Z).
+        Call set_chamber_pressures([p0, p1, ...]) to apply pressures.
+        """
+        self.tet_chamber_mask = tet_chamber_mask
+        self.spring_chamber_mask = spring_chamber_mask
+        self.num_chambers = int(num_chambers)
+        if self.num_chambers > 0:
+            self._chamber_pressures_array = wp.array(
+                np.full(self.num_chambers, 1.0, dtype=np.float32),
+                dtype=wp.float32,
+                device=self.model.device,
+            )
+
+    def set_chamber_pressures(self, pressure_list: list[float]):
+        """
+        Set pressure (volume ratio) per chamber. Use when tet_chamber_mask is set.
+        pressure_list[i] is the pressure for chamber i (clamped to [1.0, max_volume_ratio]).
+        """
+        if self.tet_chamber_mask is None or self.num_chambers <= 0:
+            return
+        model = self.model
+        pressures = np.array(
+            [float(np.clip(p, 1.0, self.max_volume_ratio)) for p in pressure_list],
+            dtype=np.float32,
+        )
+        if len(pressures) < self.num_chambers:
+            pressures = np.resize(pressures, self.num_chambers)
+            pressures[len(pressure_list) :] = 1.0
+        pressures = pressures[: self.num_chambers]
+        self._chamber_pressures_array.assign(pressures)
+        # Update spring rest lengths: per-chamber if mask set, else single scale from mean pressure
+        if model.spring_count > 0 and self.original_spring_rest_length is not None:
+            if self.spring_chamber_mask is not None:
+                wp.launch(
+                    kernel=scale_spring_rest_lengths_per_chamber_kernel,
+                    dim=model.spring_count,
+                    inputs=[
+                        self.original_spring_rest_length,
+                        self.spring_chamber_mask,
+                        self._chamber_pressures_array,
+                        self.num_chambers,
+                    ],
+                    outputs=[model.spring_rest_length],
+                    device=model.device,
+                )
+            else:
+                # No spring mask: use mean pressure for isotropic spring scaling
+                avg_p = float(np.cbrt(np.mean(pressures)))
+                wp.launch(
+                    kernel=scale_spring_rest_lengths_kernel,
+                    dim=model.spring_count,
+                    inputs=[self.original_spring_rest_length, avg_p],
+                    outputs=[model.spring_rest_length],
+                    device=model.device,
+                )
+        # Update tet rest poses: per-chamber pressure + global anisotropy
+        if model.tet_count > 0 and self.original_tet_poses is not None:
+            wp.launch(
+                kernel=scale_tet_poses_per_chamber_anisotropic_kernel,
+                dim=model.tet_count,
+                inputs=[
+                    self.original_tet_poses,
+                    self.tet_chamber_mask,
+                    self._chamber_pressures_array,
+                    self.num_chambers,
+                    self.anisotropy_x,
+                    self.anisotropy_y,
+                    self.anisotropy_z,
+                ],
+                outputs=[model.tet_poses],
+                device=model.device,
+            )
+
     def set_pressure(self, pressure: float):
         """
-        Set the inflation pressure (volume ratio target).
+        Set the inflation pressure (volume ratio target) for single-pressure mode.
+        When tet_chamber_mask is set, use set_chamber_pressures([p0, p1, ...]) instead.
         
-        The pressure value represents the target volume ratio:
-        - pressure=1.0: original size (no inflation)
-        - pressure=2.0: target volume is 2x original
-        
-        The FEM rest configuration is scaled so the material naturally
-        deforms toward the target volume.
+        Uses current anisotropy (set via set_pressure_anisotropic). If anisotropy
+        is (1,1,1), isotropic scaling is applied; otherwise tet poses are scaled
+        anisotropically and springs remain isotropic.
         
         Parameters
         ----------
         pressure : float
             Target volume ratio (clamped to [1.0, max_volume_ratio])
         """
+        # If chambers are set, apply same pressure to all chambers and return
+        if self.tet_chamber_mask is not None and self.num_chambers > 0:
+            self.set_chamber_pressures([pressure] * self.num_chambers)
+            self.current_pressure = pressure
+            return
         model = self.model
         
         pressure = float(np.clip(pressure, 1.0, self.max_volume_ratio))
@@ -222,10 +326,9 @@ class SolverInflatable(SolverSoft):
         self.current_pressure = pressure
         
         # For volume scaling, use cbrt(pressure) for linear dimensions (3D)
-        # Volume scales as length^3, so length scales as volume^(1/3)
         linear_scale = np.cbrt(pressure)
         
-        # Scale spring rest lengths
+        # Scale spring rest lengths (always isotropic)
         if model.spring_count > 0 and self.original_spring_rest_length is not None:
             wp.launch(
                 kernel=scale_spring_rest_lengths_kernel,
@@ -238,20 +341,65 @@ class SolverInflatable(SolverSoft):
                 device=model.device,
             )
         
-        # Scale tetrahedra rest poses (Dm_inv)
-        # The rest pose is the inverse of the rest shape matrix Dm.
-        # To scale the rest shape by 's', we scale Dm by 's', so Dm_inv scales by '1/s'.
+        # Scale tetrahedra rest poses (Dm_inv) - isotropic or anisotropic
         if model.tet_count > 0 and self.original_tet_poses is not None:
-            wp.launch(
-                kernel=scale_tet_poses_kernel,
-                dim=model.tet_count,
-                inputs=[
-                    self.original_tet_poses,
-                    linear_scale,
-                ],
-                outputs=[model.tet_poses],
-                device=model.device,
-            )
+            if (
+                abs(self.anisotropy_x - 1.0) < 1e-6
+                and abs(self.anisotropy_y - 1.0) < 1e-6
+                and abs(self.anisotropy_z - 1.0) < 1e-6
+            ):
+                wp.launch(
+                    kernel=scale_tet_poses_kernel,
+                    dim=model.tet_count,
+                    inputs=[
+                        self.original_tet_poses,
+                        linear_scale,
+                    ],
+                    outputs=[model.tet_poses],
+                    device=model.device,
+                )
+            else:
+                inv_scale_x = 1.0 / (linear_scale * self.anisotropy_x)
+                inv_scale_y = 1.0 / (linear_scale * self.anisotropy_y)
+                inv_scale_z = 1.0 / (linear_scale * self.anisotropy_z)
+                wp.launch(
+                    kernel=scale_tet_poses_anisotropic_kernel,
+                    dim=model.tet_count,
+                    inputs=[
+                        self.original_tet_poses,
+                        inv_scale_x,
+                        inv_scale_y,
+                        inv_scale_z,
+                    ],
+                    outputs=[model.tet_poses],
+                    device=model.device,
+                )
+    
+    def set_pressure_anisotropic(
+        self,
+        pressure: float,
+        anisotropy_x: float = 1.0,
+        anisotropy_y: float = 1.0,
+        anisotropy_z: float = 1.0,
+    ):
+        """
+        Set inflation pressure with anisotropic expansion.
+        
+        Rest pose scaling: effective scale per axis is cbrt(pressure) * anisotropy_*.
+        E.g. anisotropy_z > 1 elongates more along Z (vertical).
+        Springs are scaled isotropically by cbrt(pressure).
+        
+        Parameters
+        ----------
+        pressure : float
+            Target volume ratio (clamped to [1.0, max_volume_ratio])
+        anisotropy_x, anisotropy_y, anisotropy_z : float
+            Relative expansion per axis (1.0 = isotropic). E.g. (1, 1, 1.5) = more Z.
+        """
+        self.anisotropy_x = float(anisotropy_x)
+        self.anisotropy_y = float(anisotropy_y)
+        self.anisotropy_z = float(anisotropy_z)
+        self.set_pressure(pressure)
     
     def set_target_pressure(self, target: float):
         """
