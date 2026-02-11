@@ -223,32 +223,93 @@ if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "worm" ]; } && [ -z "$*" ];
     fi
     chamber_stiffness_scale_arg=""
     chamber_inflation_disabled_arg=""
-    if [ "$EXAMPLE" == "worm" ]; then
-        read -p "Chamber stiffness scale - comma-separated per chamber (e.g. 4,1,4,1), or Enter for default (non-inflatable chambers 4x stiffer): " chamber_stiffness_scale_input
+    if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "worm" ]; }; then
+        total_chambers=$((num_chambers_x * num_chambers_y * num_chambers_z))
+        echo "Chamber layout (index = ix*(ny*nz)+iy*nz+iz, ${num_chambers_x}x${num_chambers_y}x${num_chambers_z} = $total_chambers chambers):"
+        for iz in $(seq 0 $((num_chambers_z - 1))); do
+            echo "  Z=$iz (layer):"
+            for ix in $(seq 0 $((num_chambers_x - 1))); do
+                line="    "
+                for iy in $(seq 0 $((num_chambers_y - 1))); do
+                    ch=$((ix * num_chambers_y * num_chambers_z + iy * num_chambers_z + iz))
+                    line="${line}[$ch] "
+                done
+                echo "$line"
+            done
+        done
+        echo ""
+        default_stiffness=""
+        for ((i=0; i<total_chambers; i++)); do
+            if [ "$i" -eq 1 ] || [ "$i" -eq $((total_chambers - 1)) ]; then
+                default_stiffness="${default_stiffness}1,"
+            else
+                default_stiffness="${default_stiffness}4,"
+            fi
+        done
+        default_stiffness="${default_stiffness%,}"
+        read -p "Stiffness scale array ($total_chambers values, comma-separated). Enter for default ($default_stiffness): " chamber_stiffness_scale_input
         if [ -n "$chamber_stiffness_scale_input" ]; then
             chamber_stiffness_scale_arg="--chamber_stiffness_scale $chamber_stiffness_scale_input"
         fi
-        read -p "Chambers with inflation disabled - comma-separated indices, or Enter for 0,2, or 'none' for all inflatable: " chamber_inflation_disabled_input
-        if [ -z "$chamber_inflation_disabled_input" ]; then
-            chamber_inflation_disabled_arg="--chamber_inflation_disabled 0,2"
-        elif [ "$chamber_inflation_disabled_input" = "none" ] || [ "$chamber_inflation_disabled_input" = "all" ]; then
+        default_inflation=""
+        inflate_idx=$((total_chambers - 1))
+        for ((i=0; i<total_chambers; i++)); do
+            if [ "$i" -eq 1 ] || [ "$i" -eq "$inflate_idx" ]; then
+                default_inflation="${default_inflation}1,"
+            else
+                default_inflation="${default_inflation}0,"
+            fi
+        done
+        default_inflation="${default_inflation%,}"
+        default_disabled_list=""
+        for ((i=0; i<total_chambers; i++)); do
+            if [ "$i" -ne 1 ] && [ "$i" -ne "$inflate_idx" ]; then
+                default_disabled_list="${default_disabled_list}${i},"
+            fi
+        done
+        default_disabled_list="${default_disabled_list%,}"
+        read -p "Inflation array ($total_chambers values: 0=inactive 1=active, comma-separated). Enter for default ($default_inflation), or 'none' for all inflatable: " chamber_inflation_input
+        if [ -z "$chamber_inflation_input" ]; then
+            chamber_inflation_disabled_arg="--chamber_inflation_disabled $default_disabled_list"
+            chamber_inflation_disabled_input="$default_disabled_list"
+        elif [ "$chamber_inflation_input" = "none" ] || [ "$chamber_inflation_input" = "all" ]; then
             chamber_inflation_disabled_arg="--chamber_inflation_disabled none"
+            chamber_inflation_disabled_input="none"
         else
-            chamber_inflation_disabled_arg="--chamber_inflation_disabled $chamber_inflation_disabled_input"
+            chamber_inflation_disabled_list=""
+            idx=0
+            IFS=',' read -ra INVALS <<< "$chamber_inflation_input"
+            for val in "${INVALS[@]}"; do
+                val=$(echo "$val" | tr -d ' ')
+                if [ "$val" = "0" ]; then
+                    chamber_inflation_disabled_list="${chamber_inflation_disabled_list}${idx},"
+                fi
+                idx=$((idx + 1))
+            done
+            chamber_inflation_disabled_list="${chamber_inflation_disabled_list%,}"
+            if [ -n "$chamber_inflation_disabled_list" ]; then
+                chamber_inflation_disabled_arg="--chamber_inflation_disabled $chamber_inflation_disabled_list"
+                chamber_inflation_disabled_input="$chamber_inflation_disabled_list"
+            else
+                chamber_inflation_disabled_arg="--chamber_inflation_disabled none"
+                chamber_inflation_disabled_input="none"
+            fi
         fi
     fi
     echo ""
     echo "Using: chambers X=$num_chambers_x Y=$num_chambers_y Z=$num_chambers_z length=$length width=$width height=$height subdivisions_x=$subdivisions_x subdivisions_y=$subdivisions_y subdivisions_z=$subdivisions_z anisotropy_x=$anisotropy_x anisotropy_y=$anisotropy_y anisotropy_z=$anisotropy_z"
     if [ -n "$chamber_inflation_disabled_arg" ]; then
-        echo "  (worm) inflatable chambers: disabled=${chamber_inflation_disabled_input:-0,2}"
+        echo "  inflatable chambers: disabled=${chamber_inflation_disabled_input:-0,2}"
     fi
     echo ""
     CHAMBERS_ARGS="--num_chambers_x $num_chambers_x --num_chambers_y $num_chambers_y --num_chambers_z $num_chambers_z --length $length --width $width --height $height --subdivisions_x $subdivisions_x --subdivisions_y $subdivisions_y --subdivisions_z $subdivisions_z --anisotropy_x $anisotropy_x --anisotropy_y $anisotropy_y --anisotropy_z $anisotropy_z --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 7200"
-    if [ -n "$chamber_stiffness_scale_arg" ]; then
-        CHAMBERS_ARGS="$CHAMBERS_ARGS $chamber_stiffness_scale_arg"
-    fi
-    if [ -n "$chamber_inflation_disabled_arg" ]; then
-        CHAMBERS_ARGS="$CHAMBERS_ARGS $chamber_inflation_disabled_arg"
+    if [ "$EXAMPLE" == "worm" ]; then
+        if [ -n "$chamber_stiffness_scale_arg" ]; then
+            CHAMBERS_ARGS="$CHAMBERS_ARGS $chamber_stiffness_scale_arg"
+        fi
+        if [ -n "$chamber_inflation_disabled_arg" ]; then
+            CHAMBERS_ARGS="$CHAMBERS_ARGS $chamber_inflation_disabled_arg"
+        fi
     fi
 fi
 
