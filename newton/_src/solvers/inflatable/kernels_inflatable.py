@@ -133,18 +133,21 @@ def scale_tet_poses_per_chamber_anisotropic_kernel(
     """
     Scale tetrahedra rest poses per chamber with anisotropy.
     Each tet is assigned to a chamber; its rest pose is scaled by that chamber's
-    pressure and global anisotropy. Chambers are spatially separate (e.g. slices along Z).
+    pressure and global anisotropy. Mask -1 = no inflation (stiff base).
     """
     tid = wp.tid()
     c = tet_chamber_mask[tid]
-    c = wp.max(0, wp.min(c, num_chambers - 1))
+    orig = original_poses[tid]
+    if c < 0:
+        scaled_poses[tid] = orig
+        return
+    c = wp.min(c, num_chambers - 1)
     pressure = chamber_pressures[c]
     pressure = wp.max(1.0e-6, wp.min(pressure, 100.0))
     linear_scale = wp.cbrt(pressure)
     inv_scale_x = 1.0 / (linear_scale * anisotropy_x)
     inv_scale_y = 1.0 / (linear_scale * anisotropy_y)
     inv_scale_z = 1.0 / (linear_scale * anisotropy_z)
-    orig = original_poses[tid]
     scaled_poses[tid] = wp.mat33(
         orig[0, 0] * inv_scale_x, orig[0, 1] * inv_scale_y, orig[0, 2] * inv_scale_z,
         orig[1, 0] * inv_scale_x, orig[1, 1] * inv_scale_y, orig[1, 2] * inv_scale_z,
@@ -160,10 +163,13 @@ def scale_spring_rest_lengths_per_chamber_kernel(
     num_chambers: int,
     scaled_rest_lengths: wp.array(dtype=wp.float32),
 ):
-    """Scale spring rest lengths per chamber (isotropic scale per spring from its chamber pressure)."""
+    """Scale spring rest lengths per chamber (isotropic scale per spring from its chamber pressure). Mask -1 = no inflation (stiff base)."""
     sid = wp.tid()
     c = spring_chamber_mask[sid]
-    c = wp.max(0, wp.min(c, num_chambers - 1))
+    if c < 0:
+        scaled_rest_lengths[sid] = original_rest_lengths[sid]
+        return
+    c = wp.min(c, num_chambers - 1)
     pressure = chamber_pressures[c]
     pressure = wp.max(1.0e-6, wp.min(pressure, 100.0))
     scale = wp.cbrt(pressure)

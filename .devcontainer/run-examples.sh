@@ -29,6 +29,7 @@ declare -a EXAMPLES=(
     "inflatable_table_box"
     "inflatable_table_sphere"
     "chambers"
+    "worm"
 )
 
 declare -A EXAMPLE_DESCRIPTIONS=(
@@ -45,6 +46,7 @@ declare -A EXAMPLE_DESCRIPTIONS=(
     ["inflatable_table_box"]="4 inflatable boxes at corners with rigid table top (Press I/K/O)"
     ["inflatable_table_sphere"]="4 inflatable spheres at corners with rigid table top (Press I/K/O)"
     ["chambers"]="N-chamber anisotropic inflatable box (Press I/K inflate/deflate, C chamber, N num chambers, A anisotropy)"
+    ["worm"]="Same as chambers (N-chamber inflatable); Press I/K inflate/deflate, C cycle chamber"
 )
 
 declare -A EXAMPLE_SOLVER_OPTIONS=(
@@ -152,16 +154,23 @@ if [ "$EXAMPLE" == "bouncing_box" ] && [ -z "$*" ]; then
     BOX_ARGS="--size $box_size --initial_height 2.5 --mass 0.5 --k_mu 2e5 --k_lambda 2e5 --k_damp 0.5 --substeps 8 --subdivisions $box_subdivisions --num_frames 600"
 fi
 
-# Interactive parameter selection for chambers
+# Interactive parameter selection for chambers and worm (same parameters)
 CHAMBERS_ARGS=""
-if [ "$EXAMPLE" == "chambers" ] && [ -z "$*" ]; then
+if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "worm" ]; } && [ -z "$*" ]; then
     echo "═══════════════════════════════════════════════════════════════"
-    echo "              Chambers - Parameters"
+    echo "              $EXAMPLE - Parameters (chambers per axis)"
     echo "═══════════════════════════════════════════════════════════════"
     echo ""
-    read -p "Number of chambers (default: 2): " num_chambers
-    if [ -z "$num_chambers" ]; then
-        num_chambers=2
+    read -p "Chambers along X (default: 1): " num_chambers_x
+    if [ -z "$num_chambers_x" ]; then num_chambers_x=1; fi
+    read -p "Chambers along Y (default: 2): " num_chambers_y
+    if [ -z "$num_chambers_y" ]; then num_chambers_y=2; fi
+    if [ "$EXAMPLE" == "worm" ]; then
+        read -p "Chambers along Z (default: 2): " num_chambers_z
+        if [ -z "$num_chambers_z" ]; then num_chambers_z=2; fi
+    else
+        read -p "Chambers along Z (default: 1): " num_chambers_z
+        if [ -z "$num_chambers_z" ]; then num_chambers_z=1; fi
     fi
     read -p "Length (X) in m (default: 1): " length
     if [ -z "$length" ]; then
@@ -171,9 +180,12 @@ if [ "$EXAMPLE" == "chambers" ] && [ -z "$*" ]; then
     if [ -z "$width" ]; then
         width=2
     fi
-    read -p "Height (Z) in m (default: 0.06): " height
-    if [ -z "$height" ]; then
-        height=0.06
+    if [ "$EXAMPLE" == "worm" ]; then
+        read -p "Height (Z) in m (default: 0.1): " height
+        if [ -z "$height" ]; then height=0.1; fi
+    else
+        read -p "Height (Z) in m (default: 0.06): " height
+        if [ -z "$height" ]; then height=0.06; fi
     fi
     read -p "Subdivisions X (default: 10): " subdivisions_x
     if [ -z "$subdivisions_x" ]; then
@@ -183,26 +195,61 @@ if [ "$EXAMPLE" == "chambers" ] && [ -z "$*" ]; then
     if [ -z "$subdivisions_y" ]; then
         subdivisions_y=30
     fi
-    read -p "Subdivisions Z (default: 2): " subdivisions_z
-    if [ -z "$subdivisions_z" ]; then
-        subdivisions_z=2
+    if [ "$EXAMPLE" == "worm" ]; then
+        read -p "Subdivisions Z (default: 4): " subdivisions_z
+        if [ -z "$subdivisions_z" ]; then subdivisions_z=4; fi
+    else
+        read -p "Subdivisions Z (default: 2): " subdivisions_z
+        if [ -z "$subdivisions_z" ]; then subdivisions_z=2; fi
     fi
-    read -p "Anisotropy X - orthogonal to chamber axis (default: 1.2): " anisotropy_x
+    read -p "Anisotropy X (default: 1.0): " anisotropy_x
     if [ -z "$anisotropy_x" ]; then
-        anisotropy_x=1.2
+        anisotropy_x=1.0
     fi
-    read -p "Anisotropy Y - along chamber axis, keep 1.0 (default: 1.0): " anisotropy_y
-    if [ -z "$anisotropy_y" ]; then
-        anisotropy_y=1.0
+    if [ "$EXAMPLE" == "worm" ]; then
+        read -p "Anisotropy Y for worm movements (default: 1.4): " anisotropy_y
+        if [ -z "$anisotropy_y" ]; then
+            anisotropy_y=1.4
+        fi
+    else
+        read -p "Anisotropy Y (default: 1.0): " anisotropy_y
+        if [ -z "$anisotropy_y" ]; then
+            anisotropy_y=1.0
+        fi
     fi
-    read -p "Anisotropy Z - orthogonal to chamber axis (default: 1.2): " anisotropy_z
+    read -p "Anisotropy Z (default: 1.0): " anisotropy_z
     if [ -z "$anisotropy_z" ]; then
-        anisotropy_z=1.2
+        anisotropy_z=1.0
+    fi
+    chamber_stiffness_scale_arg=""
+    chamber_inflation_disabled_arg=""
+    if [ "$EXAMPLE" == "worm" ]; then
+        read -p "Chamber stiffness scale - comma-separated per chamber (e.g. 4,1,4,1), or Enter for default (non-inflatable chambers 4x stiffer): " chamber_stiffness_scale_input
+        if [ -n "$chamber_stiffness_scale_input" ]; then
+            chamber_stiffness_scale_arg="--chamber_stiffness_scale $chamber_stiffness_scale_input"
+        fi
+        read -p "Chambers with inflation disabled - comma-separated indices, or Enter for 0,2, or 'none' for all inflatable: " chamber_inflation_disabled_input
+        if [ -z "$chamber_inflation_disabled_input" ]; then
+            chamber_inflation_disabled_arg="--chamber_inflation_disabled 0,2"
+        elif [ "$chamber_inflation_disabled_input" = "none" ] || [ "$chamber_inflation_disabled_input" = "all" ]; then
+            chamber_inflation_disabled_arg="--chamber_inflation_disabled none"
+        else
+            chamber_inflation_disabled_arg="--chamber_inflation_disabled $chamber_inflation_disabled_input"
+        fi
     fi
     echo ""
-    echo "Using: num_chambers=$num_chambers length=$length width=$width height=$height subdivisions_x=$subdivisions_x subdivisions_y=$subdivisions_y subdivisions_z=$subdivisions_z anisotropy_x=$anisotropy_x anisotropy_y=$anisotropy_y anisotropy_z=$anisotropy_z"
+    echo "Using: chambers X=$num_chambers_x Y=$num_chambers_y Z=$num_chambers_z length=$length width=$width height=$height subdivisions_x=$subdivisions_x subdivisions_y=$subdivisions_y subdivisions_z=$subdivisions_z anisotropy_x=$anisotropy_x anisotropy_y=$anisotropy_y anisotropy_z=$anisotropy_z"
+    if [ -n "$chamber_inflation_disabled_arg" ]; then
+        echo "  (worm) inflatable chambers: disabled=${chamber_inflation_disabled_input:-0,2}"
+    fi
     echo ""
-    CHAMBERS_ARGS="--num_chambers $num_chambers --chamber_axis y --length $length --width $width --height $height --subdivisions_x $subdivisions_x --subdivisions_y $subdivisions_y --subdivisions_z $subdivisions_z --anisotropy_x $anisotropy_x --anisotropy_y $anisotropy_y --anisotropy_z $anisotropy_z --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 7200"
+    CHAMBERS_ARGS="--num_chambers_x $num_chambers_x --num_chambers_y $num_chambers_y --num_chambers_z $num_chambers_z --length $length --width $width --height $height --subdivisions_x $subdivisions_x --subdivisions_y $subdivisions_y --subdivisions_z $subdivisions_z --anisotropy_x $anisotropy_x --anisotropy_y $anisotropy_y --anisotropy_z $anisotropy_z --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 7200"
+    if [ -n "$chamber_stiffness_scale_arg" ]; then
+        CHAMBERS_ARGS="$CHAMBERS_ARGS $chamber_stiffness_scale_arg"
+    fi
+    if [ -n "$chamber_inflation_disabled_arg" ]; then
+        CHAMBERS_ARGS="$CHAMBERS_ARGS $chamber_inflation_disabled_arg"
+    fi
 fi
 
 # Default stable parameters for examples that need them
@@ -288,7 +335,15 @@ if [ -z "$EXTRA_ARGS" ]; then
             if [ -n "$CHAMBERS_ARGS" ]; then
                 EXTRA_ARGS="$CHAMBERS_ARGS"
             else
-                EXTRA_ARGS="--length 1 --width 2 --height 0.06 --subdivisions_x 10 --subdivisions_y 30 --subdivisions_z 2 --num_chambers 2 --chamber_axis y --anisotropy_x 1.2 --anisotropy_z 1.2 --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 7200"
+                EXTRA_ARGS="--length 1 --width 2 --height 0.06 --subdivisions_x 10 --subdivisions_y 30 --subdivisions_z 2 --num_chambers_y 2 --anisotropy_x 1.2 --anisotropy_z 1.2 --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 7200"
+            fi
+            ;;
+        worm)
+            # Worm: same as chambers but default height 0.1, subdivisions_z 4
+            if [ -n "$CHAMBERS_ARGS" ]; then
+                EXTRA_ARGS="$CHAMBERS_ARGS"
+            else
+                EXTRA_ARGS="--length 1 --width 2 --height 0.1 --subdivisions_x 10 --subdivisions_y 30 --subdivisions_z 4 --num_chambers_y 2 --num_chambers_z 2 --chamber_inflation_disabled 0,2 --anisotropy_x 1.2 --anisotropy_z 1.2 --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 7200"
             fi
             ;;
     esac
