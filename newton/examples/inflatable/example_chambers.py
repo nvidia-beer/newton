@@ -59,6 +59,7 @@ class Example:
         num_chambers_y: int = 2,
         num_chambers_z: int = 1,
         initial_height: float = 0.5,
+        pos=None,
         mass: float = 1.0,
         k_mu: float = 1.0e5,
         k_lambda: float = 1.0e5,
@@ -86,6 +87,7 @@ class Example:
         self.num_chambers_z = max(1, int(num_chambers_z))
         self.total_chambers = self.num_chambers_x * self.num_chambers_y * self.num_chambers_z
         self.initial_height = initial_height
+        self.pos = pos if pos is not None else (0.0, 0.0, initial_height)
         self.mass = mass
         self.max_pressure = max_pressure
         self.anisotropy_x = float(anisotropy_x)
@@ -119,8 +121,9 @@ class Example:
             )
         )
         start_particle = builder.particle_count
+        px, py, pz = self.pos[0], self.pos[1], self.pos[2]
         builder.add_soft_mesh(
-            pos=wp.vec3(0.0, 0.0, initial_height),
+            pos=wp.vec3(float(px), float(py), float(pz)),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0, 0.0, 0.0),
             vertices=vertices,
@@ -402,6 +405,7 @@ def main():
     parser.add_argument("--num_chambers_y", type=int, default=2, help="Chamber splits along Y")
     parser.add_argument("--num_chambers_z", type=int, default=1, help="Chamber splits along Z")
     parser.add_argument("--initial_height", type=float, default=0.5)
+    parser.add_argument("--pos", type=float, nargs=3, default=None, metavar=("X", "Y", "Z"), help="Position (x y z). Default: (0 0 initial_height).")
     parser.add_argument("--mass", type=float, default=1.0)
     parser.add_argument("--k_mu", type=float, default=1.0e5)
     parser.add_argument("--k_lambda", type=float, default=1.0e5)
@@ -454,6 +458,7 @@ def main():
             num_chambers_y=args.num_chambers_y,
             num_chambers_z=args.num_chambers_z,
             initial_height=args.initial_height,
+            pos=args.pos,
             mass=args.mass,
             k_mu=args.k_mu,
             k_lambda=args.k_lambda,

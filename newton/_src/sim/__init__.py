@@ -33,6 +33,7 @@ from .style3d import Style3DModel, Style3DModelBuilder
 from .tetra_sphere import TetraSphere, create_tetra_sphere
 from .tetra_cylinder import TetraCylinder, create_tetra_cylinder
 from .tetra_box import TetraBox, create_tetra_box
+from .surface_box import SurfaceBox, create_surface_box
 
 __all__ = [
     "JOINT_LIMIT_UNLIMITED",
@@ -53,6 +54,8 @@ __all__ = [
     "TetraSphere",
     "TetraCylinder",
     "TetraBox",
+    "SurfaceBox",
+    "create_surface_box",
     "color_graph",
     "count_rigid_contact_points",
     "create_tetra_sphere",

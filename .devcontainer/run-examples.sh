@@ -29,6 +29,7 @@ declare -a EXAMPLES=(
     "inflatable_table_box"
     "inflatable_table_sphere"
     "chambers"
+    "inflatable_glue"
     "worm"
 )
 
@@ -46,6 +47,7 @@ declare -A EXAMPLE_DESCRIPTIONS=(
     ["inflatable_table_box"]="4 inflatable boxes at corners with rigid table top (Press I/K/O)"
     ["inflatable_table_sphere"]="4 inflatable spheres at corners with rigid table top (Press I/K/O)"
     ["chambers"]="N-chamber anisotropic inflatable box (Press I/K inflate/deflate, C chamber, N num chambers, A anisotropy)"
+    ["inflatable_glue"]="Rigid + Inflatable glued by proximity springs (Press I/K/O, G/F glue)"
     ["worm"]="Same as chambers (N-chamber inflatable); Press I/K inflate/deflate, C cycle chamber"
 )
 
@@ -152,6 +154,72 @@ if [ "$EXAMPLE" == "bouncing_box" ] && [ -z "$*" ]; then
     
     # Use default values for other parameters
     BOX_ARGS="--size $box_size --initial_height 2.5 --mass 0.5 --k_mu 2e5 --k_lambda 2e5 --k_damp 0.5 --substeps 8 --subdivisions $box_subdivisions --num_frames 600"
+fi
+
+# Interactive parameter selection for inflatable_glue (position + all params)
+GLUE_ARGS=""
+if [ "$EXAMPLE" == "inflatable_glue" ] && [ -z "$*" ]; then
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "              Inflatable Glue - Parameters"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo ""
+    echo "Mesh dimensions (width=X, height=Y, depth=Z in meters):"
+    read -p "  Width (X) in m (default: 1): " glue_width
+    if [ -z "$glue_width" ]; then glue_width=1; fi
+    read -p "  Height (Y) in m (default: 1): " glue_height
+    if [ -z "$glue_height" ]; then glue_height=1; fi
+    read -p "  Depth (Z) in m (default: 1): " glue_depth
+    if [ -z "$glue_depth" ]; then glue_depth=1; fi
+    glue_size="$glue_width $glue_height $glue_depth"
+
+    read -p "Subdivisions X Y Z (default: 5 5 5): " glue_subdivisions
+    if [ -z "$glue_subdivisions" ]; then glue_subdivisions="5 5 5"; fi
+
+    # Default positions (stacked) from dimensions
+    rigid_z_def=$(awk "BEGIN {printf \"%.3f\", $glue_depth/2}")
+    inflatable_z_def=$(awk "BEGIN {printf \"%.3f\", $glue_depth + $glue_depth/2}")
+
+    echo ""
+    echo "Positions (x y z in meters, center of each box):"
+    read -p "  Rigid position (default: 0 0 $rigid_z_def): " glue_rigid_pos
+    if [ -z "$glue_rigid_pos" ]; then glue_rigid_pos="0 0 $rigid_z_def"; fi
+    read -p "  Inflatable position (default: 0 0 $inflatable_z_def): " glue_inflatable_pos
+    if [ -z "$glue_inflatable_pos" ]; then glue_inflatable_pos="0 0 $inflatable_z_def"; fi
+    glue_pos_args="--rigid_pos $glue_rigid_pos --inflatable_pos $glue_inflatable_pos"
+
+    echo ""
+    read -p "Mass (default: 1.0): " glue_mass
+    if [ -z "$glue_mass" ]; then glue_mass=1.0; fi
+    read -p "Rigid mass (default: 0.2): " glue_rigid_mass
+    if [ -z "$glue_rigid_mass" ]; then glue_rigid_mass=0.2; fi
+    read -p "Glue epsilon in m (default: 0.05): " glue_epsilon
+    if [ -z "$glue_epsilon" ]; then glue_epsilon=0.05; fi
+    read -p "Glue stiffness ke (default: 5e4): " glue_ke
+    if [ -z "$glue_ke" ]; then glue_ke=5e4; fi
+    read -p "Glue damping kd (default: 200): " glue_kd
+    if [ -z "$glue_kd" ]; then glue_kd=200; fi
+    read -p "Max pressure (default: 5.0): " glue_max_pressure
+    if [ -z "$glue_max_pressure" ]; then glue_max_pressure=5.0; fi
+    read -p "Substeps (default: 8): " glue_substeps
+    if [ -z "$glue_substeps" ]; then glue_substeps=8; fi
+    read -p "XPBD iterations (default: 10): " glue_xpbd_iter
+    if [ -z "$glue_xpbd_iter" ]; then glue_xpbd_iter=10; fi
+    read -p "Num frames (default: 1800): " glue_num_frames
+    if [ -z "$glue_num_frames" ]; then glue_num_frames=1800; fi
+
+    echo ""
+    echo "Gravity: 0 = disabled, 9.81 = Earth default"
+    read -p "Gravity in m/s² (default: 9.81, 0 to disable): " glue_gravity
+    if [ -z "$glue_gravity" ]; then glue_gravity=9.81; fi
+
+    echo ""
+    echo "Using size=$glue_size (w=$glue_width h=$glue_height d=$glue_depth) subdivisions=$glue_subdivisions"
+    echo "  rigid_pos=$glue_rigid_pos  inflatable_pos=$glue_inflatable_pos"
+    echo "  mass=$glue_mass rigid_mass=$glue_rigid_mass glue_epsilon=$glue_epsilon"
+    echo "  glue_ke=$glue_ke glue_kd=$glue_kd max_pressure=$glue_max_pressure"
+    echo "  gravity=$glue_gravity substeps=$glue_substeps xpbd_iterations=$glue_xpbd_iter num_frames=$glue_num_frames"
+    echo ""
+    GLUE_ARGS="--size $glue_size --subdivisions $glue_subdivisions $glue_pos_args --mass $glue_mass --rigid_mass $glue_rigid_mass --glue_epsilon $glue_epsilon --glue_ke $glue_ke --glue_kd $glue_kd --max_pressure $glue_max_pressure --gravity $glue_gravity --substeps $glue_substeps --xpbd_iterations $glue_xpbd_iter --num_frames $glue_num_frames"
 fi
 
 # Interactive parameter selection for chambers and worm (same parameters)
@@ -302,7 +370,7 @@ if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "worm" ]; } && [ -z "$*" ];
         echo "  inflatable chambers: disabled=${chamber_inflation_disabled_input:-0,2}"
     fi
     echo ""
-    CHAMBERS_ARGS="--num_chambers_x $num_chambers_x --num_chambers_y $num_chambers_y --num_chambers_z $num_chambers_z --length $length --width $width --height $height --subdivisions_x $subdivisions_x --subdivisions_y $subdivisions_y --subdivisions_z $subdivisions_z --anisotropy_x $anisotropy_x --anisotropy_y $anisotropy_y --anisotropy_z $anisotropy_z --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 7200"
+    CHAMBERS_ARGS="--num_chambers_x $num_chambers_x --num_chambers_y $num_chambers_y --num_chambers_z $num_chambers_z --length $length --width $width --height $height --subdivisions_x $subdivisions_x --subdivisions_y $subdivisions_y --subdivisions_z $subdivisions_z --anisotropy_x $anisotropy_x --anisotropy_y $anisotropy_y --anisotropy_z $anisotropy_z --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 14400"
     if [ "$EXAMPLE" == "worm" ]; then
         if [ -n "$chamber_stiffness_scale_arg" ]; then
             CHAMBERS_ARGS="$CHAMBERS_ARGS $chamber_stiffness_scale_arg"
@@ -314,101 +382,114 @@ if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "worm" ]; } && [ -z "$*" ];
 fi
 
 # Default stable parameters for examples that need them
-EXTRA_ARGS="$*"
-if [ -z "$EXTRA_ARGS" ]; then
-    case "$EXAMPLE" in
+# User-passed args ($*) are merged with defaults so you can override individual params
+DEFAULT_ARGS=""
+case "$EXAMPLE" in
         bouncing_sphere)
             # Stable and fast: fewer substeps, coarser mesh
-            EXTRA_ARGS="--radius 0.3 --initial_height 0.9 --k_mu 4e4 --k_lambda 4e4 --k_damp 3.0 --substeps 10 --subdivisions 1 --interior_layers 1"
+            DEFAULT_ARGS="--radius 0.3 --initial_height 0.9 --k_mu 4e4 --k_lambda 4e4 --k_damp 3.0 --substeps 10 --subdivisions 1 --interior_layers 1"
             ;;
         bouncing_cylinder)
             # Cylinder bouncing and tumbling
-            EXTRA_ARGS="--radius 0.2 --height 0.6 --initial_height 2.5 --k_mu 2e5 --k_lambda 2e5 --k_damp 0.5 --substeps 8 --radial_subdivisions 16 --height_subdivisions 1 --interior_layers 2"
+            DEFAULT_ARGS="--radius 0.2 --height 0.6 --initial_height 2.5 --k_mu 2e5 --k_lambda 2e5 --k_damp 0.5 --substeps 8 --radial_subdivisions 16 --height_subdivisions 1 --interior_layers 2"
             ;;
         bouncing_box)
             # Use interactive selection if available, otherwise use default
             if [ -n "$BOX_ARGS" ]; then
-                EXTRA_ARGS="$BOX_ARGS"
+                DEFAULT_ARGS="$BOX_ARGS"
             else
                 # Box bouncing and tumbling - subdivided into multiple cubic elements
                 # Larger non-uniform box: size=(0.6, 0.8, 1.0), subdivisions=(3, 5, 7)
                 # Creates 105 cubic elements (630 tetrahedra) with non-uniform subdivision
                 # Each cube uses stable 6-tet pattern (all share v6 corner vertex)
-                EXTRA_ARGS="--size 0.6 0.8 1.0 --initial_height 2.5 --mass 0.5 --k_mu 2e5 --k_lambda 2e5 --k_damp 0.5 --substeps 8 --subdivisions 3 5 7 --num_frames 600"
+                DEFAULT_ARGS="--size 0.6 0.8 1.0 --initial_height 2.5 --mass 0.5 --k_mu 2e5 --k_lambda 2e5 --k_damp 0.5 --substeps 8 --subdivisions 3 5 7 --num_frames 600"
             fi
             ;;
         rigid_soft_interaction)
             # Rigid ball drops onto soft ball (SolverSoft - pure FEM, no pressure control)
             # Solver will be selected interactively or via --solver xpbd|mujoco
-            EXTRA_ARGS="--ball-radius 0.3 --drop-height 1.5 --substeps 16"
+            DEFAULT_ARGS="--ball-radius 0.3 --drop-height 1.5 --substeps 16"
             ;;
         soft_on_box)
             # Soft sphere sitting on top of rigid XPBD box
             # Demonstrates constraint-based contact handling (prevents penetration)
             # Use --constraint-contacts to enable constraint-based contacts
             # Note: substeps is hardcoded to 16 in the example (not a CLI argument)
-            EXTRA_ARGS="--constraint-contacts"
+            DEFAULT_ARGS="--constraint-contacts"
             ;;
         bouncing_mesh)
             # Mesh-based bouncing simulation - automatically uses spot_fixed.mesh if available, else spot.mesh
             # Parameters match old working example for stability, with increased substeps
             # spot_fixed.mesh is normalized to 10m, use --scale 0.1 to get 1m mesh
             # To create spot_fixed.mesh: ./create-spot-fixed-mesh.sh
-            EXTRA_ARGS="--scale 0.1 --initial_height 0.2 --mass 1.0 --k_mu 5.0 --k_lambda 5.0 --k_damp 40.0 --spring_ke 50.0 --spring_kd 40.0 --substeps 20"
+            DEFAULT_ARGS="--scale 0.1 --initial_height 0.2 --mass 1.0 --k_mu 5.0 --k_lambda 5.0 --k_damp 40.0 --spring_ke 50.0 --spring_kd 40.0 --substeps 20"
             ;;
         inflatable_box)
             # Inflatable soft body box with manual pressure control
             # Press I to inflate, K to deflate, O to reset
             # Using 5x5x5 subdivisions for more particles (125 cells = 750 tetrahedra)
-            EXTRA_ARGS="--size 0.4 0.4 0.4 --initial_height 0.5 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --max_pressure 5.0 --substeps 5 --subdivisions 5 5 5 --num_frames 1800"
+            DEFAULT_ARGS="--size 0.4 0.4 0.4 --initial_height 0.5 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --max_pressure 5.0 --substeps 5 --subdivisions 5 5 5 --num_frames 1800"
             ;;
         inflatable_sphere)
             # Inflatable soft body sphere with manual pressure control
             # Press I to inflate, K to deflate, O to reset
-            EXTRA_ARGS="--radius 0.3 --initial_height 0.4 --k_mu 5e4 --k_lambda 5e4 --k_damp 2.0 --max_pressure 5.0 --substeps 8 --subdivisions 2 --interior_layers 2 --num_frames 1800"
+            DEFAULT_ARGS="--radius 0.3 --initial_height 0.4 --k_mu 5e4 --k_lambda 5e4 --k_damp 2.0 --max_pressure 5.0 --substeps 8 --subdivisions 2 --interior_layers 2 --num_frames 1800"
             ;;
         inflatable_rigid_box)
             # Inflatable soft body box with large flat rigid plate on top
             # Plate is 5x the soft body size (3.0m for 0.3m box)
             # Note: Using heavier mass (0.01kg) and smaller particle radius (0.015m) for better MuJoCo interaction
-            EXTRA_ARGS="--size 0.3 0.3 0.3 --rigid_width 3.0 --rigid_mass 0.01 --particle_radius 0.015 --k_mu 1e5 --k_lambda 1e5 --k_damp 5.0 --spring_ke 5e4 --spring_kd 5.0 --max_pressure 5.0 --substeps 16 --subdivisions 3 3 3 --num_frames 800"
+            DEFAULT_ARGS="--size 0.3 0.3 0.3 --rigid_width 3.0 --rigid_mass 0.01 --particle_radius 0.015 --k_mu 1e5 --k_lambda 1e5 --k_damp 5.0 --spring_ke 5e4 --spring_kd 5.0 --max_pressure 5.0 --substeps 16 --subdivisions 3 3 3 --num_frames 800"
             ;;
         inflatable_rigid_sphere)
             # Inflatable soft body sphere with large flat rigid plate on top
             # Plate is 5x the soft body diameter (3.0m for 0.3m radius soft)
             # Note: Using heavier mass (0.01kg) and smaller particle radius (0.015m) for better MuJoCo interaction
-            EXTRA_ARGS="--radius 0.3 --rigid_width 3.0 --rigid_mass 0.01 --particle_radius 0.015 --k_mu 1e5 --k_lambda 1e5 --k_damp 5.0 --spring_ke 5e4 --spring_kd 5.0 --max_pressure 5.0 --substeps 16 --subdivisions 2 --interior_layers 2 --num_frames 800"
+            DEFAULT_ARGS="--radius 0.3 --rigid_width 3.0 --rigid_mass 0.01 --particle_radius 0.015 --k_mu 1e5 --k_lambda 1e5 --k_damp 5.0 --spring_ke 5e4 --spring_kd 5.0 --max_pressure 5.0 --substeps 16 --subdivisions 2 --interior_layers 2 --num_frames 800"
             ;;
         inflatable_table_box)
             # Inflatable table: 4 soft body boxes at corners supporting a rigid plate
             # Press I to inflate, K to deflate, O to reset
             # Note: plate is ultra-light (0.001kg) with high friction to prevent sliding
-            EXTRA_ARGS="--size 0.25 0.25 0.25 --rigid_width 3.0 --rigid_mass 0.001 --particle_radius 0.03 --k_mu 5e4 --k_lambda 5e4 --k_damp 50.0 --spring_ke 2e4 --spring_kd 20.0 --max_pressure 5.0 --substeps 32 --subdivisions 3 3 3 --num_frames 800"
+            DEFAULT_ARGS="--size 0.25 0.25 0.25 --rigid_width 3.0 --rigid_mass 0.001 --particle_radius 0.03 --k_mu 5e4 --k_lambda 5e4 --k_damp 50.0 --spring_ke 2e4 --spring_kd 20.0 --max_pressure 5.0 --substeps 32 --subdivisions 3 3 3 --num_frames 800"
             ;;
         inflatable_table_sphere)
             # Inflatable table: 4 soft body spheres at corners supporting a rigid plate
             # Press I to inflate, K to deflate, O to reset
             # Note: plate must be ultra-light (0.004kg) for contact forces to work
-            EXTRA_ARGS="--radius 0.25 --rigid_width 3.0 --rigid_mass 0.004 --particle_radius 0.03 --k_mu 5e4 --k_lambda 5e4 --k_damp 50.0 --spring_ke 2e4 --spring_kd 20.0 --max_pressure 5.0 --substeps 32 --subdivisions 2 --interior_layers 2 --num_frames 800"
+            DEFAULT_ARGS="--radius 0.25 --rigid_width 3.0 --rigid_mass 0.004 --particle_radius 0.03 --k_mu 5e4 --k_lambda 5e4 --k_damp 50.0 --spring_ke 2e4 --spring_kd 20.0 --max_pressure 5.0 --substeps 32 --subdivisions 2 --interior_layers 2 --num_frames 800"
+            ;;
+        inflatable_glue)
+            # Stacked by default (rigid bottom, inflatable on top); use GLUE_ARGS if interactive selection ran
+            if [ -n "$GLUE_ARGS" ]; then
+                DEFAULT_ARGS="$GLUE_ARGS"
+            else
+                DEFAULT_ARGS="--size 0.4 0.4 0.4 --subdivisions 5 5 5 --rigid_z_base 0 --stack_gap 0 --mass 1.0 --rigid_mass 0.2 --glue_epsilon 0.05 --glue_ke 5e4 --glue_kd 200 --max_pressure 5.0 --gravity 9.81 --substeps 8 --xpbd_iterations 10 --num_frames 1800"
+            fi
             ;;
         chambers)
             # Flat rectangular slab, 2 chambers side-by-side (bends with differential pressure)
             if [ -n "$CHAMBERS_ARGS" ]; then
-                EXTRA_ARGS="$CHAMBERS_ARGS"
+                DEFAULT_ARGS="$CHAMBERS_ARGS"
             else
-                EXTRA_ARGS="--length 1 --width 2 --height 0.06 --subdivisions_x 10 --subdivisions_y 30 --subdivisions_z 2 --num_chambers_y 2 --anisotropy_x 1.2 --anisotropy_z 1.2 --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 7200"
+                DEFAULT_ARGS="--length 1 --width 2 --height 0.06 --subdivisions_x 10 --subdivisions_y 30 --subdivisions_z 2 --num_chambers_y 2 --pos 0 0 0.3 --anisotropy_x 1.2 --anisotropy_z 1.2 --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 14400"
             fi
             ;;
         worm)
             # Worm: same as chambers but default height 0.1, subdivisions_z 4
             if [ -n "$CHAMBERS_ARGS" ]; then
-                EXTRA_ARGS="$CHAMBERS_ARGS"
+                DEFAULT_ARGS="$CHAMBERS_ARGS"
             else
-                EXTRA_ARGS="--length 1 --width 2 --height 0.1 --subdivisions_x 10 --subdivisions_y 30 --subdivisions_z 4 --num_chambers_y 2 --num_chambers_z 2 --chamber_inflation_disabled 0,2 --anisotropy_x 1.2 --anisotropy_z 1.2 --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 7200"
+                DEFAULT_ARGS="--length 1 --width 2 --height 0.1 --subdivisions_x 10 --subdivisions_y 30 --subdivisions_z 4 --num_chambers_y 2 --num_chambers_z 2 --pos 0 0 0.3 --chamber_inflation_disabled 0,2 --anisotropy_x 1.2 --anisotropy_z 1.2 --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 14400"
             fi
             ;;
+        *)
+            DEFAULT_ARGS=""
+            ;;
     esac
-fi
+
+# Merge defaults with user overrides (user args go last, so they override)
+EXTRA_ARGS="$DEFAULT_ARGS $*"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NEWTON_DIR="$(dirname "$SCRIPT_DIR")"
