@@ -23,6 +23,8 @@ vertex gets a spring to that closest rigid vertex.
 Usage:
     python -m newton.examples inflatable_glue [--glue_epsilon 0.05]
     ./run-examples.sh inflatable_glue
+    # Rigid on top:  --top rigid
+    # Soft on top (default):  --top soft
 
 Keys: [I/K/O] inflate/deflate/reset | [G/F] glue stronger/weaker
 """
@@ -165,6 +167,7 @@ class Example:
         inflatable_pos=None,
         rigid_z_base: float = 0.0,
         stack_gap: float = 0.0,
+        soft_on_top: bool = True,
         glue_epsilon: float = 0.05,
         glue_ke: float = 5.0e4,
         glue_kd: float = 200.0,
@@ -213,15 +216,19 @@ class Example:
         self.debug_track = False
 
         w, h, d = self.size
-        # Stacked: rigid bottom at rigid_z_base, inflatable on top with optional stack_gap
+        # Stacked: rigid_z_base at ground; soft_on_top=True: rigid bottom, inflatable on top; False: inflatable bottom, rigid on top
         if rigid_pos is not None:
             rp = rigid_pos
+        elif soft_on_top:
+            rp = (0.0, 0.0, rigid_z_base + d / 2.0)  # rigid at bottom
         else:
-            rp = (0.0, 0.0, rigid_z_base + d / 2.0)  # center so bottom z=rigid_z_base
+            rp = (0.0, 0.0, rigid_z_base + d + stack_gap + d / 2.0)  # rigid on top
         if inflatable_pos is not None:
             ip = inflatable_pos
+        elif soft_on_top:
+            ip = (0.0, 0.0, rigid_z_base + d + stack_gap + d / 2.0)  # inflatable on top
         else:
-            ip = (0.0, 0.0, rigid_z_base + d + stack_gap + d / 2.0)  # bottom at rigid_top + stack_gap
+            ip = (0.0, 0.0, rigid_z_base + d / 2.0)  # inflatable at bottom
         self.rigid_pos = wp.vec3(float(rp[0]), float(rp[1]), float(rp[2]))
         self.inflatable_pos = wp.vec3(float(ip[0]), float(ip[1]), float(ip[2]))
 
@@ -232,7 +239,8 @@ class Example:
 
         # --- Both in SAME world so they share coordinates and display stacked ---
         # Rigid has has_particle_collision=False so inflatable particles don't collide with it
-        print("\n📦 [1/3] Creating rigid body (bottom)...", flush=True)
+        rigid_pos_str = "bottom" if soft_on_top else "top"
+        print(f"\n📦 [1/3] Creating rigid body ({rigid_pos_str})...", flush=True)
         builder.begin_world()
         surface_box = SurfaceBox(
             size=self.size,
@@ -266,8 +274,9 @@ class Example:
         )
         self._rigid_vertices = rigid_vertices
 
-        # --- Inflatable (same world) on top of rigid ---
-        print("\n📦 [2/3] Creating inflatable tetrahedral box (on top)...", flush=True)
+        # --- Inflatable (same world) stacked with rigid ---
+        inflatable_pos_str = "on top" if soft_on_top else "at bottom"
+        print(f"\n📦 [2/3] Creating inflatable tetrahedral box ({inflatable_pos_str})...", flush=True)
         tetra_box = TetraBox(
             size=self.size,
             subdivisions=self.subdivisions,
@@ -637,6 +646,7 @@ def main():
     parser.add_argument("--inflatable_pos", type=float, nargs=3, default=None, metavar=("X","Y","Z"), help="Inflatable box center (x y z); overrides stacking")
     parser.add_argument("--rigid_z_base", type=float, default=0.0, help="Rigid box bottom z (when not using --rigid_pos)")
     parser.add_argument("--stack_gap", type=float, default=0.0, help="Gap (m) between rigid top and inflatable bottom when stacked")
+    parser.add_argument("--top", choices=["soft", "rigid"], default="soft", help="Which object on top: soft (inflatable) or rigid (default: soft)")
     parser.add_argument("--glue_epsilon", type=float, default=0.05, help="Max distance (m) for proximity glue pairs at init")
     parser.add_argument("--glue_ke", type=float, default=5.0e4, help="Glue spring stiffness")
     parser.add_argument("--glue_kd", type=float, default=200.0, help="Glue spring damping")
@@ -680,6 +690,7 @@ def main():
             inflatable_pos=args.inflatable_pos,
             rigid_z_base=args.rigid_z_base,
             stack_gap=args.stack_gap,
+            soft_on_top=(args.top == "soft"),
             glue_epsilon=args.glue_epsilon,
             glue_ke=args.glue_ke,
             glue_kd=args.glue_kd,

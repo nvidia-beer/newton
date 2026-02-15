@@ -4,7 +4,7 @@
 # Examples:
 #   ./run-examples.sh                                  # Interactive menu
 #   ./run-examples.sh 1                                # Run example 1
-#   ./run-examples.sh bouncing_ball
+#   ./run-examples.sh bouncing_sphere
 #   ./run-examples.sh rigid_soft_interaction           # Default: XPBD solver
 #   ./run-examples.sh rigid_soft_interaction --solver xpbd
 #   ./run-examples.sh rigid_soft_interaction --solver mujoco
@@ -17,38 +17,34 @@ set -e
 # Define available examples
 declare -a EXAMPLES=(
     "bouncing_sphere"
-    "bouncing_cylinder"
     "bouncing_box"
     "rigid_soft_interaction"
     "soft_on_box"
-    "bouncing_mesh"
     "inflatable_box"
     "inflatable_sphere"
     "inflatable_rigid_box"
     "inflatable_rigid_sphere"
-    "inflatable_table_box"
-    "inflatable_table_sphere"
     "chambers"
     "inflatable_glue"
     "worm"
+    "rigid_carpet"
+    "inflatable_table_glue"
 )
 
 declare -A EXAMPLE_DESCRIPTIONS=(
     ["bouncing_sphere"]="Soft sphere bouncing on the ground"
-    ["bouncing_cylinder"]="Soft cylinder bouncing and tumbling"
     ["bouncing_box"]="Soft box bouncing and tumbling"
     ["rigid_soft_interaction"]="Rigid-soft interaction (supports --solver xpbd|mujoco)"
     ["soft_on_box"]="Soft object sitting on rigid XPBD box (supports --constraint-contacts)"
-    ["bouncing_mesh"]="Mesh-based bouncing simulation"
     ["inflatable_box"]="Inflatable soft body box with pressure control (Press I/K/O)"
     ["inflatable_sphere"]="Inflatable soft body sphere with pressure control (Press I/K/O)"
     ["inflatable_rigid_box"]="Inflatable box with rigid plate on top (supports --solver xpbd|mujoco)"
     ["inflatable_rigid_sphere"]="Inflatable sphere with rigid plate on top (supports --solver xpbd|mujoco)"
-    ["inflatable_table_box"]="4 inflatable boxes at corners with rigid table top (Press I/K/O)"
-    ["inflatable_table_sphere"]="4 inflatable spheres at corners with rigid table top (Press I/K/O)"
     ["chambers"]="N-chamber anisotropic inflatable box (Press I/K inflate/deflate, C chamber, N num chambers, A anisotropy)"
-    ["inflatable_glue"]="Rigid + Inflatable glued by proximity springs (Press I/K/O, G/F glue)"
+    ["inflatable_glue"]="Rigid + Inflatable glued by proximity springs (--top soft|rigid; Press I/K/O, G/F glue)"
     ["worm"]="Same as chambers (N-chamber inflatable); Press I/K inflate/deflate, C cycle chamber"
+    ["rigid_carpet"]="DEBUG: Rigid plates on ground + glue (minimal, no soft body)"
+    ["inflatable_table_glue"]="Table: 4 soft legs glued to rigid plate (SurfaceBox); Press I/K/O, G/F"
 )
 
 declare -A EXAMPLE_SOLVER_OPTIONS=(
@@ -97,6 +93,9 @@ fi
 
 # Show selected example
 echo "Running example: $EXAMPLE"
+if [ "$EXAMPLE" == "rigid_carpet" ]; then
+    echo "  (To add params, pass them after the example: ./run-examples.sh rigid_carpet --glue_ke_rr 1e5 --glue_kd_rr 500)"
+fi
 echo ""
 
 # Check if this example supports solver selection and user hasn't specified --solver
@@ -163,6 +162,22 @@ if [ "$EXAMPLE" == "inflatable_glue" ] && [ -z "$*" ]; then
     echo "              Inflatable Glue - Parameters"
     echo "═══════════════════════════════════════════════════════════════"
     echo ""
+    echo "Which object on top?"
+    echo "  1) soft    - Inflatable soft body on top (default)"
+    echo "  2) rigid   - Rigid box on top"
+    echo ""
+    read -p "Select (1-2, Enter for soft): " glue_top_choice
+    case "$glue_top_choice" in
+        2)
+            glue_top_arg="--top rigid"
+            echo "Selected: rigid on top"
+            ;;
+        *)
+            glue_top_arg="--top soft"
+            echo "Selected: soft on top"
+            ;;
+    esac
+    echo ""
     echo "Mesh dimensions (width=X, height=Y, depth=Z in meters):"
     read -p "  Width (X) in m (default: 1): " glue_width
     if [ -z "$glue_width" ]; then glue_width=1; fi
@@ -175,9 +190,14 @@ if [ "$EXAMPLE" == "inflatable_glue" ] && [ -z "$*" ]; then
     read -p "Subdivisions X Y Z (default: 5 5 5): " glue_subdivisions
     if [ -z "$glue_subdivisions" ]; then glue_subdivisions="5 5 5"; fi
 
-    # Default positions (stacked) from dimensions
-    rigid_z_def=$(awk "BEGIN {printf \"%.3f\", $glue_depth/2}")
-    inflatable_z_def=$(awk "BEGIN {printf \"%.3f\", $glue_depth + $glue_depth/2}")
+    # Default positions (stacked) from dimensions and top choice
+    if [ "$glue_top_arg" = "--top rigid" ]; then
+        rigid_z_def=$(awk "BEGIN {printf \"%.3f\", $glue_depth + $glue_depth/2}")
+        inflatable_z_def=$(awk "BEGIN {printf \"%.3f\", $glue_depth/2}")
+    else
+        rigid_z_def=$(awk "BEGIN {printf \"%.3f\", $glue_depth/2}")
+        inflatable_z_def=$(awk "BEGIN {printf \"%.3f\", $glue_depth + $glue_depth/2}")
+    fi
 
     echo ""
     echo "Positions (x y z in meters, center of each box):"
@@ -219,7 +239,28 @@ if [ "$EXAMPLE" == "inflatable_glue" ] && [ -z "$*" ]; then
     echo "  glue_ke=$glue_ke glue_kd=$glue_kd max_pressure=$glue_max_pressure"
     echo "  gravity=$glue_gravity substeps=$glue_substeps xpbd_iterations=$glue_xpbd_iter num_frames=$glue_num_frames"
     echo ""
-    GLUE_ARGS="--size $glue_size --subdivisions $glue_subdivisions $glue_pos_args --mass $glue_mass --rigid_mass $glue_rigid_mass --glue_epsilon $glue_epsilon --glue_ke $glue_ke --glue_kd $glue_kd --max_pressure $glue_max_pressure --gravity $glue_gravity --substeps $glue_substeps --xpbd_iterations $glue_xpbd_iter --num_frames $glue_num_frames"
+    GLUE_ARGS="--size $glue_size --subdivisions $glue_subdivisions $glue_top_arg $glue_pos_args --mass $glue_mass --rigid_mass $glue_rigid_mass --glue_epsilon $glue_epsilon --glue_ke $glue_ke --glue_kd $glue_kd --max_pressure $glue_max_pressure --gravity $glue_gravity --substeps $glue_substeps --xpbd_iterations $glue_xpbd_iter --num_frames $glue_num_frames"
+fi
+
+# Interactive parameter selection for soft_on_box (constraint vs force-based contacts)
+SOFT_ON_BOX_ARGS=""
+if [ "$EXAMPLE" == "soft_on_box" ] && [ -z "$*" ]; then
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "              soft_on_box - Contact mode"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo ""
+    echo "  Constraint-based: position corrections after integration (no penetration)"
+    echo "  Force-based:     penalty forces only (may sink into box slightly)"
+    echo ""
+    read -p "Use constraint-based contacts? (y/n, default y): " soft_contact_choice
+    if [ "$soft_contact_choice" = "n" ] || [ "$soft_contact_choice" = "N" ]; then
+        SOFT_ON_BOX_ARGS="--no-constraint-contacts"
+        echo "Selected: force-based contacts"
+    else
+        SOFT_ON_BOX_ARGS="--constraint-contacts"
+        echo "Selected: constraint-based contacts"
+    fi
+    echo ""
 fi
 
 # Interactive parameter selection for chambers and worm (same parameters)
@@ -389,10 +430,6 @@ case "$EXAMPLE" in
             # Stable and fast: fewer substeps, coarser mesh
             DEFAULT_ARGS="--radius 0.3 --initial_height 0.9 --k_mu 4e4 --k_lambda 4e4 --k_damp 3.0 --substeps 10 --subdivisions 1 --interior_layers 1"
             ;;
-        bouncing_cylinder)
-            # Cylinder bouncing and tumbling
-            DEFAULT_ARGS="--radius 0.2 --height 0.6 --initial_height 2.5 --k_mu 2e5 --k_lambda 2e5 --k_damp 0.5 --substeps 8 --radial_subdivisions 16 --height_subdivisions 1 --interior_layers 2"
-            ;;
         bouncing_box)
             # Use interactive selection if available, otherwise use default
             if [ -n "$BOX_ARGS" ]; then
@@ -412,17 +449,12 @@ case "$EXAMPLE" in
             ;;
         soft_on_box)
             # Soft sphere sitting on top of rigid XPBD box
-            # Demonstrates constraint-based contact handling (prevents penetration)
-            # Use --constraint-contacts to enable constraint-based contacts
-            # Note: substeps is hardcoded to 16 in the example (not a CLI argument)
-            DEFAULT_ARGS="--constraint-contacts"
-            ;;
-        bouncing_mesh)
-            # Mesh-based bouncing simulation - automatically uses spot_fixed.mesh if available, else spot.mesh
-            # Parameters match old working example for stability, with increased substeps
-            # spot_fixed.mesh is normalized to 10m, use --scale 0.1 to get 1m mesh
-            # To create spot_fixed.mesh: ./create-spot-fixed-mesh.sh
-            DEFAULT_ARGS="--scale 0.1 --initial_height 0.2 --mass 1.0 --k_mu 5.0 --k_lambda 5.0 --k_damp 40.0 --spring_ke 50.0 --spring_kd 40.0 --substeps 20"
+            # SOFT_ON_BOX_ARGS set by interactive prompt (constraint vs force-based), or pass --constraint-contacts / --no-constraint-contacts
+            if [ -n "$SOFT_ON_BOX_ARGS" ]; then
+                DEFAULT_ARGS="$SOFT_ON_BOX_ARGS"
+            else
+                DEFAULT_ARGS="--constraint-contacts"
+            fi
             ;;
         inflatable_box)
             # Inflatable soft body box with manual pressure control
@@ -447,18 +479,6 @@ case "$EXAMPLE" in
             # Note: Using heavier mass (0.01kg) and smaller particle radius (0.015m) for better MuJoCo interaction
             DEFAULT_ARGS="--radius 0.3 --rigid_width 3.0 --rigid_mass 0.01 --particle_radius 0.015 --k_mu 1e5 --k_lambda 1e5 --k_damp 5.0 --spring_ke 5e4 --spring_kd 5.0 --max_pressure 5.0 --substeps 16 --subdivisions 2 --interior_layers 2 --num_frames 800"
             ;;
-        inflatable_table_box)
-            # Inflatable table: 4 soft body boxes at corners supporting a rigid plate
-            # Press I to inflate, K to deflate, O to reset
-            # Note: plate is ultra-light (0.001kg) with high friction to prevent sliding
-            DEFAULT_ARGS="--size 0.25 0.25 0.25 --rigid_width 3.0 --rigid_mass 0.001 --particle_radius 0.03 --k_mu 5e4 --k_lambda 5e4 --k_damp 50.0 --spring_ke 2e4 --spring_kd 20.0 --max_pressure 5.0 --substeps 32 --subdivisions 3 3 3 --num_frames 800"
-            ;;
-        inflatable_table_sphere)
-            # Inflatable table: 4 soft body spheres at corners supporting a rigid plate
-            # Press I to inflate, K to deflate, O to reset
-            # Note: plate must be ultra-light (0.004kg) for contact forces to work
-            DEFAULT_ARGS="--radius 0.25 --rigid_width 3.0 --rigid_mass 0.004 --particle_radius 0.03 --k_mu 5e4 --k_lambda 5e4 --k_damp 50.0 --spring_ke 2e4 --spring_kd 20.0 --max_pressure 5.0 --substeps 32 --subdivisions 2 --interior_layers 2 --num_frames 800"
-            ;;
         inflatable_glue)
             # Stacked by default (rigid bottom, inflatable on top); use GLUE_ARGS if interactive selection ran
             if [ -n "$GLUE_ARGS" ]; then
@@ -466,6 +486,10 @@ case "$EXAMPLE" in
             else
                 DEFAULT_ARGS="--size 0.4 0.4 0.4 --subdivisions 5 5 5 --rigid_z_base 0 --stack_gap 0 --mass 1.0 --rigid_mass 0.2 --glue_epsilon 0.05 --glue_ke 5e4 --glue_kd 200 --max_pressure 5.0 --gravity 9.81 --substeps 8 --xpbd_iterations 10 --num_frames 1800"
             fi
+            ;;
+        inflatable_table_glue)
+            # Table: 4 soft legs (same size as inflatable_glue), plate not too light or it explodes
+            DEFAULT_ARGS="--leg_size 0.4 0.4 0.4 --subdivisions 5 5 5 --plate_width 2.0 --plate_height 0.05 --mass 1.0 --plate_mass 0.05 --rigid_leg_mass 10000000.0 --particle_radius 0.008 --glue_epsilon 0.05 --glue_ke 3e4 --glue_kd 300 --glue_max_vel 1.0 --max_pressure 5.0 --gravity 9.81 --substeps 8 --xpbd_iterations 12 --num_frames 1800"
             ;;
         chambers)
             # Flat rectangular slab, 2 chambers side-by-side (bends with differential pressure)
@@ -481,6 +505,41 @@ case "$EXAMPLE" in
                 DEFAULT_ARGS="$CHAMBERS_ARGS"
             else
                 DEFAULT_ARGS="--length 1 --width 2 --height 0.1 --subdivisions_x 10 --subdivisions_y 30 --subdivisions_z 4 --num_chambers_y 2 --num_chambers_z 2 --pos 0 0 0.3 --chamber_inflation_disabled 0,2 --anisotropy_x 1.2 --anisotropy_z 1.2 --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 14400"
+            fi
+            ;;
+        rigid_carpet)
+            # Override any param: ./run-examples.sh rigid_carpet --length 2 --rigid_height 0.2 --subdivisions_x 8
+            DEFAULT_ARGS="--glue_axis y --length 1.0 --width 2 --rigid_subdivision 30 --subdivisions_x 12 --subdivisions_z 1 --rigid_height 0.01 --rigid_mass 0.005 --glue_epsilon 0.02 --glue_ke_rr 6e3 --glue_kd_rr 80 --substeps 5 --xpbd_iterations 10 --num_frames 3600 --drop_height 0.3"
+            if [ -z "$*" ] && [ -t 0 ]; then
+                echo "═══════════════════════════════════════════════════════════════"
+                echo "              Rigid Carpet - Parameters (Enter = default)"
+                echo "═══════════════════════════════════════════════════════════════"
+                echo ""
+                read -p "  Glue axis: y=Y+↔Y- (along Y), x=X+↔X-, z=Z+↔Z- [y]: " rc_axis
+                read -p "  Length (X) in m [1.0]: " rc_length
+                read -p "  Width (Y) in m [2]: " rc_width
+                read -p "  Rigid height (Z) in m [0.01]: " rc_height
+                read -p "  Number of rigid bodies [30]: " rc_plates
+                echo "  (In-plane: axis y = X,Z; axis x = Y,Z; axis z = X,Y)"
+                read -p "  Subdivisions X (in-plane 1) [12]: " rc_subx
+                read -p "  Subdivision within each rigid (Y axis) [1]: " rc_suby
+                read -p "  Subdivisions Z (in-plane 2) [1]: " rc_subz
+                read -p "  Drop height in m (0=on ground) [0.3]: " rc_drop
+                read -p "  Glue stiffness ke_rr (N/m) [6e3]: " rc_glue_ke_rr
+                read -p "  Glue damping kd_rr [80]: " rc_glue_kd_rr
+                echo ""
+                rc_axis=${rc_axis:-y}
+                rc_length=${rc_length:-1.0}
+                rc_width=${rc_width:-2}
+                rc_height=${rc_height:-0.01}
+                rc_plates=${rc_plates:-30}
+                rc_subx=${rc_subx:-12}
+                rc_suby=${rc_suby:-1}
+                rc_subz=${rc_subz:-1}
+                rc_drop=${rc_drop:-0.3}
+                rc_glue_ke_rr=${rc_glue_ke_rr:-6e3}
+                rc_glue_kd_rr=${rc_glue_kd_rr:-80}
+                DEFAULT_ARGS="--glue_axis $rc_axis --length $rc_length --width $rc_width --rigid_subdivision $rc_plates --subdivisions_x $rc_subx --subdivisions_y $rc_suby --subdivisions_z $rc_subz --rigid_height $rc_height --rigid_mass 0.005 --glue_epsilon 0.02 --glue_ke_rr $rc_glue_ke_rr --glue_kd_rr $rc_glue_kd_rr --substeps 5 --xpbd_iterations 10 --num_frames 3600 --drop_height $rc_drop"
             fi
             ;;
         *)

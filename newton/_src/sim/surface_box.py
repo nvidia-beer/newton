@@ -18,9 +18,23 @@ Surface Box Generator
 
 Generates a complete surface-only (hollow) box mesh with all 6 faces.
 Uses the same vertex grid layout as TetraBox for consistency (same size/subdivisions).
+
+Face and vertex index convention
+--------------------------------
+- size = (w, h, d): extent along x, y, z. Vertices in local frame: x in [-w/2, w/2], etc.
+- subdivisions = (sx, sy, sz). Vertex grid (i, j, k) with i in [0, sx], j in [0, sy], k in [0, sz].
+- Linear index (loop order k, j, i — k outer, i inner):  idx = i + (sx+1)*j + (sx+1)*(sy+1)*k.
+- Local position: x = -w/2 + w*i/sx, y = -h/2 + h*j/sy, z = -d/2 + d*k/sz.
+
+Faces (outward normal):
+  -X (i=0), +X (i=sx), -Y (j=0), +Y (j=sy), -Z (k=0), +Z (k=sz).
+Same (i,k) on -Y and +Y gives the same (x,z); only y differs. So pairing (i,0,k) with (i,sy,k)
+connects the same physical (x,z) on the two Y faces.
 """
 
 import numpy as np
+
+from . import box_topology as _topo
 
 
 class SurfaceBox:
@@ -74,9 +88,10 @@ class SurfaceBox:
 
         vertices = []
         vertex_map = {}
-        for i in range(sx + 1):
+        # Loop order k, j, i so linear index = i + (sx+1)*j + (sx+1)*(sy+1)*k (matches box_topology)
+        for k in range(sz + 1):
             for j in range(sy + 1):
-                for k in range(sz + 1):
+                for i in range(sx + 1):
                     x = -w / 2 + w * i / sx if sx > 0 else 0.0
                     y = -h / 2 + h * j / sy if sy > 0 else 0.0
                     z = -d / 2 + d * k / sz if sz > 0 else 0.0
@@ -148,6 +163,23 @@ class SurfaceBox:
             "indices": self.surface_triangles.flatten().astype(np.int32),
             "surface_triangles": self.surface_triangles.astype(np.int32),
         }
+
+    # --- Topology / side index helpers (same convention as TetraBox; see box_topology.py) ---
+
+    def vertex_index(self, i: int, j: int, k: int) -> int:
+        """Linear vertex index for grid (i, j, k). Subdivisions taken from self.subdivisions."""
+        sx, sy, sz = self.subdivisions
+        return _topo.vertex_index(sx, sy, sz, i, j, k)
+
+    def get_side_vertex_indices(self, side: str) -> np.ndarray:
+        """Indices of all vertices on the given box side. side: SIDE_X_MIN, SIDE_Y_MAX, etc."""
+        sx, sy, sz = self.subdivisions
+        return _topo.get_side_vertex_indices(sx, sy, sz, side)
+
+    def get_side_vertex_pair_indices(self, axis: str) -> tuple[np.ndarray, np.ndarray]:
+        """(indices on +side, indices on -side) for same in-plane coords. axis: 'x', 'y', or 'z'."""
+        sx, sy, sz = self.subdivisions
+        return _topo.get_side_vertex_pair_indices(sx, sy, sz, axis)
 
     def info(self):
         """Print mesh statistics."""

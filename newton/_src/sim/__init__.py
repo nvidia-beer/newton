@@ -13,6 +13,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from . import box_topology
+
+# glue_utils is imported lazily to avoid circular import (e.g. examples import newton -> sim -> glue_utils;
+# if glue_utils or its deps pull on sim again we get "partially initialized module").
+_glue_utils_loading = False
+
+
+def __getattr__(name: str):
+    if name == "glue_utils":
+        global _glue_utils_loading
+        if _glue_utils_loading:
+            raise AttributeError(
+                "module %r is loading glue_utils; circular import detected. "
+                "Ensure glue_utils does not import from newton or newton._src.sim at top level."
+                % (__name__,)
+            )
+        _glue_utils_loading = True
+        try:
+            from . import glue_utils as _glue_utils
+            return _glue_utils
+        finally:
+            _glue_utils_loading = False
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 from . import ik
 from .articulation import eval_fk, eval_ik
 from .builder import ModelBuilder
@@ -35,6 +60,7 @@ from .tetra_cylinder import TetraCylinder, create_tetra_cylinder
 from .tetra_box import TetraBox, create_tetra_box
 from .surface_box import SurfaceBox, create_surface_box
 
+
 __all__ = [
     "JOINT_LIMIT_UNLIMITED",
     "BroadPhaseMode",
@@ -55,6 +81,8 @@ __all__ = [
     "TetraCylinder",
     "TetraBox",
     "SurfaceBox",
+    "box_topology",
+    "glue_utils",
     "create_surface_box",
     "color_graph",
     "count_rigid_contact_points",

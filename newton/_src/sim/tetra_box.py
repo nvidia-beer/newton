@@ -28,6 +28,8 @@ import numpy as np
 import time
 from scipy.spatial import Delaunay, ConvexHull
 
+from . import box_topology as _topo
+
 
 class TetraBox:
     """
@@ -563,7 +565,24 @@ class TetraBox:
             'tetrahedra': self.tetrahedra.astype(np.int32),
             'indices': self.tetrahedra.flatten().astype(np.int32),
         }
-    
+
+    # --- Topology / side index helpers (same convention as SurfaceBox; see box_topology.py) ---
+
+    def vertex_index(self, i: int, j: int, k: int) -> int:
+        """Linear vertex index for grid (i, j, k). Subdivisions taken from self.subdivisions."""
+        sx, sy, sz = self.subdivisions
+        return _topo.vertex_index(sx, sy, sz, i, j, k)
+
+    def get_side_vertex_indices(self, side: str) -> np.ndarray:
+        """Indices of all vertices on the given box side. side: SIDE_X_MIN, SIDE_Y_MAX, SIDE_Z_MIN, etc."""
+        sx, sy, sz = self.subdivisions
+        return _topo.get_side_vertex_indices(sx, sy, sz, side)
+
+    def get_side_vertex_pair_indices(self, axis: str) -> tuple[np.ndarray, np.ndarray]:
+        """(indices on +side, indices on -side) for same in-plane coords. axis: 'x', 'y', or 'z'."""
+        sx, sy, sz = self.subdivisions
+        return _topo.get_side_vertex_pair_indices(sx, sy, sz, axis)
+
     def info(self):
         """Print mesh statistics."""
         print(f"TetraBox Mesh:")

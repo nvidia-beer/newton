@@ -379,9 +379,7 @@ class Example:
         elif r.is_key_down(107) or r.is_key_down(45):
             self._set_pressure_delta(-self.pressure_step)
             self._key_cooldown = 10
-        elif r.is_key_down(99):
-            self._cycle_chamber()
-            self._key_cooldown = 10
+        # [C] cycle chamber handled only in _on_key_press to avoid double-cycle (press + key-held)
 
     def step(self):
         self._check_keys()

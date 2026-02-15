@@ -249,25 +249,17 @@ class SoftOnBoxExample:
         
         # Create solvers
         print(f"\n--- Creating Solvers ---")
-        if use_constraint_contacts:
-            print(f"  Using SolverSoft with constraint-based contacts")
-            self.soft_solver = SolverSoft(
-                model=self.model,
-                dt=self.sim_dt,
-                mass=soft_mass,
-                solver_type="bicgstab",
-                use_constraint_contacts=True,  # Enable constraint-based contacts!
-                contact_relaxation=0.9,
-            )
-        else:
-            print(f"  Using SolverSoft with force-based contacts")
-            self.soft_solver = SolverSoft(
-                model=self.model,
-                dt=self.sim_dt,
-                mass=soft_mass,
-                solver_type="bicgstab",
-                use_constraint_contacts=False,
-            )
+        # use_constraint_contacts: from --constraint-contacts / --no-constraint-contacts.
+        # When True, SolverSoft.step() calls apply_constraint_contact_corrections() after integration.
+        print(f"  Using SolverSoft with {'constraint-based' if use_constraint_contacts else 'force-based'} contacts")
+        self.soft_solver = SolverSoft(
+            model=self.model,
+            dt=self.sim_dt,
+            mass=soft_mass,
+            solver_type="bicgstab",
+            use_constraint_contacts=use_constraint_contacts,
+            contact_relaxation=0.9,
+        )
         
         # XPBD for rigid bodies
         print(f"  Using SolverXPBD for rigid bodies")

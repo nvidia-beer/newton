@@ -207,8 +207,10 @@ class TetraCylinder:
     
     def get_mesh_data(self):
         """Get mesh data in format suitable for Newton ModelBuilder."""
-        # TODO: Implement mesh data retrieval
-        pass
+        raise NotImplementedError(
+            "TetraCylinder mesh generation is not yet implemented. "
+            "Use bouncing_sphere or bouncing_box examples instead."
+        )
     
     def info(self):
         """Print mesh statistics."""

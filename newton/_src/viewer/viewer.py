@@ -266,6 +266,7 @@ class ViewerBase:
         self._log_triangles(state)
         self._log_particles(state)
         self._log_joints(state)
+        self._log_springs(state)
 
         self.model_changed = False
 
@@ -971,6 +972,38 @@ class ViewerBase:
         # Log all joint lines in a single call
         self.log_lines("/model/joints", self._joint_points0, self._joint_points1, self._joint_colors)
 
+    def _log_springs(self, state):
+        """
+        Draw spring segments between particle pairs when show_springs is True.
+        Uses model.spring_indices (pairs of particle indices) and state.particle_q.
+        """
+        if not self.show_springs:
+            self.log_lines("/model/springs", None, None, None)
+            return
+        if getattr(self.model, "spring_count", 0) == 0 or getattr(self.model, "spring_indices", None) is None:
+            return
+        if state.particle_q is None:
+            return
+        n = int(self.model.spring_count)
+        spring_indices = np.array(self.model.spring_indices.numpy(), dtype=np.int32)
+        particle_q = np.array(state.particle_q.numpy(), dtype=np.float64)
+        if spring_indices.size < 2 * n or len(particle_q) == 0:
+            return
+        starts = np.zeros((n, 3), dtype=np.float32)
+        ends = np.zeros((n, 3), dtype=np.float32)
+        for k in range(n):
+            i = spring_indices[2 * k]
+            j = spring_indices[2 * k + 1]
+            if i < len(particle_q) and j < len(particle_q):
+                starts[k] = particle_q[i]
+                ends[k] = particle_q[j]
+        # Single color for all springs (e.g. grey)
+        colors = np.full((n, 3), (0.5, 0.6, 0.7), dtype=np.float32)
+        starts_wp = wp.array(starts, dtype=wp.vec3, device=self.device)
+        ends_wp = wp.array(ends, dtype=wp.vec3, device=self.device)
+        colors_wp = wp.array(colors, dtype=wp.vec3, device=self.device)
+        self.log_lines("/model/springs", starts_wp, ends_wp, colors_wp, width=0.008)
+
     def _log_triangles(self, state):
         if self.model.tri_count:
             self.log_mesh(
@@ -983,11 +1016,18 @@ class ViewerBase:
 
     def _log_particles(self, state):
         if self.model.particle_count:
-            # just set colors on first frame
-            if self.model_changed:
-                colors = wp.full(shape=self.model.particle_count, value=wp.vec3(0.7, 0.6, 0.4), device=self.device)
+            # Use model.particle_colors only if it's RGB (wp.vec3). The builder sets particle_colors to
+            # dtype=int (graph-coloring indices); passing that to the GL color buffer produces black.
+            cand = getattr(self.model, "particle_colors", None)
+            if (
+                cand is not None
+                and hasattr(cand, "dtype")
+                and cand.dtype == wp.vec3
+                and len(cand) == self.model.particle_count
+            ):
+                colors = cand
             else:
-                colors = None
+                colors = wp.full(shape=self.model.particle_count, value=wp.vec3(0.7, 0.6, 0.4), device=self.device)
 
             self.log_points(
                 name="/model/particles",

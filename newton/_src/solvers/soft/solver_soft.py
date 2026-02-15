@@ -73,6 +73,9 @@ class SolverSoft(SolverBase):
         Preconditioner type: "id", "diag", or "diag_abs" (default: "id")
     solver_type : str
         Linear solver: "bicgstab", "cg", "gmres", or "cr" (default: "bicgstab")
+    linear_solver_maxiter : int
+        Max iterations for the linear solver (default: 50). Large meshes need more;
+        too low (e.g. 3) can cause non-convergence and NaN.
     """
 
     def __init__(
@@ -84,6 +87,7 @@ class SolverSoft(SolverBase):
         solver_type: str = "bicgstab",
         use_constraint_contacts: bool = False,
         contact_relaxation: float = 0.9,
+        linear_solver_maxiter: int = 50,
     ):
         super().__init__(model=model)
         
@@ -94,6 +98,7 @@ class SolverSoft(SolverBase):
         # Constraint-based contact settings (like XPBD)
         self.use_constraint_contacts = use_constraint_contacts
         self.contact_relaxation = contact_relaxation
+        self.linear_solver_maxiter = linear_solver_maxiter
         
         # Pre-allocate arrays for BSR matrix construction
         num_blocks = model.spring_count * 4  # Each edge contributes 4 blocks
@@ -439,13 +444,14 @@ class SolverSoft(SolverBase):
 
     def implicit_integration(self, model: Model, state_in: State, state_out: State, dt: float):
         """Perform implicit integration step using sparse matrix solver."""
+        maxiter = self.linear_solver_maxiter
         if self.solver_type == "cg":
             iterations, residual, _ = cg(
                 self.A_bsr,
                 state_in.particle_f,
                 self.dv,
                 tol=1e-2,
-                maxiter=3,
+                maxiter=maxiter,
                 M=self.M_bsr,
                 use_cuda_graph=True
             )
@@ -455,7 +461,7 @@ class SolverSoft(SolverBase):
                 state_in.particle_f,
                 self.dv,
                 tol=1e-2,
-                maxiter=3,
+                maxiter=maxiter,
                 M=self.M_bsr,
                 use_cuda_graph=True
             )
@@ -465,7 +471,7 @@ class SolverSoft(SolverBase):
                 state_in.particle_f,
                 self.dv,
                 tol=1e-2,
-                maxiter=3,
+                maxiter=maxiter,
                 M=self.M_bsr,
                 use_cuda_graph=True
             )
@@ -475,7 +481,7 @@ class SolverSoft(SolverBase):
                 state_in.particle_f,
                 self.dv,
                 tol=1e-2,
-                maxiter=3,
+                maxiter=maxiter,
                 M=self.M_bsr,
                 use_cuda_graph=True
             )

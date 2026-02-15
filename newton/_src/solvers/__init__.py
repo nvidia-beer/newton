@@ -20,17 +20,22 @@ from .inflatable import SolverInflatable
 from .mujoco import SolverMuJoCo
 from .semi_implicit import SolverSemiImplicit
 from .soft import SolverSoft
-
-# Re-export from sim for backward compatibility
-from newton._src.sim import (
-    TetraSphere, create_tetra_sphere,
-    TetraCylinder, create_tetra_cylinder,
-    TetraBox, create_tetra_box,
-)
 from .solver import SolverBase
 from .style3d import SolverStyle3D
 from .vbd import SolverVBD
 from .xpbd import SolverXPBD
+
+# Re-export from sim for backward compatibility
+from ..sim import (
+    SurfaceBox,
+    create_surface_box,
+    TetraSphere,
+    create_tetra_sphere,
+    TetraCylinder,
+    create_tetra_cylinder,
+    TetraBox,
+    create_tetra_box,
+)
 
 __all__ = [
     "SolverBase",
@@ -47,6 +52,8 @@ __all__ = [
     "TetraSphere",
     "TetraCylinder",
     "TetraBox",
+    "SurfaceBox",
+    "create_surface_box",
     "create_tetra_sphere",
     "create_tetra_cylinder",
     "create_tetra_box",
