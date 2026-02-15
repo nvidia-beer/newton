@@ -27,6 +27,7 @@ declare -a EXAMPLES=(
     "chambers"
     "inflatable_glue"
     "worm"
+    "torque_worm"
     "rigid_carpet"
     "inflatable_table_glue"
 )
@@ -43,6 +44,7 @@ declare -A EXAMPLE_DESCRIPTIONS=(
     ["chambers"]="N-chamber anisotropic inflatable box (Press I/K inflate/deflate, C chamber, N num chambers, A anisotropy)"
     ["inflatable_glue"]="Rigid + Inflatable glued by proximity springs (--top soft|rigid; Press I/K/O, G/F glue)"
     ["worm"]="Same as chambers (N-chamber inflatable); Press I/K inflate/deflate, C cycle chamber"
+    ["torque_worm"]="Worm with torque (bend about one axis); interactive: stiff_axes, torque, length/width/height, subdivisions; [I]/[K] [C]"
     ["rigid_carpet"]="DEBUG: Rigid plates on ground + glue (minimal, no soft body)"
     ["inflatable_table_glue"]="Table: 4 soft legs glued to rigid plate (SurfaceBox); Press I/K/O, G/F"
 )
@@ -422,6 +424,51 @@ if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "worm" ]; } && [ -z "$*" ];
     fi
 fi
 
+# Interactive parameter selection for torque_worm (single axis stays straight, whole object)
+TORQUE_WORM_ARGS=""
+if [ "$EXAMPLE" == "torque_worm" ] && [ -z "$*" ] && [ -t 0 ]; then
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "              Torque Worm - Which axis stays straight?"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo ""
+    echo "  One axis gets torque on the whole object (all chambers); that axis stays straight."
+    echo "  1) X stays straight (bend about Y, Z)"
+    echo "  2) Y stays straight (bend about X, Z)"
+    echo "  3) Z stays straight (bend about X, Y)"
+    echo ""
+    read -p "  Choice (1-3) [1]: " stiff_choice
+    stiff_choice=${stiff_choice:-1}
+    case "$stiff_choice" in
+        1) stiff_axes="x" ;;
+        2) stiff_axes="y" ;;
+        3) stiff_axes="z" ;;
+        *) stiff_axes="x" ;;
+    esac
+    read -p "  Torque stiffness (default: 100): " torque_stiffness
+    torque_stiffness=${torque_stiffness:-100}
+    read -p "  Torque damping (default: 2): " torque_damping
+    torque_damping=${torque_damping:-2}
+    read -p "  Chamber inflation disabled, comma-separated (default: 0,2): " chamber_disabled
+    chamber_disabled=${chamber_disabled:-0,2}
+    echo ""
+    echo "  Worm geometry (size and subdivisions):"
+    read -p "    Length X (m) [1]: " worm_length
+    worm_length=${worm_length:-1}
+    read -p "    Width Y (m) [1.5]: " worm_width
+    worm_width=${worm_width:-1.5}
+    read -p "    Height Z (m) [0.1]: " worm_height
+    worm_height=${worm_height:-0.1}
+    read -p "    Subdivisions X [10]: " worm_sub_x
+    worm_sub_x=${worm_sub_x:-10}
+    read -p "    Subdivisions Y [15]: " worm_sub_y
+    worm_sub_y=${worm_sub_y:-15}
+    read -p "    Subdivisions Z [4]: " worm_sub_z
+    worm_sub_z=${worm_sub_z:-4}
+    echo "  → stiff_axes=$stiff_axes, geometry ${worm_length}x${worm_width}x${worm_height}, sub ${worm_sub_x}x${worm_sub_y}x${worm_sub_z}"
+    echo ""
+    TORQUE_WORM_ARGS="--stiff_axes $stiff_axes --torque_stiffness $torque_stiffness --torque_damping $torque_damping --chamber_inflation_disabled $chamber_disabled --length $worm_length --width $worm_width --height $worm_height --subdivisions_x $worm_sub_x --subdivisions_y $worm_sub_y --subdivisions_z $worm_sub_z --num_chambers_x 1 --num_chambers_y 2 --num_chambers_z 2 --initial_height 0.3 --mass 1.0 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --spring_ke 5e4 --spring_kd 1.0 --gravity 9.81 --max_pressure 5.0 --anisotropy_x 1.2 --anisotropy_y 1.4 --anisotropy_z 1.2 --substeps 5 --num_frames 14400"
+fi
+
 # Default stable parameters for examples that need them
 # User-passed args ($*) are merged with defaults so you can override individual params
 DEFAULT_ARGS=""
@@ -490,6 +537,14 @@ case "$EXAMPLE" in
         inflatable_table_glue)
             # Table: 4 soft legs (same size as inflatable_glue), plate not too light or it explodes
             DEFAULT_ARGS="--leg_size 0.4 0.4 0.4 --subdivisions 5 5 5 --plate_width 2.0 --plate_height 0.05 --mass 1.0 --plate_mass 0.05 --rigid_leg_mass 10000000.0 --particle_radius 0.008 --glue_epsilon 0.05 --glue_ke 3e4 --glue_kd 300 --glue_max_vel 1.0 --max_pressure 5.0 --gravity 9.81 --substeps 8 --xpbd_iterations 12 --num_frames 1800"
+            ;;
+        torque_worm)
+            # Single axis stays straight (X, Y, or Z); torque on whole object.
+            if [ -n "$TORQUE_WORM_ARGS" ]; then
+                DEFAULT_ARGS="$TORQUE_WORM_ARGS"
+            else
+                DEFAULT_ARGS="--stiff_axes x --length 1 --width 1.5 --height 0.1 --subdivisions_x 10 --subdivisions_y 15 --subdivisions_z 4 --num_chambers_x 1 --num_chambers_y 2 --num_chambers_z 2 --initial_height 0.3 --mass 1.0 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --spring_ke 5e4 --spring_kd 1.0 --gravity 9.81 --max_pressure 5.0 --anisotropy_x 1.2 --anisotropy_y 1.4 --anisotropy_z 1.2 --torque_stiffness 100 --torque_damping 2 --chamber_inflation_disabled 0,2 --substeps 5 --num_frames 14400"
+            fi
             ;;
         chambers)
             # Flat rectangular slab, 2 chambers side-by-side (bends with differential pressure)

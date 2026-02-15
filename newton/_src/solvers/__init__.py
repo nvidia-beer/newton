@@ -16,6 +16,7 @@
 from .featherstone import SolverFeatherstone
 from .flags import SolverNotifyFlags
 from .implicit_mpm import SolverImplicitMPM
+from .bend import SolverBend
 from .inflatable import SolverInflatable
 from .mujoco import SolverMuJoCo
 from .semi_implicit import SolverSemiImplicit
@@ -39,6 +40,7 @@ from ..sim import (
 
 __all__ = [
     "SolverBase",
+    "SolverBend",
     "SolverFeatherstone",
     "SolverImplicitMPM",
     "SolverInflatable",

@@ -767,25 +767,24 @@ def eval_soft_contacts(
     penetration = radius - d
     
     if penetration > 0.0:
-        # Relative velocity 
+        # Relative velocity
         rel_v = v - body_vel
         vn = wp.dot(rel_v, n)
         vt = rel_v - vn * n
-        
+
         # Normal force (spring + damping)
         fn = ke * penetration - kd * wp.min(vn, 0.0)
-        
-        # Tangential force (friction)
+
+        # Tangential force (friction): use max(0, fn) so damping never yields negative friction
         vt_mag = wp.length(vt)
-        if vt_mag > 1e-6:
-            # Coulomb friction clamped
-            ft_max = mu * fn
+        if vt_mag > 1.0e-6:
+            fn_safe = wp.max(0.0, fn)
+            ft_max = mu * fn_safe
             ft = wp.min(kf * vt_mag, ft_max)
             force = fn * n - ft * (vt / vt_mag)
         else:
             force = fn * n
-        
-        # Accumulate force atomically
+
         wp.atomic_add(f, particle_idx, force)
 
 
@@ -803,7 +802,7 @@ def solve_soft_contacts_constraint(
     body_I_inv: wp.array(dtype=wp.mat33),
     shape_body: wp.array(dtype=int),
     shape_material_mu: wp.array(dtype=float),
-    particle_mu: float,
+    particle_friction: wp.array(dtype=float),
     particle_ka: float,
     soft_contact_count: wp.array(dtype=wp.int32),
     soft_contact_particle: wp.array(dtype=int),
@@ -864,8 +863,8 @@ def solve_soft_contacts_constraint(
     if c > particle_ka:
         return
     
-    # Take average material properties
-    mu = 0.5 * (particle_mu + shape_material_mu[shape_index])
+    # Per-particle friction: use particle value so per-vertex friction is effective (not diluted by shape mu)
+    mu = particle_friction[particle_index]
     
     # Body velocity
     body_v_s = wp.spatial_vector()
@@ -881,8 +880,9 @@ def solve_soft_contacts_constraint(
     # Relative velocity
     v = pv - bv
     
-    # Normal constraint
-    lambda_n = c  # Negative when penetrating
+    # Normal constraint (cap correction to avoid explosion; 3*radius allows stronger friction cap)
+    max_n = 3.0 * particle_radius[particle_index]
+    lambda_n = wp.max(c, -max_n)
     delta_n = n * lambda_n
     
     # Friction constraint
@@ -923,35 +923,41 @@ def solve_soft_contacts_constraint(
 
 @wp.kernel
 def apply_particle_corrections(
-    x_orig: wp.array(dtype=wp.vec3),
     x_current: wp.array(dtype=wp.vec3),
+    v_current: wp.array(dtype=wp.vec3),
     delta: wp.array(dtype=wp.vec3),
     particle_flags: wp.array(dtype=wp.int32),
     dt: float,
     v_max: float,
+    max_correction: float,
     x_out: wp.array(dtype=wp.vec3),
     v_out: wp.array(dtype=wp.vec3),
 ):
     """Apply constraint corrections to particle positions and update velocities.
     
-    Similar to XPBD's apply_particle_deltas, but simpler for SolverSoft.
+    Uses additive velocity update (v_new = v_current + delta/dt) and clamps both
+    position correction and resulting velocity for stability.
     """
     tid = wp.tid()
     if (particle_flags[tid] & PARTICLE_FLAG_ACTIVE) == 0:
         return
     
-    x0 = x_orig[tid]
     xp = x_current[tid]
+    vp = v_current[tid]
     d = delta[tid]
     
-    # Apply correction
-    x_new = xp + d
-    v_new = (x_new - x0) / dt
+    # Clamp position correction magnitude to avoid explosion
+    d_mag = wp.length(d)
+    if d_mag > max_correction and d_mag > 1.0e-9:
+        d = d * (max_correction / d_mag)
     
-    # Enforce velocity limit to prevent instability
+    # Apply position correction
+    x_new = xp + d
+    # Additive velocity update (correction impulse), then clamp
+    v_new = vp + d / dt
     v_new_mag = wp.length(v_new)
     if v_new_mag > v_max:
-        v_new *= v_max / v_new_mag
+        v_new = v_new * (v_max / v_new_mag)
     
     x_out[tid] = x_new
     v_out[tid] = v_new

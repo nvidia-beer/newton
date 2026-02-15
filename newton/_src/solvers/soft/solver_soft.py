@@ -86,7 +86,10 @@ class SolverSoft(SolverBase):
         preconditioner_type: str = "id",
         solver_type: str = "bicgstab",
         use_constraint_contacts: bool = False,
-        contact_relaxation: float = 0.9,
+        contact_relaxation: float = 0.5,
+        contact_max_velocity: float = 20.0,
+        contact_max_correction: float = 0.02,
+        contact_iterations: int = 2,
         linear_solver_maxiter: int = 50,
     ):
         super().__init__(model=model)
@@ -98,6 +101,9 @@ class SolverSoft(SolverBase):
         # Constraint-based contact settings (like XPBD)
         self.use_constraint_contacts = use_constraint_contacts
         self.contact_relaxation = contact_relaxation
+        self.contact_max_velocity = contact_max_velocity  # clamp velocity after correction to avoid explosion
+        self.contact_max_correction = contact_max_correction  # max position correction per application
+        self.contact_iterations = contact_iterations  # more iterations = better friction resolution
         self.linear_solver_maxiter = linear_solver_maxiter
         
         # Pre-allocate arrays for BSR matrix construction
@@ -514,19 +520,7 @@ class SolverSoft(SolverBase):
         
         if control is None:
             control = model.control()
-        
-        # Debug: Check input state
-        if not hasattr(self, '_debug_step_count'):
-            self._debug_step_count = 0
-        self._debug_step_count += 1
-        
-        if self._debug_step_count <= 3:
-            import numpy as np
-            pos = state_in.particle_q.numpy()
-            vel = state_in.particle_qd.numpy()
-            print(f"[DEBUG] Step {self._debug_step_count}: pos_mean={pos.mean(axis=0)}, vel_mean={vel.mean(axis=0)}", flush=True)
-            print(f"[DEBUG] Step {self._debug_step_count}: pos_max={np.abs(pos).max():.2e}, vel_max={np.abs(vel).max():.2e}", flush=True)
-        
+
         # Evaluate all forces
         spring_forces = self.eval_spring_forces(model, state_in)
         triangle_forces = self.eval_triangle_forces(model, control, state_in)
@@ -538,14 +532,10 @@ class SolverSoft(SolverBase):
         soft_contact_forces = self.eval_soft_contact_forces(model, state_in, contacts)
         constraint_forces = self.eval_constraints(model, control, state_in)
         gravity_forces = self.eval_gravity_forces(model)
-        
-        if self._debug_step_count <= 3:
-            import numpy as np
-            print(f"[DEBUG] Step {self._debug_step_count}: spring_max={np.abs(spring_forces.numpy()).max():.2e}", flush=True)
-            print(f"[DEBUG] Step {self._debug_step_count}: tet_max={np.abs(tetrahedral_forces.numpy()).max():.2e}", flush=True)
-            print(f"[DEBUG] Step {self._debug_step_count}: gravity_max={np.abs(gravity_forces.numpy()).max():.2e}", flush=True)
-        
-        # Combine all forces
+
+        # Combine all forces (skip force-based soft contact when using constraint contacts to avoid double penalty)
+        if self.use_constraint_contacts:
+            soft_contact_forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
         state_in.particle_f = dt * (
             spring_forces + 
             tetrahedral_forces + 
@@ -565,14 +555,7 @@ class SolverSoft(SolverBase):
         # Apply constraint-based contact corrections (like XPBD) if enabled
         if self.use_constraint_contacts and contacts is not None:
             self.apply_constraint_contact_corrections(model, state_in, state_out, contacts, dt)
-        
-        if self._debug_step_count <= 3:
-            import numpy as np
-            pos_out = state_out.particle_q.numpy()
-            vel_out = state_out.particle_qd.numpy()
-            print(f"[DEBUG] Step {self._debug_step_count} AFTER: pos_mean={pos_out.mean(axis=0)}, vel_mean={vel_out.mean(axis=0)}", flush=True)
-            print(f"[DEBUG] Step {self._debug_step_count} AFTER: pos_max={np.abs(pos_out).max():.2e}, vel_max={np.abs(vel_out).max():.2e}", flush=True)
-        
+
         # Integrate rigid bodies if present
         # Use gravity array format for integrate_bodies kernel compatibility
         if model.body_count:
@@ -607,21 +590,29 @@ class SolverSoft(SolverBase):
         if contact_count == 0:
             return
         
-        # Allocate arrays for constraint corrections
+        # Per-particle friction: use array if set, else broadcast scalar
+        particle_friction = getattr(model, "particle_friction", None)
+        if particle_friction is None or not hasattr(particle_friction, "shape"):
+            particle_friction = wp.full(
+                (model.particle_count,),
+                float(model.soft_contact_mu),
+                dtype=wp.float32,
+                device=model.device,
+            )
+            model.particle_friction = particle_friction
+        
+        # Allocate arrays for constraint corrections (kernel always expects 2 outputs: delta, body_delta)
         particle_deltas = wp.zeros(
             model.particle_count, dtype=wp.vec3, device=model.device
         )
-        body_deltas = None
-        if model.body_count > 0:
-            body_deltas = wp.zeros(
-                model.body_count, dtype=wp.spatial_vector, device=model.device
-            )
+        body_deltas = wp.zeros(
+            model.body_count, dtype=wp.spatial_vector, device=model.device
+        )
         
         # Apply constraint corrections iteratively (like XPBD)
-        for iteration in range(2):  # Standard 2 iterations
+        for iteration in range(self.contact_iterations):
             particle_deltas.zero_()
-            if body_deltas is not None:
-                body_deltas.zero_()
+            body_deltas.zero_()
             
             # Solve constraint corrections
             wp.launch(
@@ -640,7 +631,7 @@ class SolverSoft(SolverBase):
                     model.body_inv_inertia,
                     model.shape_body,
                     model.shape_material_mu,
-                    model.soft_contact_mu,
+                    particle_friction,
                     model.particle_adhesion,
                     contacts.soft_contact_count,
                     contacts.soft_contact_particle,
@@ -652,22 +643,22 @@ class SolverSoft(SolverBase):
                     dt,
                     self.contact_relaxation,
                 ],
-                outputs=[particle_deltas, body_deltas] if body_deltas is not None else [particle_deltas],
+                outputs=[particle_deltas, body_deltas],
                 device=model.device,
             )
             
-            # Apply position corrections directly
-            # Simple correction: x_new = x_old + delta, v_new = (x_new - x_orig) / dt
+            # Apply position corrections (additive velocity update + clamps for stability)
             wp.launch(
                 kernel=apply_particle_corrections,
                 dim=model.particle_count,
                 inputs=[
-                    state_in.particle_q,  # Original state before integration
-                    state_out.particle_q,  # Current integrated state
+                    state_out.particle_q,
+                    state_out.particle_qd,
                     particle_deltas,
                     model.particle_flags,
                     dt,
-                    model.particle_max_velocity,
+                    self.contact_max_velocity,
+                    self.contact_max_correction,
                 ],
                 outputs=[state_out.particle_q, state_out.particle_qd],
                 device=model.device,

@@ -566,6 +566,30 @@ class TetraBox:
             'indices': self.tetrahedra.flatten().astype(np.int32),
         }
 
+    def get_axis_aligned_springs(self, axis: str, tol: float = 1e-6) -> list[tuple[int, int]]:
+        """
+        Return spring pairs (i, j) with i < j that are aligned to the given axis.
+
+        Only edges that lie along the axis (vertices differ in exactly one
+        coordinate) are returned. Diagonal springs (e.g. face or body diagonals)
+        are not considered valid axis-aligned springs and are excluded.
+
+        Parameters
+        ----------
+        axis : str
+            One of 'x', 'y', 'z'. Springs parallel to this axis are returned.
+        tol : float
+            Tolerance for treating coordinates as equal (default 1e-6).
+
+        Returns
+        -------
+        list of (i, j)
+            Sorted pairs with i < j for axis-aligned edges.
+        """
+        return get_axis_aligned_springs(
+            self.vertices, self.tetrahedra, axis=axis, tol=tol
+        )
+
     # --- Topology / side index helpers (same convention as SurfaceBox; see box_topology.py) ---
 
     def vertex_index(self, i: int, j: int, k: int) -> int:
@@ -605,6 +629,64 @@ class TetraBox:
             print(f"  WARNING: Inverted tets: {validation['negative_volume']}")
         if validation['degenerate'] > 0:
             print(f"  WARNING: Degenerate tets: {validation['degenerate']}")
+
+
+def get_axis_aligned_springs(
+    vertices: np.ndarray,
+    tetrahedra: np.ndarray,
+    axis: str,
+    tol: float = 1e-6,
+) -> list[tuple[int, int]]:
+    """
+    Return spring pairs (i, j) with i < j that are aligned to the given axis.
+
+    Extracts all unique edges from the tetrahedral mesh, then keeps only those
+    where the two vertices differ in exactly one coordinate (axis-aligned).
+    Diagonal springs (face or body diagonals) are excluded.
+
+    Parameters
+    ----------
+    vertices : np.ndarray
+        Vertex positions, shape (N, 3).
+    tetrahedra : np.ndarray
+        Tetrahedron indices, shape (M, 4).
+    axis : str
+        One of 'x', 'y', 'z'. Edges parallel to this axis are returned.
+    tol : float
+        Tolerance for treating coordinates as equal (default 1e-6).
+
+    Returns
+    -------
+    list of (i, j)
+        Sorted pairs with i < j for axis-aligned edges.
+    """
+    axis = axis.lower()
+    if axis not in ("x", "y", "z"):
+        raise ValueError("axis must be 'x', 'y', or 'z'")
+
+    # Unique edges from tetrahedra: 6 edges per tet
+    edges = set()
+    for tet in tetrahedra:
+        for a in range(4):
+            for b in range(a + 1, 4):
+                i, j = int(tet[a]), int(tet[b])
+                if i > j:
+                    i, j = j, i
+                edges.add((i, j))
+
+    out = []
+    ax = {"x": 0, "y": 1, "z": 2}[axis]
+    for (i, j) in edges:
+        p, q = vertices[i], vertices[j]
+        diff = q - p
+        # Axis-aligned: only the chosen axis component is non-zero (within tol)
+        if abs(diff[ax]) < tol:
+            continue
+        if abs(diff[(ax + 1) % 3]) > tol or abs(diff[(ax + 2) % 3]) > tol:
+            continue
+        out.append((i, j))
+    out.sort()
+    return out
 
 
 def create_tetra_box(size=(1.0, 1.0, 1.0), subdivisions=(4, 4, 4), verbose: bool = True):

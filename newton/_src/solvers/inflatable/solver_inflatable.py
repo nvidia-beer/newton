@@ -96,6 +96,11 @@ class SolverInflatable(SolverSoft):
         max_volume_ratio: float = 3.0,
         preconditioner_type: str = "id",
         solver_type: str = "bicgstab",
+        use_constraint_contacts: bool = False,
+        contact_relaxation: float = 0.5,
+        contact_max_velocity: float = 20.0,
+        contact_max_correction: float = 0.02,
+        contact_iterations: int = 2,
     ):
         super().__init__(
             model=model,
@@ -103,6 +108,11 @@ class SolverInflatable(SolverSoft):
             mass=mass,
             preconditioner_type=preconditioner_type,
             solver_type=solver_type,
+            use_constraint_contacts=use_constraint_contacts,
+            contact_relaxation=contact_relaxation,
+            contact_max_velocity=contact_max_velocity,
+            contact_max_correction=contact_max_correction,
+            contact_iterations=contact_iterations,
         )
         
         self.max_volume_ratio = max_volume_ratio

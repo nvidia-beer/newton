@@ -333,13 +333,14 @@ class MeshGL:
 class LinesGL:
     """Encapsulates line data and OpenGL buffers for line rendering."""
 
-    def __init__(self, max_lines, device, hidden=False):
+    def __init__(self, max_lines, device, hidden=False, line_width=2.0):
         """Initialize line data with the specified maximum number of lines.
 
         Args:
             max_lines: Maximum number of lines that can be rendered
             device: Warp device to use
             hidden: Whether the lines are initially hidden
+            line_width: Line width in pixels (for glLineWidth)
         """
         gl = RendererGL.gl
 
@@ -350,6 +351,7 @@ class LinesGL:
         # Store references to input buffers and rendering data
         self.device = device
         self.hidden = hidden
+        self.line_width = float(line_width)
 
         self.vertices = wp.zeros(self.max_vertices, dtype=LineVertex, device=self.device)
 
@@ -448,11 +450,16 @@ class LinesGL:
 
             gl.glDisable(gl.GL_CULL_FACE)  # Lines don't need culling
 
+            # Thicker lines when line_width > 1 (e.g. torque spring highlight)
+            if self.line_width > 1.0:
+                gl.glLineWidth(max(1.0, min(self.line_width, 10.0)))  # clamp for portability
             gl.glBindVertexArray(self.vao)
             # Only render vertices for the current number of lines
             current_vertices = self.num_lines * 2
             gl.glDrawArrays(gl.GL_LINES, 0, current_vertices)
             gl.glBindVertexArray(0)
+            if self.line_width > 1.0:
+                gl.glLineWidth(1.0)
 
 
 @wp.kernel

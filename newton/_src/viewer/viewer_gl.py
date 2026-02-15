@@ -350,16 +350,21 @@ class ViewerGL(ViewerBase):
         assert isinstance(colors, wp.array)
         assert len(colors) == num_lines, "Number of line colors must match line begins"
 
+        # Convert width (world-scale 0.01-ish) to pixels for glLineWidth (~2-6 px)
+        line_width_px = max(1.0, float(width) * 400.0)
+
         # Create or resize LinesGL object based on current requirements
         if name not in self.lines:
             # Start with reasonable default size, will expand as needed
             max_lines = max(num_lines, 1000)  # Reasonable default
-            self.lines[name] = LinesGL(max_lines, self.device, hidden=hidden)
+            self.lines[name] = LinesGL(max_lines, self.device, hidden=hidden, line_width=line_width_px)
         elif num_lines > self.lines[name].max_lines:
             # Need to recreate with larger capacity
             self.lines[name].destroy()
             max_lines = max(num_lines, self.lines[name].max_lines * 2)
-            self.lines[name] = LinesGL(max_lines, self.device, hidden=hidden)
+            self.lines[name] = LinesGL(max_lines, self.device, hidden=hidden, line_width=line_width_px)
+        else:
+            self.lines[name].line_width = line_width_px
 
         self.lines[name].update(starts, ends, colors)
 

@@ -974,11 +974,13 @@ class ViewerBase:
 
     def _log_springs(self, state):
         """
-        Draw spring segments between particle pairs when show_springs is True.
-        Uses model.spring_indices (pairs of particle indices) and state.particle_q.
+        Draw spring segments in current (deformed) world positions when show_springs is True.
+        If spring_highlight_indices is set (e.g. torque springs), only those are drawn (no grey
+        non-torque springs). Scalar 0 = soft (yellow), 1 = strong (red) by spring_highlight_scalars.
         """
         if not self.show_springs:
             self.log_lines("/model/springs", None, None, None)
+            self.log_lines("/model/springs_highlight", None, None, None)
             return
         if getattr(self.model, "spring_count", 0) == 0 or getattr(self.model, "spring_indices", None) is None:
             return
@@ -989,6 +991,10 @@ class ViewerBase:
         particle_q = np.array(state.particle_q.numpy(), dtype=np.float64)
         if spring_indices.size < 2 * n or len(particle_q) == 0:
             return
+        highlight_set = set(getattr(self, "spring_highlight_indices", None) or [])
+        highlight_color = getattr(self, "spring_highlight_color", (1.0, 0.2, 0.2))
+        scalars = getattr(self, "spring_highlight_scalars", None)  # per-spring [0,1] for red->yellow
+        # Build starts/ends for all springs (needed for highlight subset)
         starts = np.zeros((n, 3), dtype=np.float32)
         ends = np.zeros((n, 3), dtype=np.float32)
         for k in range(n):
@@ -997,12 +1003,43 @@ class ViewerBase:
             if i < len(particle_q) and j < len(particle_q):
                 starts[k] = particle_q[i]
                 ends[k] = particle_q[j]
-        # Single color for all springs (e.g. grey)
-        colors = np.full((n, 3), (0.5, 0.6, 0.7), dtype=np.float32)
-        starts_wp = wp.array(starts, dtype=wp.vec3, device=self.device)
-        ends_wp = wp.array(ends, dtype=wp.vec3, device=self.device)
-        colors_wp = wp.array(colors, dtype=wp.vec3, device=self.device)
-        self.log_lines("/model/springs", starts_wp, ends_wp, colors_wp, width=0.008)
+        if highlight_set:
+            # Only draw torque springs; clear normal springs
+            self.log_lines("/model/springs", None, None, None)
+            hi = np.array(sorted(highlight_set), dtype=np.int32)
+            hi = hi[(hi >= 0) & (hi < n)]
+            if len(hi) > 0:
+                starts_hi = np.array([starts[k] for k in hi], dtype=np.float32)
+                ends_hi = np.array([ends[k] for k in hi], dtype=np.float32)
+                # Red = strong torque (high scalar), yellow = soft (low scalar)
+                if scalars is not None and len(scalars) == len(hi):
+                    s = np.clip(np.asarray(scalars, dtype=np.float32).ravel(), 0.0, 1.0)
+                    colors_hi = np.zeros((len(hi), 3), dtype=np.float32)
+                    colors_hi[:, 0] = 1.0
+                    colors_hi[:, 1] = 1.0 - s  # 0 -> yellow (soft), 1 -> red (strong)
+                    colors_hi[:, 2] = 0.0
+                else:
+                    colors_hi = np.full((len(hi), 3), highlight_color, dtype=np.float32)
+                self.log_lines(
+                    "/model/springs_highlight",
+                    wp.array(starts_hi, dtype=wp.vec3, device=self.device),
+                    wp.array(ends_hi, dtype=wp.vec3, device=self.device),
+                    wp.array(colors_hi, dtype=wp.vec3, device=self.device),
+                    width=0.025,
+                )
+            else:
+                self.log_lines("/model/springs_highlight", None, None, None)
+        else:
+            # No highlight set: draw all springs in grey
+            colors = np.full((n, 3), (0.5, 0.6, 0.7), dtype=np.float32)
+            self.log_lines(
+                "/model/springs",
+                wp.array(starts, dtype=wp.vec3, device=self.device),
+                wp.array(ends, dtype=wp.vec3, device=self.device),
+                wp.array(colors, dtype=wp.vec3, device=self.device),
+                width=0.008,
+            )
+            self.log_lines("/model/springs_highlight", None, None, None)
 
     def _log_triangles(self, state):
         if self.model.tri_count:
@@ -1029,10 +1066,15 @@ class ViewerBase:
             else:
                 colors = wp.full(shape=self.model.particle_count, value=wp.vec3(0.7, 0.6, 0.4), device=self.device)
 
+            # Optional per-particle display radius (e.g. 2x for friction verts); else use particle_radius
+            radii = getattr(self.model, "particle_display_radius", None)
+            if radii is None or not hasattr(radii, "__len__") or len(radii) != self.model.particle_count:
+                radii = self.model.particle_radius
+
             self.log_points(
                 name="/model/particles",
                 points=state.particle_q,
-                radii=self.model.particle_radius,
+                radii=radii,
                 colors=colors,
                 hidden=not self.show_particles,
             )

@@ -15,8 +15,7 @@
 
 from . import box_topology
 
-# glue_utils is imported lazily to avoid circular import (e.g. examples import newton -> sim -> glue_utils;
-# if glue_utils or its deps pull on sim again we get "partially initialized module").
+# glue_utils is imported lazily to avoid circular import
 _glue_utils_loading = False
 
 
@@ -25,8 +24,7 @@ def __getattr__(name: str):
         global _glue_utils_loading
         if _glue_utils_loading:
             raise AttributeError(
-                "module %r is loading glue_utils; circular import detected. "
-                "Ensure glue_utils does not import from newton or newton._src.sim at top level."
+                "module %r is loading glue_utils; circular import detected."
                 % (__name__,)
             )
         _glue_utils_loading = True
@@ -57,7 +55,7 @@ from .state import State
 from .style3d import Style3DModel, Style3DModelBuilder
 from .tetra_sphere import TetraSphere, create_tetra_sphere
 from .tetra_cylinder import TetraCylinder, create_tetra_cylinder
-from .tetra_box import TetraBox, create_tetra_box
+from .tetra_box import TetraBox, create_tetra_box, get_axis_aligned_springs
 from .surface_box import SurfaceBox, create_surface_box
 
 
@@ -89,6 +87,7 @@ __all__ = [
     "create_tetra_sphere",
     "create_tetra_cylinder",
     "create_tetra_box",
+    "get_axis_aligned_springs",
     "eval_fk",
     "eval_ik",
     "get_joint_dof_count",
