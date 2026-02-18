@@ -675,3 +675,126 @@ def save_tetrahedral_mesh(mesh_file: str, vertices: np.ndarray, tetrahedra: np.n
         
         # Write end marker
         f.write("End\n")
+
+
+# -----------------------------------------------------------------------------
+# Surface mesh extraction (tet boundary / tri mesh → surface tris + edges)
+# -----------------------------------------------------------------------------
+
+
+def _face_key(i: int, j: int, k: int):
+    """Canonical key for a triangle face (sorted indices)."""
+    return tuple(sorted((int(i), int(j), int(k))))
+
+
+def extract_surface_from_tets(tet_indices: np.ndarray) -> np.ndarray:
+    """
+    Extract boundary triangle faces from a tetrahedral mesh.
+    Each tet has 4 faces; a face is on the boundary iff it appears exactly once.
+
+    Parameters
+    ----------
+    tet_indices : ndarray
+        Shape (tet_count * 4,) or (tet_count, 4). Each tet is 4 vertex indices.
+
+    Returns
+    -------
+    ndarray
+        Shape (num_surface_tris, 3). Each row is (v0, v1, v2) for a boundary triangle.
+    """
+    tet_indices = np.asarray(tet_indices, dtype=np.int32)
+    if tet_indices.ndim == 2:
+        tet_indices = tet_indices.ravel()
+    tet_count = tet_indices.shape[0] // 4
+    face_count: dict = {}
+    face_to_verts: dict = {}
+
+    for t in range(tet_count):
+        i0 = int(tet_indices[t * 4 + 0])
+        i1 = int(tet_indices[t * 4 + 1])
+        i2 = int(tet_indices[t * 4 + 2])
+        i3 = int(tet_indices[t * 4 + 3])
+        faces = [
+            (i0, i1, i2),
+            (i0, i1, i3),
+            (i0, i2, i3),
+            (i1, i2, i3),
+        ]
+        for (a, b, c) in faces:
+            key = _face_key(a, b, c)
+            face_count[key] = face_count.get(key, 0) + 1
+            face_to_verts[key] = (a, b, c)
+
+    boundary = [face_to_verts[k] for k, count in face_count.items() if count == 1]
+    if not boundary:
+        return np.zeros((0, 3), dtype=np.int32)
+    return np.array(boundary, dtype=np.int32)
+
+
+def triangles_to_edges(tri_indices: np.ndarray) -> np.ndarray:
+    """
+    Build unique edges from triangle indices. Each triangle contributes 3 edges;
+    deduplicate by canonical (min, max) edge key.
+
+    Parameters
+    ----------
+    tri_indices : ndarray
+        Shape (num_tris, 3) or (num_tris * 3,). Vertex indices per triangle.
+
+    Returns
+    -------
+    ndarray
+        Shape (num_edges, 2). Each row is (v0, v1) with v0 < v1.
+    """
+    if tri_indices.size == 0:
+        return np.zeros((0, 2), dtype=np.int32)
+    if tri_indices.ndim == 1:
+        n = tri_indices.shape[0] // 3
+        tris = tri_indices.reshape(n, 3)
+    else:
+        tris = np.asarray(tri_indices, dtype=np.int32)
+    seen: set = set()
+    edges: list = []
+    for (a, b, c) in tris:
+        for u, v in [(a, b), (b, c), (c, a)]:
+            key = (min(u, v), max(u, v))
+            if key not in seen:
+                seen.add(key)
+                edges.append(key)
+    if not edges:
+        return np.zeros((0, 2), dtype=np.int32)
+    return np.array(edges, dtype=np.int32)
+
+
+def get_surface_triangles_and_edges(
+    tri_indices: np.ndarray | None,
+    tet_indices: np.ndarray | None,
+    tri_count: int,
+    tet_count: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Get surface triangle indices (N, 3) and surface edge indices (E, 2).
+    Uses tri_indices as surface if tri_count > 0; otherwise extracts boundary from tets.
+
+    Returns
+    -------
+    surface_tris : ndarray (N, 3)
+    surface_edges : ndarray (E, 2)
+    """
+    if tri_count > 0 and tri_indices is not None and tri_indices.size >= tri_count * 3:
+        if tri_indices.ndim == 1:
+            surface_tris = np.asarray(
+                tri_indices[: tri_count * 3].reshape(tri_count, 3), dtype=np.int32
+            )
+        else:
+            surface_tris = np.asarray(tri_indices[:tri_count], dtype=np.int32)
+    elif tet_count > 0 and tet_indices is not None and tet_indices.size >= tet_count * 4:
+        tet_flat = np.asarray(tet_indices[: tet_count * 4], dtype=np.int32)
+        if tet_flat.ndim == 2:
+            tet_flat = tet_flat.ravel()
+        surface_tris = extract_surface_from_tets(tet_flat)
+    else:
+        surface_tris = np.zeros((0, 3), dtype=np.int32)
+
+    surface_edges = triangles_to_edges(surface_tris)
+    return surface_tris, surface_edges

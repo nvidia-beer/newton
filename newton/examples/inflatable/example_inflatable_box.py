@@ -67,6 +67,7 @@ class Example:
         max_pressure: float = 5.0,   # Maximum inflation (volume ratio)
         cycle_speed: float = 0.01,   # How fast to cycle inflation
         substeps: int = 5,
+        verbose: bool = True,        # Print mesh info (set False when used as base for other examples)
     ):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -85,11 +86,12 @@ class Example:
         self.viewer = viewer
         
         # Generate FEM box mesh
-        print(f"\n📦 Generating tetrahedral box mesh...", flush=True)
+        if verbose:
+            print(f"\n📦 Generating tetrahedral box mesh...", flush=True)
         box = TetraBox(
             size=self.size,
             subdivisions=subdivisions,
-            verbose=True
+            verbose=verbose,
         )
         mesh_data = box.get_mesh_data()
         
@@ -97,7 +99,8 @@ class Example:
         indices = mesh_data['indices']
         tetrahedra = mesh_data['tetrahedra']
         
-        print(f"   Mesh: {len(vertices)} vertices, {len(tetrahedra)} tetrahedra", flush=True)
+        if verbose:
+            print(f"   Mesh: {len(vertices)} vertices, {len(tetrahedra)} tetrahedra", flush=True)
         
         # Build Newton model
         builder = newton.ModelBuilder()
@@ -112,10 +115,7 @@ class Example:
             )
         )
         
-        # Track particle start index for springs
-        start_particle = builder.particle_count
-        
-        # Add soft mesh - positioned above ground (Z is up)
+        # Add soft mesh - positioned above ground (Z is up); builder adds edge springs
         builder.add_soft_mesh(
             pos=wp.vec3(0.0, 0.0, initial_height),
             rot=wp.quat_identity(),
@@ -129,42 +129,13 @@ class Example:
             k_damp=k_damp,
         )
         
-        # Add springs between mesh vertices for stability
-        num_tets = len(tetrahedra)
-        added_springs = set()
-        
-        for t in range(num_tets):
-            tet_indices = [indices[t * 4 + k] for k in range(4)]
-            edges = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
-            for ei, ej in edges:
-                i_local, j_local = tet_indices[ei], tet_indices[ej]
-                if i_local > j_local:
-                    i_local, j_local = j_local, i_local
-                
-                spring_key = (i_local, j_local)
-                if spring_key not in added_springs:
-                    added_springs.add(spring_key)
-                    
-                    p0 = vertices[i_local]
-                    p1 = vertices[j_local]
-                    rest_length = float(np.linalg.norm(p1 - p0))
-                    
-                    builder.add_spring(
-                        start_particle + i_local,
-                        start_particle + j_local,
-                        spring_ke,
-                        spring_kd,
-                        rest_length
-                    )
-        
-        print(f"   Added {len(added_springs)} springs", flush=True)
-        
         self.model = builder.finalize()
         
-        print(f"\nModel created:", flush=True)
-        print(f"  Particles: {self.model.particle_count}", flush=True)
-        print(f"  Springs: {self.model.spring_count}", flush=True)
-        print(f"  Tetrahedra: {self.model.tet_count}", flush=True)
+        if verbose:
+            print(f"\nModel created:", flush=True)
+            print(f"  Particles: {self.model.particle_count}", flush=True)
+            print(f"  Springs: {self.model.spring_count}", flush=True)
+            print(f"  Tetrahedra: {self.model.tet_count}", flush=True)
         
         # Set gravity (Z is up, gravity pulls down)
         self.model.gravity = wp.array([wp.vec3(0.0, 0.0, -gravity)], dtype=wp.vec3, device=self.model.device)
@@ -228,15 +199,16 @@ class Example:
                 self.viewer.register_key_press(self._on_key_press)
                 print(f"   [Keyboard controls registered on viewer]", flush=True)
         
-        print(f"\n📦 Inflatable Soft Body Box Ready!", flush=True)
-        print(f"   Size: {self.size[0]:.2f}×{self.size[1]:.2f}×{self.size[2]:.2f}m", flush=True)
-        print(f"   Subdivisions: {subdivisions[0]}×{subdivisions[1]}×{subdivisions[2]}", flush=True)
-        print(f"   Max inflation: {max_pressure}x volume", flush=True)
-        print(f"   Stiffness: μ={k_mu:.0e}, λ={k_lambda:.0e}", flush=True)
-        print(f"\n   Keyboard Controls:", flush=True)
-        print(f"   [I] or [=]     - Increase pressure (inflate)", flush=True)
-        print(f"   [K] or [-]     - Decrease pressure (deflate)", flush=True)
-        print(f"   [O]            - Reset to Original rest size", flush=True)
+        if verbose:
+            print(f"\n📦 Inflatable Soft Body Box Ready!", flush=True)
+            print(f"   Size: {self.size[0]:.2f}×{self.size[1]:.2f}×{self.size[2]:.2f}m", flush=True)
+            print(f"   Subdivisions: {subdivisions[0]}×{subdivisions[1]}×{subdivisions[2]}", flush=True)
+            print(f"   Max inflation: {max_pressure}x volume", flush=True)
+            print(f"   Stiffness: μ={k_mu:.0e}, λ={k_lambda:.0e}", flush=True)
+            print(f"\n   Keyboard Controls:", flush=True)
+            print(f"   [I] or [=]     - Increase pressure (inflate)", flush=True)
+            print(f"   [K] or [-]     - Decrease pressure (deflate)", flush=True)
+            print(f"   [O]            - Reset to Original rest size", flush=True)
     
     def _on_key_press(self, symbol, modifiers):
         """Handle keyboard input for pressure control."""

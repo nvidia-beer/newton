@@ -20,7 +20,11 @@ from warp.optim.linear import cg, preconditioner, bicgstab, gmres, cr
 from warp.sparse import bsr_zeros, bsr_set_from_triplets
 
 from .kernels import (
+    build_system_matrix_diagonal_kernel,
+    build_system_matrix_diagonal_mass_kernel,
     build_system_matrix_sparse_kernel,
+    build_system_matrix_tet_kernel,
+    build_system_matrix_tri_kernel,
     eval_springs,
     eval_tetrahedra,
     eval_triangles,
@@ -28,6 +32,7 @@ from .kernels import (
     eval_triangles_contact,
     eval_gravity,
     eval_soft_contacts,
+    eval_particle_ground_contacts,
     solve_soft_contacts_constraint,
     apply_particle_corrections,
     update_state,
@@ -76,6 +81,11 @@ class SolverSoft(SolverBase):
     linear_solver_maxiter : int
         Max iterations for the linear solver (default: 50). Large meshes need more;
         too low (e.g. 3) can cause non-convergence and NaN.
+    use_fem_tangent_in_matrix : bool
+        If True, include tetrahedral and triangle FEM tangent in the system matrix
+        and rebuild each step (more stable for stiff materials). If False, only
+        mass and springs are in the matrix (default). Set False to avoid NaN
+        when using the new FEM-in-matrix path until it is fully validated.
     """
 
     def __init__(
@@ -85,18 +95,36 @@ class SolverSoft(SolverBase):
         mass: float = 1.0,
         preconditioner_type: str = "id",
         solver_type: str = "bicgstab",
+        use_fem_tangent_in_matrix: bool = False,
         use_constraint_contacts: bool = False,
         contact_relaxation: float = 0.5,
         contact_max_velocity: float = 20.0,
         contact_max_correction: float = 0.02,
         contact_iterations: int = 2,
         linear_solver_maxiter: int = 50,
+        extra_matrix_blocks: int = 0,
+        ground_plane: "tuple[float, float, float, float] | None" = None,
+        ground_ke: float = 1.0e5,
+        ground_kd: float = 1.0e2,
+        ground_kf: float = 1.0e3,
+        ground_mu: float = 0.5,
     ):
         super().__init__(model=model)
         
         self.friction_smoothing = 2.0
         self.mass = mass
         self.Minv = 1.0 / self.mass
+        
+        # Optional force-based ground plane (n·x + d = 0)
+        self._ground_plane = None
+        if ground_plane is not None:
+            self._ground_plane = wp.array(
+                ground_plane, dtype=wp.float32, device=model.device
+            )
+        self._ground_ke = float(ground_ke)
+        self._ground_kd = float(ground_kd)
+        self._ground_kf = float(ground_kf)
+        self._ground_mu = float(ground_mu)
         
         # Constraint-based contact settings (like XPBD)
         self.use_constraint_contacts = use_constraint_contacts
@@ -105,9 +133,16 @@ class SolverSoft(SolverBase):
         self.contact_max_correction = contact_max_correction  # max position correction per application
         self.contact_iterations = contact_iterations  # more iterations = better friction resolution
         self.linear_solver_maxiter = linear_solver_maxiter
+        self.use_fem_tangent_in_matrix = use_fem_tangent_in_matrix
         
-        # Pre-allocate arrays for BSR matrix construction
-        num_blocks = model.spring_count * 4  # Each edge contributes 4 blocks
+        # Pre-allocate arrays for BSR matrix: base blocks + optional extra (e.g. self-contact in Deformable)
+        base_blocks = (
+            model.particle_count
+            + model.spring_count * 2
+            + model.tet_count * 16
+            + model.tri_count * 3
+        )
+        num_blocks = base_blocks + extra_matrix_blocks
         self.bsr_rows = wp.zeros(num_blocks, dtype=wp.int32, device=model.device)
         self.bsr_cols = wp.zeros(num_blocks, dtype=wp.int32, device=model.device)
         self.bsr_values = wp.zeros(num_blocks, dtype=wp.mat33f, device=model.device)
@@ -120,10 +155,11 @@ class SolverSoft(SolverBase):
             device=model.device,
         )
         
-        # Build and assemble the system matrix
-        self.initialize_system_matrix_sparse(model, dt)
+        # Build and assemble the system matrix (with state for FEM tangent; done each step)
+        self._build_system_matrix(model, None, dt)
         
-        # Preconditioner for the sparse matrix
+        # Preconditioner for the sparse matrix (rebuilt each step when FEM is used)
+        self.preconditioner_type = preconditioner_type
         self.M_bsr = preconditioner(self.A_bsr, ptype=preconditioner_type)
         self.solver_type = solver_type
         
@@ -142,28 +178,94 @@ class SolverSoft(SolverBase):
         
         self.constraint_count = 0
 
-    def initialize_system_matrix_sparse(self, model: Model, dt: float):
-        """Build the sparse system matrix for implicit integration."""
-        if model.spring_count == 0:
-            return
-            
-        wp.launch(
-            kernel=build_system_matrix_sparse_kernel,
-            dim=model.spring_count,
-            inputs=[
-                self.bsr_rows,
-                self.bsr_cols,
-                self.bsr_values,
-                model.spring_indices,
-                model.spring_stiffness,
-                model.spring_damping,
-                wp.float32(dt),
-                self.mass,
-                self.Minv
-            ],
-            device=model.device,
-        )
-        
+    def _build_system_matrix(self, model: Model, state: State | None, dt: float):
+        """Build the sparse system matrix A = M - h*D - h²*K (mass, springs, tet FEM, tri FEM)."""
+        offset = 0
+        # 1) Diagonal: M + sum of spring (dt*D - dt²*K) per particle (no duplicate blocks)
+        if model.spring_count > 0:
+            wp.launch(
+                kernel=build_system_matrix_diagonal_kernel,
+                dim=model.particle_count,
+                inputs=[
+                    self.bsr_rows,
+                    self.bsr_cols,
+                    self.bsr_values,
+                    model.spring_indices,
+                    model.spring_stiffness,
+                    model.spring_damping,
+                    wp.float32(dt),
+                    self.mass,
+                    self.Minv,
+                    wp.int32(model.spring_count),
+                ],
+                device=model.device,
+            )
+        else:
+            wp.launch(
+                kernel=build_system_matrix_diagonal_mass_kernel,
+                dim=model.particle_count,
+                inputs=[self.bsr_rows, self.bsr_cols, self.bsr_values, wp.float32(self.mass)],
+                device=model.device,
+            )
+        offset += model.particle_count
+        # 2) Spring off-diagonals only (i,j) and (j,i)
+        if model.spring_count > 0:
+            wp.launch(
+                kernel=build_system_matrix_sparse_kernel,
+                dim=model.spring_count,
+                inputs=[
+                    self.bsr_rows,
+                    self.bsr_cols,
+                    self.bsr_values,
+                    model.spring_indices,
+                    model.spring_stiffness,
+                    wp.float32(dt),
+                    wp.int32(offset),
+                ],
+                device=model.device,
+            )
+            offset += model.spring_count * 2
+        # 3) Tetrahedral FEM tangent (requires current state)
+        if model.tet_count > 0 and state is not None:
+            wp.launch(
+                kernel=build_system_matrix_tet_kernel,
+                dim=model.tet_count,
+                inputs=[
+                    state.particle_q,
+                    model.tet_indices,
+                    model.tet_poses,
+                    model.tet_materials,
+                    wp.float32(dt),
+                    wp.int32(offset),
+                    self.bsr_rows,
+                    self.bsr_cols,
+                    self.bsr_values,
+                ],
+                device=model.device,
+            )
+            offset += model.tet_count * 16
+        # 4) Triangle FEM lumped tangent (requires current state)
+        if model.tri_count > 0 and state is not None:
+            wp.launch(
+                kernel=build_system_matrix_tri_kernel,
+                dim=model.tri_count,
+                inputs=[
+                    state.particle_q,
+                    model.tri_indices,
+                    model.tri_poses,
+                    model.tri_materials,
+                    wp.float32(dt),
+                    wp.int32(offset),
+                    self.bsr_rows,
+                    self.bsr_cols,
+                    self.bsr_values,
+                ],
+                device=model.device,
+            )
+            offset += model.tri_count * 3
+        # Subclass hook: add extra blocks (e.g. self-contact tangent in SolverDeformable)
+        self._add_extra_matrix_blocks(model, state, dt, offset)
+
         bsr_set_from_triplets(
             dest=self.A_bsr,
             rows=self.bsr_rows,
@@ -171,6 +273,14 @@ class SolverSoft(SolverBase):
             values=self.bsr_values,
             prune_numerical_zeros=True
         )
+
+    def _add_extra_matrix_blocks(
+        self, model: Model, state: State | None, dt: float, block_offset: int
+    ) -> None:
+        """Override in subclasses to add blocks to the system matrix (e.g. self-contact tangent).
+        Write into self.bsr_rows[block_offset:], self.bsr_cols[block_offset:], self.bsr_values[block_offset:].
+        """
+        pass
 
     def eval_tetrahedral_forces(self, model: Model, control: Control, state: State):
         """Evaluate tetrahedral FEM forces."""
@@ -297,13 +407,35 @@ class SolverSoft(SolverBase):
         return forces
 
     def eval_particle_ground_contact_forces(self, model: Model, control: Control, state: State):
-        """Evaluate particle-ground contact forces.
-        
-        Note: In the current newton version, ground contact is handled through
-        the collision pipeline (model.collide()). This method is kept for
-        backwards compatibility but returns zero forces.
+        """Particle–ground contact forces.
+
+        If ground_plane=(nx,ny,nz,d) was passed at construction, applies force-based
+        ground contact and Coulomb friction. Otherwise returns zero (ground via
+        collision pipeline: use_constraint_contacts=True and model.collide(state)).
         """
-        return wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        if self._ground_plane is None:
+            return wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        forces = wp.zeros(
+            model.particle_count, dtype=wp.vec3, device=model.device
+        )
+        wp.launch(
+            kernel=eval_particle_ground_contacts,
+            dim=model.particle_count,
+            inputs=[
+                state.particle_q,
+                state.particle_qd,
+                model.particle_radius,
+                model.particle_flags,
+                self._ground_ke,
+                self._ground_kd,
+                self._ground_kf,
+                self._ground_mu,
+                self._ground_plane,
+            ],
+            outputs=[forces],
+            device=model.device,
+        )
+        return forces
     
     def eval_soft_contact_forces(self, model: Model, state: State, contacts: Contacts):
         """Evaluate contact forces from collision detection results."""
@@ -521,6 +653,11 @@ class SolverSoft(SolverBase):
         if control is None:
             control = model.control()
 
+        # Rebuild system matrix (and preconditioner) only when FEM tangent is in the matrix
+        if self.use_fem_tangent_in_matrix:
+            self._build_system_matrix(model, state_in, dt)
+            self.M_bsr = preconditioner(self.A_bsr, ptype=self.preconditioner_type)
+
         # Evaluate all forces
         spring_forces = self.eval_spring_forces(model, state_in)
         triangle_forces = self.eval_triangle_forces(model, control, state_in)
@@ -590,9 +727,8 @@ class SolverSoft(SolverBase):
         if contact_count == 0:
             return
         
-        # Per-particle friction: use array if set, else broadcast scalar
         particle_friction = getattr(model, "particle_friction", None)
-        if particle_friction is None or not hasattr(particle_friction, "shape"):
+        if particle_friction is None or not hasattr(particle_friction, "shape") or particle_friction.shape[0] != model.particle_count:
             particle_friction = wp.full(
                 (model.particle_count,),
                 float(model.soft_contact_mu),

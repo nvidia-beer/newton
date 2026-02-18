@@ -205,7 +205,6 @@ class Example:
         # Offset vertices using computed soft_offset (places bottom at ground + particle_radius)
         positioned_vertices = [(v[0], v[1], v[2] + soft_offset) for v in vertices]
         
-        start_particle = builder.particle_count
         builder.add_soft_mesh(
             pos=wp.vec3(0.0, 0.0, 0.0),
             rot=wp.quat_identity(),
@@ -218,37 +217,6 @@ class Example:
             k_lambda=k_lambda,
             k_damp=k_damp,
         )
-        
-        # Add springs for stability
-        num_tets = len(tetrahedra)
-        added_springs = set()
-        vertex_positions = np.array(positioned_vertices)
-        
-        for t in range(num_tets):
-            tet_indices = [indices[t * 4 + k] for k in range(4)]
-            edges = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
-            for ei, ej in edges:
-                i_local, j_local = tet_indices[ei], tet_indices[ej]
-                if i_local > j_local:
-                    i_local, j_local = j_local, i_local
-                
-                spring_key = (i_local, j_local)
-                if spring_key not in added_springs:
-                    added_springs.add(spring_key)
-                    
-                    p0 = vertex_positions[i_local]
-                    p1 = vertex_positions[j_local]
-                    rest_length = float(np.linalg.norm(p1 - p0))
-                    
-                    builder.add_spring(
-                        start_particle + i_local,
-                        start_particle + j_local,
-                        spring_ke,
-                        spring_kd,
-                        rest_length
-                    )
-        
-        print(f"   Added {len(added_springs)} springs", flush=True)
         
         # Finalize model
         self.model = builder.finalize()
@@ -293,7 +261,9 @@ class Example:
             dt=self.sim_dt,
             mass=soft_mass,
             max_volume_ratio=max_pressure,
-            solver_type="bicgstab"
+            solver_type="bicgstab",
+            linear_solver_maxiter=150,  # larger mesh needs more iterations for convergence
+            use_constraint_contacts=True,  # XPBD-style contact correction for stable rigid-soft and ground contact
         )
         
         # Rigid body solver

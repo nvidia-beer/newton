@@ -37,7 +37,8 @@ This is stable and integrates well with implicit solvers.
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.soft import SolverSoft
+from newton._src.solvers.deformable import SolverDeformable
+from .kernels_bend import eval_springs_linear_and_torque
 from .kernels_inflatable import (
     scale_spring_rest_lengths_kernel,
     scale_tet_poses_kernel,
@@ -50,11 +51,11 @@ from .kernels_inflatable import (
 from newton._src.sim import Contacts, Control, Model, State
 
 
-class SolverInflatable(SolverSoft):
+class SolverInflatable(SolverDeformable):
     """
     Inflatable soft body solver with pressure control via rest configuration scaling.
     
-    Extends SolverSoft with the ability to inflate/deflate soft bodies by scaling
+    Extends SolverDeformable with the ability to inflate/deflate soft bodies by scaling
     their FEM rest configuration. The material naturally deforms toward the new
     rest state, providing stable inflation behavior.
     
@@ -101,6 +102,20 @@ class SolverInflatable(SolverSoft):
         contact_max_velocity: float = 20.0,
         contact_max_correction: float = 0.02,
         contact_iterations: int = 2,
+        linear_solver_maxiter: int = 50,
+        handle_self_contact: bool = False,
+        self_contact_radius: float = 0.02,
+        self_contact_stiffness: float = 1.0e5,
+        self_contact_force_cap: float = 2.0,
+        self_contact_edge_edge: bool = True,
+        torque_stiffness: float = 0.0,
+        torque_damping: float = 0.0,
+        spring_rest_direction: "np.ndarray | None" = None,
+        ground_plane: "tuple[float, float, float, float] | None" = None,
+        ground_ke: float = 1.0e5,
+        ground_kd: float = 1.0e2,
+        ground_kf: float = 1.0e3,
+        ground_mu: float = 0.5,
     ):
         super().__init__(
             model=model,
@@ -113,6 +128,17 @@ class SolverInflatable(SolverSoft):
             contact_max_velocity=contact_max_velocity,
             contact_max_correction=contact_max_correction,
             contact_iterations=contact_iterations,
+            linear_solver_maxiter=linear_solver_maxiter,
+            ground_plane=ground_plane,
+            ground_ke=ground_ke,
+            ground_kd=ground_kd,
+            ground_kf=ground_kf,
+            ground_mu=ground_mu,
+            handle_self_contact=handle_self_contact,
+            self_contact_radius=self_contact_radius,
+            self_contact_stiffness=self_contact_stiffness,
+            self_contact_force_cap=self_contact_force_cap,
+            self_contact_edge_edge=self_contact_edge_edge,
         )
         
         self.max_volume_ratio = max_volume_ratio
@@ -139,6 +165,47 @@ class SolverInflatable(SolverSoft):
         
         # Compute and store initial volume
         self._initial_volume = None
+
+        # Optional bend/torque: springs with non-zero rest direction resist bending
+        self.torque_stiffness = float(torque_stiffness)
+        self.torque_damping = float(torque_damping)
+        dr = np.asarray(
+            spring_rest_direction
+            if spring_rest_direction is not None
+            else np.zeros((model.spring_count, 3), dtype=np.float32),
+            dtype=np.float32,
+        )
+        if dr.shape != (model.spring_count, 3):
+            raise ValueError(
+                f"spring_rest_direction shape {dr.shape} != (spring_count={model.spring_count}, 3)"
+            )
+        self.spring_rest_direction = wp.array(dr, dtype=wp.vec3, device=model.device)
+
+    def eval_spring_forces(self, model: Model, state: State):
+        """Spring forces; with torque when torque_stiffness > 0 and rest directions set."""
+        if model.spring_count == 0:
+            return wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        if self.torque_stiffness > 0.0:
+            f = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+            wp.launch(
+                kernel=eval_springs_linear_and_torque,
+                dim=model.spring_count,
+                inputs=[
+                    state.particle_q,
+                    state.particle_qd,
+                    model.spring_indices,
+                    model.spring_rest_length,
+                    model.spring_stiffness,
+                    model.spring_damping,
+                    self.spring_rest_direction,
+                    wp.float32(self.torque_stiffness),
+                    wp.float32(self.torque_damping),
+                ],
+                outputs=[f],
+                device=model.device,
+            )
+            return f
+        return super().eval_spring_forces(model, state)
     
     def _store_original_rest_config(self, model: Model):
         """Store the original rest configuration for later scaling."""
@@ -223,7 +290,10 @@ class SolverInflatable(SolverSoft):
         initial = self.get_initial_volume(state)
         if initial <= 0.0:
             return 1.0
-        return self.compute_volume(state) / initial
+        ratio = self.compute_volume(state) / initial
+        if not np.isfinite(ratio):
+            return 1.0
+        return ratio
     
     def set_chamber_mask(
         self,

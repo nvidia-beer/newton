@@ -13,11 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Solvers for rigid and soft body simulation.
+
+Soft body chain: SolverSoft → SolverDeformable (+ self-collision)
+→ SolverInflatable (+ inflation). See newton/docs/soft_solvers.md.
+"""
+
+from .deformable import SolverDeformable
 from .featherstone import SolverFeatherstone
 from .flags import SolverNotifyFlags
 from .implicit_mpm import SolverImplicitMPM
-from .bend import SolverBend
-from .inflatable import SolverInflatable
+from .inflatable import SolverBend, SolverInflatable
 from .mujoco import SolverMuJoCo
 from .semi_implicit import SolverSemiImplicit
 from .soft import SolverSoft
@@ -41,6 +48,7 @@ from ..sim import (
 __all__ = [
     "SolverBase",
     "SolverBend",
+    "SolverDeformable",
     "SolverFeatherstone",
     "SolverImplicitMPM",
     "SolverInflatable",

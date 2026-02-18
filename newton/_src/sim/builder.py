@@ -5074,7 +5074,10 @@ class ModelBuilder:
         tri_drag: float | None = None,
         tri_lift: float | None = None,
     ) -> None:
-        """Helper to create a tetrahedral model from an input tetrahedral mesh
+        """Helper to create a tetrahedral model from an input tetrahedral mesh.
+
+        Always adds one spring per unique tetrahedron edge so that SolverSoft
+        has stiffness in the system matrix (spring_ke = k_mu * 0.5, spring_kd = k_damp * 0.5).
 
         Args:
             pos: The position of the solid in world space
@@ -5143,6 +5146,30 @@ class ModelBuilder:
                 self.add_triangle(v[0], v[1], v[2], tri_ke, tri_ka, tri_kd, tri_drag, tri_lift)
             except np.linalg.LinAlgError:
                 continue
+
+        # One spring per unique tet edge (SolverSoft needs stiffness in the system matrix)
+        spring_ke_val = k_mu * 0.5
+        spring_kd_val = k_damp * 0.5
+        added = set()
+        for t in range(num_tets):
+            base = t * 4
+            a, b, c, d = (
+                indices[base + 0],
+                indices[base + 1],
+                indices[base + 2],
+                indices[base + 3],
+            )
+            for i_local, j_local in [(a, b), (a, c), (a, d), (b, c), (b, d), (c, d)]:
+                key = (min(i_local, j_local), max(i_local, j_local))
+                if key not in added:
+                    added.add(key)
+                    self.add_spring(
+                        start_vertex + key[0],
+                        start_vertex + key[1],
+                        spring_ke_val,
+                        spring_kd_val,
+                        0.0,
+                    )
 
     # incrementally updates rigid body mass with additional mass and inertia expressed at a local to the body
     def _update_body_mass(self, i, m, I, p, q):

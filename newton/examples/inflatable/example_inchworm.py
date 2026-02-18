@@ -14,13 +14,15 @@
 # limitations under the License.
 
 """
-Torque Worm Example – one axis stays straight (X, Y, or Z).
+Inchworm example – legged crawling with phase-shifted harmonic gait.
 
-- Choose a single stiff axis (e.g. x): all springs aligned with that axis get torque
-  on the whole object (all chambers), so that axis resists bending.
-- Other axes can bend; inflation drives the motion.
+Implements the soft robot from arXiv:1911.05227 (Understanding Legged Crawling for
+Soft-Robotics): two bending actuators (left/right leg chambers), X-axis kept straight
+via torque springs, phase-shifted sinusoidal pressure on chambers 1 and 3 for
+inchworm locomotion. Gait is always on; use --no_gait to disable and drive manually
+with [I]/[K] and [C] (same as worm example).
 
-[I]/[K] inflate/deflate, [C] cycle chamber.
+Chamber layout (1×2×2): ch1 = left leg, ch3 = right leg; ch0 and ch2 = backbone (no inflation).
 """
 
 import argparse
@@ -28,7 +30,7 @@ import warp as wp
 import numpy as np
 
 import newton
-from newton.solvers import SolverBend, TetraBox
+from newton.solvers import SolverInflatable, TetraBox
 
 
 def _chamber_index(ix: int, iy: int, iz: int, nx: int, ny: int, nz: int, disabled: set) -> int:
@@ -38,7 +40,7 @@ def _chamber_index(ix: int, iy: int, iz: int, nx: int, ny: int, nz: int, disable
 
 
 class Example:
-    """Worm with torque: one axis (X, Y, or Z) stays straight; torque on whole object."""
+    """Inchworm: two bending actuators (ch1=left, ch3=right), phase-shifted harmonic gait, X stiff."""
 
     def __init__(
         self,
@@ -63,14 +65,18 @@ class Example:
         max_pressure: float = 5.0,
         substeps: int = 5,
         anisotropy_x: float = 1.2,
-        anisotropy_y: float = 1.4,
-        anisotropy_z: float = 1.2,
+        anisotropy_y: float = 1.5,
+        anisotropy_z: float = 1.4,
         torque_stiffness: float = 100.0,
         torque_damping: float = 2.0,
-        stiff_axes: tuple[str, ...] = ("x",),  # single axis that stays straight: "x", "y", or "z"
-        torque_display_axis: str = "all",  # which torque springs to draw: "all" | "x" | "y" | "z"
         chamber_stiffness_scale: list[float] | None = None,
         chamber_inflation_disabled: list[int] | None = None,
+        ground_friction: float = 0.8,
+        gait_enabled: bool = True,
+        gait_freq: float = 0.2,
+        gait_amplitude: float = 0.8,
+        gait_phase: float = 1.57,
+        gait_baseline: float = 1.2,
     ):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -98,16 +104,10 @@ class Example:
         self.anisotropy_y = float(anisotropy_y)
         self.anisotropy_z = float(anisotropy_z)
         self.viewer = viewer
-        # Single stiff axis only: X, Y, or Z. Springs along that axis get torque (stay straight) on the whole object.
-        ax_in = stiff_axes if isinstance(stiff_axes, (list, tuple)) else [stiff_axes]
-        ax_in = [str(a).strip().lower() for a in ax_in if str(a).strip()]
-        if len(ax_in) != 1 or ax_in[0] not in ("x", "y", "z"):
-            raise ValueError("stiff_axes must be exactly one of 'x', 'y', 'z' (e.g. stiff_axes='x' = X stays straight)")
-        self.stiff_axes = (ax_in[0],)
-        disp = (torque_display_axis or "all").strip().lower()
-        self.torque_display_axis = disp if disp in ("all", "x", "y", "z") else "all"
+        self.stiff_axes = ("x",)
+        self.torque_display_axis = "all"
 
-        print(f"\n🪱 Torque worm: {self.stiff_axes[0].upper()} stays straight.", flush=True)
+        print("\n🐛 Inchworm (arXiv:1911.05227): left/right chambers, phase-shifted gait.", flush=True)
         box = TetraBox(
             size=(self.length, self.width, self.height),
             subdivisions=self.subdivisions,
@@ -120,9 +120,8 @@ class Example:
 
         builder = newton.ModelBuilder()
         builder.add_ground_plane(
-            cfg=newton.ModelBuilder.ShapeConfig(ke=5e5, kd=1e3, kf=1e4, mu=0.5),
+            cfg=newton.ModelBuilder.ShapeConfig(ke=5e5, kd=1e3, kf=1e4, mu=ground_friction),
         )
-        start_particle = builder.particle_count
         builder.add_soft_mesh(
             pos=wp.vec3(0.0, 0.0, initial_height),
             rot=wp.quat_identity(),
@@ -138,7 +137,7 @@ class Example:
 
         added_springs = set()
         spring_chamber_list = []
-        spring_pairs_local = []  # (i_local, j_local) in same order as add_spring
+        spring_pairs_local = []
         for t in range(len(tetrahedra)):
             tet_indices = [indices[t * 4 + k] for k in range(4)]
             edges = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
@@ -151,14 +150,6 @@ class Example:
                     added_springs.add(spring_key)
                     spring_pairs_local.append((i_local, j_local))
                     p0, p1 = vertices[i_local], vertices[j_local]
-                    rest_length = float(np.linalg.norm(p1 - p0))
-                    builder.add_spring(
-                        start_particle + i_local,
-                        start_particle + j_local,
-                        spring_ke,
-                        spring_kd,
-                        rest_length,
-                    )
                     mid_x = (float(p0[0]) + float(p1[0])) * 0.5
                     mid_y = (float(p0[1]) + float(p1[1])) * 0.5
                     mid_z = (float(p0[2]) + float(p1[2])) * 0.5
@@ -172,17 +163,15 @@ class Example:
                         _chamber_index(ix, iy, iz, self.num_chambers_x, self.num_chambers_y, self.num_chambers_z, self.chamber_inflation_disabled)
                     )
 
-        # Torque on all springs aligned with the single stiff axis (whole object, all chambers).
         axis_sets = {
             "x": set((min(i, j), max(i, j)) for i, j in box.get_axis_aligned_springs("x")),
             "y": set((min(i, j), max(i, j)) for i, j in box.get_axis_aligned_springs("y")),
             "z": set((min(i, j), max(i, j)) for i, j in box.get_axis_aligned_springs("z")),
         }
         spring_rest_direction = np.zeros((len(spring_pairs_local), 3), dtype=np.float32)
-        stiff_ax = self.stiff_axes[0]
         for k, (a, b) in enumerate(spring_pairs_local):
             key = (min(a, b), max(a, b))
-            if key in axis_sets[stiff_ax]:
+            if key in axis_sets["x"]:
                 rest_vec = vertices[b] - vertices[a]
                 L = float(np.linalg.norm(rest_vec))
                 if L > 1e-9:
@@ -191,12 +180,9 @@ class Example:
             k for k in range(len(spring_pairs_local))
             if np.linalg.norm(spring_rest_direction[k]) > 0.5
         ]
-        # Which axis each torque spring is aligned with (for display filter: only X / only Y / only Z)
-        self._torque_spring_axis_dict = {k: stiff_ax for k in torque_spring_indices}
-        n_torque = len(torque_spring_indices)
+        self._torque_spring_axis_dict = {k: "x" for k in torque_spring_indices}
         self._torque_spring_indices = torque_spring_indices
 
-        # Tet chamber assignment
         tet_chamber_id_np = np.zeros(len(tetrahedra), dtype=np.int32)
         tet_chamber_mask_np = np.zeros(len(tetrahedra), dtype=np.int32)
         for t in range(len(tetrahedra)):
@@ -214,7 +200,6 @@ class Example:
 
         self.model = builder.finalize()
 
-        # Per-chamber stiffness (stiffer backbone)
         if self.chamber_stiffness_scale is not None:
             scales = list(self.chamber_stiffness_scale)
         elif self.chamber_inflation_disabled:
@@ -239,48 +224,14 @@ class Example:
         self.model.soft_contact_ke = 2.0e5
         self.model.soft_contact_kd = 1.0e3
         self.model.soft_contact_kf = 5.0e5
-        self.model.soft_contact_mu = 2.0
+        self.model.soft_contact_mu = ground_friction
         self.model.particle_ke = 1.0e5
         self.model.particle_kd = 1.0
         self.model.particle_radius = wp.array(
             np.full(self.model.particle_count, 0.008), dtype=wp.float32, device=self.model.device
         )
-        # Higher friction on Y+ / Y- surface (lateral faces)
-        verts = box.vertices
-        surface_vertex_indices = np.unique(box.surface_triangles.flatten())
-        y_vals = verts[surface_vertex_indices, 1]
-        y_min_bound = float(np.min(verts[:, 1]))
-        y_max_bound = float(np.max(verts[:, 1]))
-        tol = 1e-6
-        y_min_surface = surface_vertex_indices[y_vals <= y_min_bound + tol]
-        y_max_surface = surface_vertex_indices[y_vals >= y_max_bound - tol]
-        base_mu = float(self.model.soft_contact_mu)
-        lateral_mu = 5.0
-        particle_friction_np = np.full(self.model.particle_count, base_mu, dtype=np.float32)
-        particle_friction_np[y_min_surface] = lateral_mu
-        particle_friction_np[y_max_surface] = lateral_mu
-        self.model.particle_friction = wp.array(
-            particle_friction_np, dtype=wp.float32, device=self.model.device
-        )
-        default_rgb = (0.7, 0.6, 0.4)
-        lateral_rgb = (0.45, 0.65, 0.92)  # blue = high-friction verts
-        particle_colors_np = np.full((self.model.particle_count, 3), default_rgb, dtype=np.float32)
-        particle_colors_np[y_min_surface] = lateral_rgb
-        particle_colors_np[y_max_surface] = lateral_rgb
-        self.model.particle_colors = wp.array(
-            particle_colors_np, dtype=wp.vec3, device=self.model.device
-        )
-        base_radius = 0.008
-        particle_display_radius_np = np.full(
-            self.model.particle_count, base_radius, dtype=np.float32
-        )
-        particle_display_radius_np[y_min_surface] = 2.0 * base_radius
-        particle_display_radius_np[y_max_surface] = 2.0 * base_radius
-        self.model.particle_display_radius = wp.array(
-            particle_display_radius_np, dtype=wp.float32, device=self.model.device
-        )
 
-        self.solver = SolverBend(
+        self.solver = SolverInflatable(
             model=self.model,
             dt=self.sim_dt,
             mass=mass,
@@ -293,7 +244,10 @@ class Example:
             contact_relaxation=0.7,
             contact_max_velocity=15.0,
             contact_max_correction=0.03,
-            contact_iterations=3,
+            contact_iterations=5,
+            handle_self_contact=True,  # prevent body from passing through itself when bending/crawling
+            self_contact_radius=0.025,  # slightly larger to catch thin body folds
+            self_contact_stiffness=2.0e5,  # stiffer to resist sharp bends
         )
         tet_chamber_mask = wp.array(tet_chamber_mask_np, dtype=wp.int32, device=self.model.device)
         spring_chamber_mask = wp.array(np.array(spring_chamber_list, dtype=np.int32), dtype=wp.int32, device=self.model.device)
@@ -309,13 +263,16 @@ class Example:
             self.viewer.set_model(self.model)
             self.viewer.show_particles = True
             self.viewer.show_springs = True
-            self.viewer.spring_highlight_indices = torque_spring_indices
-            self.viewer.spring_highlight_color = (1.0, 0.25, 0.25)  # red: torque springs
 
         self.chamber_pressures = [1.0] * self.total_chambers
         self.pressure_step = 0.15
         self.active_chamber = self.inflatable_chambers[0] if self.inflatable_chambers else 0
         self._key_cooldown = 0
+        self.gait_enabled = gait_enabled
+        self.gait_freq = float(gait_freq)
+        self.gait_amplitude = float(gait_amplitude)
+        self.gait_phase = float(gait_phase)
+        self.gait_baseline = float(gait_baseline)
 
         if self.viewer:
             if hasattr(self.viewer, "renderer") and hasattr(self.viewer.renderer, "register_key_press"):
@@ -356,8 +313,10 @@ class Example:
         print(f"   [Active chamber: {self.active_chamber} / {self.total_chambers}]", flush=True)
 
     def _print_help(self):
-        ax = self.stiff_axes[0].upper()
-        print(f"\n🪱 Ready: {ax} stays straight. [I]/[K] inflate/deflate, [C] cycle chamber.", flush=True)
+        msg = "\n🐛 Inchworm ready. Ch1=left leg, Ch3=right leg; phase-shifted harmonic gait."
+        if not self.gait_enabled:
+            msg += " [I]/[K] inflate/deflate, [C] cycle chamber."
+        print(msg, flush=True)
 
     def _on_key_press(self, symbol, modifiers):
         if symbol in (105, 61):
@@ -383,8 +342,26 @@ class Example:
             self._set_pressure_delta(-self.pressure_step)
             self._key_cooldown = 10
 
+    def _update_gait_pressure(self):
+        """Phase-shifted harmonic gait: left (ch1) and right (ch3) leg pressures."""
+        if not self.gait_enabled or not self.inflatable_chambers:
+            return
+        omega = 2.0 * np.pi * self.gait_freq
+        t = self.sim_time
+        b, A = self.gait_baseline, self.gait_amplitude
+        phi = self.gait_phase
+        p_left = np.clip(b + A * np.sin(omega * t), 0.5, self.max_pressure)
+        p_right = np.clip(b + A * np.sin(omega * t + phi), 0.5, self.max_pressure)
+        if len(self.chamber_pressures) > 1:
+            self.chamber_pressures[1] = p_left
+        if len(self.chamber_pressures) > 3:
+            self.chamber_pressures[3] = p_right
+        self._apply_pressure()
+
     def step(self):
         self._check_keys()
+        if self.gait_enabled:
+            self._update_gait_pressure()
         for _ in range(self.substeps):
             self.state_0.clear_forces()
             self.contacts = self.model.collide(state=self.state_0)
@@ -401,41 +378,6 @@ class Example:
     def render(self):
         if self.viewer is None:
             return
-        # Torque springs only (no grey); optional filter: only X, only Y, or only Z
-        self.viewer.show_springs = True
-        all_torque = sorted(getattr(self, "_torque_spring_indices", []))
-        axis_dict = getattr(self, "_torque_spring_axis_dict", {})
-        if self.torque_display_axis == "all":
-            torque_indices = all_torque
-        else:
-            torque_indices = [k for k in all_torque if axis_dict.get(k) == self.torque_display_axis]
-        self.viewer.spring_highlight_indices = torque_indices
-        self.viewer.spring_highlight_color = (1.0, 0.25, 0.25)
-        # Per-spring scalar [0,1]: 0 = aligned (soft, yellow), 1 = bent (strong torque, red)
-        # Use same sorted order as viewer so scalars[i] matches segment i
-        rest_dirs = np.array(self.solver.spring_rest_direction.numpy(), dtype=np.float64)
-        particle_q = np.array(self.state_0.particle_q.numpy(), dtype=np.float64)
-        spring_indices = np.array(self.model.spring_indices.numpy(), dtype=np.int32)
-        scalars = []
-        for k in torque_indices:
-            i, j = int(spring_indices[2 * k]), int(spring_indices[2 * k + 1])
-            d = particle_q[j] - particle_q[i]
-            L = float(np.linalg.norm(d))
-            if L < 1e-9:
-                scalars.append(0.0)
-                continue
-            current_dir = d / L
-            rest_dir = rest_dirs[k]
-            rn = np.linalg.norm(rest_dir)
-            if rn < 1e-9:
-                scalars.append(0.0)
-                continue
-            rest_dir = rest_dir / rn
-            dot = np.clip(float(np.dot(rest_dir, current_dir)), -1.0, 1.0)
-            # Scalar from angle: 0 when aligned (soft), 1 when 90° bent (strong). Linear in angle.
-            angle_rad = np.arccos(dot)
-            scalars.append(min(1.0, float(angle_rad) / (np.pi / 2)))
-        self.viewer.spring_highlight_scalars = scalars
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
         if self.contacts:
@@ -451,7 +393,7 @@ class Example:
                 p_str = ",".join(f"{p:.1f}" for p in self.chamber_pressures)
                 print(f"   Frame {frame}: pressures=[{p_str}] vol_ratio={vol_ratio:.2f}x", flush=True)
         info = self.solver.get_inflation_info(self.state_0)
-        print(f"\n🪱 Done. Final volume ratio: {info['current_ratio']:.2f}x", flush=True)
+        print(f"\n🐛 Done. Final volume ratio: {info['current_ratio']:.2f}x", flush=True)
 
 
 def _parse_csv(s: str | None, cast):
@@ -460,17 +402,15 @@ def _parse_csv(s: str | None, cast):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Torque worm: one axis (x, y, or z) stays straight; torque on whole object."
+        description="Inchworm: two bending actuators (ch1/ch3), phase-shifted harmonic gait (arXiv:1911.05227)."
     )
-    parser.add_argument("--stiff_axes", type=str, default="x", help="Single axis that stays straight: x, y, or z (torque on whole object)")
-    # Worm geometry (box size and mesh resolution)
-    worm_geom = parser.add_argument_group("Worm geometry (size and subdivisions)")
-    worm_geom.add_argument("--length", type=float, default=1.0, help="Worm length (X size, meters)")
-    worm_geom.add_argument("--width", type=float, default=1.5, help="Worm width (Y size, meters)")
-    worm_geom.add_argument("--height", type=float, default=0.1, help="Worm height (Z size, meters)")
-    worm_geom.add_argument("--subdivisions_x", type=int, default=10, help="Mesh subdivisions along length (X)")
-    worm_geom.add_argument("--subdivisions_y", type=int, default=15, help="Mesh subdivisions along width (Y)")
-    worm_geom.add_argument("--subdivisions_z", type=int, default=4, help="Mesh subdivisions along height (Z)")
+    worm_geom = parser.add_argument_group("Geometry")
+    worm_geom.add_argument("--length", type=float, default=1.0, help="Length (X, meters)")
+    worm_geom.add_argument("--width", type=float, default=1.5, help="Width (Y, meters)")
+    worm_geom.add_argument("--height", type=float, default=0.1, help="Height (Z, meters)")
+    worm_geom.add_argument("--subdivisions_x", type=int, default=10)
+    worm_geom.add_argument("--subdivisions_y", type=int, default=15)
+    worm_geom.add_argument("--subdivisions_z", type=int, default=4)
     parser.add_argument("--num_chambers_x", type=int, default=1)
     parser.add_argument("--num_chambers_y", type=int, default=2)
     parser.add_argument("--num_chambers_z", type=int, default=2)
@@ -484,16 +424,15 @@ def main():
     parser.add_argument("--gravity", type=float, default=9.81)
     parser.add_argument("--max_pressure", type=float, default=5.0)
     parser.add_argument("--anisotropy_x", type=float, default=1.2)
-    parser.add_argument("--anisotropy_y", type=float, default=1.4)
-    parser.add_argument("--anisotropy_z", type=float, default=1.2)
+    parser.add_argument("--anisotropy_y", type=float, default=1.5)
+    parser.add_argument("--anisotropy_z", type=float, default=1.4)
     parser.add_argument("--torque_stiffness", type=float, default=100.0)
     parser.add_argument("--torque_damping", type=float, default=2.0)
     parser.add_argument(
-        "--torque_display_axis",
-        type=str,
-        default="all",
-        choices=("all", "x", "y", "z"),
-        help="Which torque springs to draw: all, or only X-, Y-, or Z-aligned",
+        "--ground_friction",
+        type=float,
+        default=0.8,
+        help="Ground friction (paper: stick-slip; 0.8 recommended).",
     )
     parser.add_argument("--substeps", type=int, default=5)
     parser.add_argument("--num_frames", type=int, default=14400)
@@ -501,6 +440,12 @@ def main():
     parser.add_argument("--chamber_inflation_disabled", type=str, default=None)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--headless", action="store_true")
+    gait_group = parser.add_argument_group("Gait (phase-shifted harmonic)")
+    gait_group.add_argument("--no_gait", action="store_true", help="Disable automatic gait; use [I]/[K] and [C] to drive")
+    gait_group.add_argument("--gait_freq", type=float, default=0.2, help="Gait frequency (Hz)")
+    gait_group.add_argument("--gait_amplitude", type=float, default=0.8, help="Pressure amplitude")
+    gait_group.add_argument("--gait_phase", type=float, default=1.57, help="Phase shift for right chamber (rad)")
+    gait_group.add_argument("--gait_baseline", type=float, default=1.2, help="Baseline pressure")
     args = parser.parse_args()
 
     chamber_stiffness_scale = _parse_csv(args.chamber_stiffness_scale, float)
@@ -508,10 +453,6 @@ def main():
         chamber_inflation_disabled = []
     else:
         chamber_inflation_disabled = _parse_csv(args.chamber_inflation_disabled, int)
-    stiff_axes_in = [a.strip().lower() for a in args.stiff_axes.replace(",", " ").split() if a.strip()]
-    if len(stiff_axes_in) != 1 or stiff_axes_in[0] not in ("x", "y", "z"):
-        parser.error("--stiff_axes must be exactly one of x, y, z (e.g. --stiff_axes x)")
-    stiff_axes = (stiff_axes_in[0],)
 
     wp.init()
     with wp.ScopedDevice(args.device):
@@ -553,10 +494,14 @@ def main():
             anisotropy_z=args.anisotropy_z,
             torque_stiffness=args.torque_stiffness,
             torque_damping=args.torque_damping,
-            stiff_axes=stiff_axes,
-            torque_display_axis=args.torque_display_axis,
             chamber_stiffness_scale=chamber_stiffness_scale,
             chamber_inflation_disabled=chamber_inflation_disabled,
+            ground_friction=args.ground_friction,
+            gait_enabled=not args.no_gait,
+            gait_freq=args.gait_freq,
+            gait_amplitude=args.gait_amplitude,
+            gait_phase=args.gait_phase,
+            gait_baseline=args.gait_baseline,
         )
         example.run(num_frames=args.num_frames)
 

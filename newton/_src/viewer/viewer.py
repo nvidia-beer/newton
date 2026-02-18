@@ -1030,15 +1030,8 @@ class ViewerBase:
             else:
                 self.log_lines("/model/springs_highlight", None, None, None)
         else:
-            # No highlight set: draw all springs in grey
-            colors = np.full((n, 3), (0.5, 0.6, 0.7), dtype=np.float32)
-            self.log_lines(
-                "/model/springs",
-                wp.array(starts, dtype=wp.vec3, device=self.device),
-                wp.array(ends, dtype=wp.vec3, device=self.device),
-                wp.array(colors, dtype=wp.vec3, device=self.device),
-                width=0.008,
-            )
+            # No highlight set: do not draw grey spring edges (only highlight is drawn when set)
+            self.log_lines("/model/springs", None, None, None)
             self.log_lines("/model/springs_highlight", None, None, None)
 
     def _log_triangles(self, state):

@@ -14,22 +14,13 @@
 # limitations under the License.
 
 """
-Chambers Example - 3D N-chamber inflatable with anisotropic inflation.
+Disabled chambers example - 3D inflatable with chamber grid (same as chambers).
 
-Same chamber layout as worm: 3D grid by num_chambers_x, num_chambers_y, num_chambers_z.
-Chamber index = ix*(ny*nz) + iy*nz + iz (row-major in X, Y, Z).
-- 1D: e.g. num_chambers_y=2 → 2 chambers along Y (bend slab with differential pressure).
-- 2D: e.g. num_chambers_y=2, num_chambers_z=2 → 2×2 grid.
-- 3D: e.g. num_chambers_x=2, num_chambers_y=2, num_chambers_z=2 → 8 chambers.
+Chambers: num_chambers_x × num_chambers_y × num_chambers_z grid. Index ch = ix*(ny*nz)+iy*nz+iz.
+[I]/[=] inflate, [K]/[-] deflate, [C] cycle chamber.
 
-Keys:
-- [I] / [=]  - Inflate active chamber
-- [K] / [-]  - Deflate active chamber
-- [C]        - Cycle active chamber
-
-Usage:
-    python -m newton.examples chambers --num_chambers_y 2 --height 0.06
-    python -m newton.examples chambers --num_chambers_y 2 --num_chambers_z 2   # 2x2 grid
+Options: --chamber_stiffness_scale 1.5,1.0,... (per-chamber FEM scale);
+  --chamber_inflation_disabled 0,2 (chambers that never inflate, mask -1).
 """
 
 import argparse
@@ -40,26 +31,28 @@ import newton
 from newton.solvers import SolverInflatable, TetraBox
 
 
+def _chamber_index(ix: int, iy: int, iz: int, nx: int, ny: int, nz: int, disabled: set) -> int:
+    """Row-major chamber index; -1 if chamber is disabled."""
+    ch = ix * (ny * nz) + iy * nz + iz
+    return -1 if ch in disabled else ch
+
+
 class Example:
-    """
-    3D N-chamber inflatable box with anisotropic inflation.
-    Chambers as 3D grid: num_chambers_x × num_chambers_y × num_chambers_z.
-    """
+    """3D N-chamber inflatable box (chamber grid + optional per-chamber stiffness / disabled)."""
 
     def __init__(
         self,
         viewer,
         length: float = 0.35,
         width: float = 0.35,
-        height: float = 0.5,
+        height: float = 0.1,
         subdivisions_x: int = 4,
         subdivisions_y: int = 4,
-        subdivisions_z: int = 5,
+        subdivisions_z: int = 4,
         num_chambers_x: int = 1,
         num_chambers_y: int = 2,
-        num_chambers_z: int = 1,
+        num_chambers_z: int = 2,
         initial_height: float = 0.5,
-        pos=None,
         mass: float = 1.0,
         k_mu: float = 1.0e5,
         k_lambda: float = 1.0e5,
@@ -72,6 +65,8 @@ class Example:
         anisotropy_x: float = 1.0,
         anisotropy_y: float = 1.0,
         anisotropy_z: float = 1.0,
+        chamber_stiffness_scale: list[float] | None = None,
+        chamber_inflation_disabled: list[int] | None = None,  # default [0, 2] = bottom two in 2x2 grid
     ):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -82,12 +77,21 @@ class Example:
         self.width = float(width)
         self.height = float(height)
         self.subdivisions = (subdivisions_x, subdivisions_y, subdivisions_z)
+        # 3D grid: nx, ny, nz
         self.num_chambers_x = max(1, int(num_chambers_x))
         self.num_chambers_y = max(1, int(num_chambers_y))
         self.num_chambers_z = max(1, int(num_chambers_z))
         self.total_chambers = self.num_chambers_x * self.num_chambers_y * self.num_chambers_z
+        # Per-chamber FEM stiffness scale (optional): tet in chamber c uses k_mu*scale[c], etc.
+        self.chamber_stiffness_scale = chamber_stiffness_scale
+        # Chamber indices that never inflate (mask -1). Default [0, 2] = bottom two in 2x2 grid
+        _disabled = chamber_inflation_disabled if chamber_inflation_disabled is not None else [0, 2]
+        self.chamber_inflation_disabled = set(int(x) for x in _disabled)
+        self.inflatable_chambers = sorted(
+            c for c in range(self.num_chambers_x * self.num_chambers_y * self.num_chambers_z)
+            if c not in self.chamber_inflation_disabled
+        )
         self.initial_height = initial_height
-        self.pos = pos if pos is not None else (0.0, 0.0, initial_height)
         self.mass = mass
         self.max_pressure = max_pressure
         self.anisotropy_x = float(anisotropy_x)
@@ -96,7 +100,7 @@ class Example:
         self.viewer = viewer
 
         # 3D tetrahedral box: length (X), width (Y), height (Z); Z = chamber axis
-        print(f"\n📦 Generating 3D tetrahedral box (chambers)...", flush=True)
+        print(f"\n🪱 Generating 3D tetrahedral box (worm = chambers)...", flush=True)
         box = TetraBox(
             size=(self.length, self.width, self.height),
             subdivisions=self.subdivisions,
@@ -120,9 +124,8 @@ class Example:
                 mu=0.5,
             )
         )
-        px, py, pz = self.pos[0], self.pos[1], self.pos[2]
         builder.add_soft_mesh(
-            pos=wp.vec3(float(px), float(py), float(pz)),
+            pos=wp.vec3(0.0, 0.0, initial_height),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0, 0.0, 0.0),
             vertices=vertices,
@@ -147,6 +150,7 @@ class Example:
                 if spring_key not in added_springs:
                     added_springs.add(spring_key)
                     p0, p1 = vertices[i_local], vertices[j_local]
+                    # Chamber from spring edge midpoint (3D grid: X, Y, Z)
                     mid_x = (float(p0[0]) + float(p1[0])) * 0.5
                     mid_y = (float(p0[1]) + float(p1[1])) * 0.5
                     mid_z = (float(p0[2]) + float(p1[2])) * 0.5
@@ -156,10 +160,13 @@ class Example:
                     ix = min(int(norm_x * self.num_chambers_x), self.num_chambers_x - 1)
                     iy = min(int(norm_y * self.num_chambers_y), self.num_chambers_y - 1)
                     iz = min(int(norm_z * self.num_chambers_z), self.num_chambers_z - 1)
-                    ch = ix * (self.num_chambers_y * self.num_chambers_z) + iy * self.num_chambers_z + iz
-                    spring_chamber_list.append(ch)
+                    spring_chamber_list.append(
+                        _chamber_index(ix, iy, iz, self.num_chambers_x, self.num_chambers_y, self.num_chambers_z, self.chamber_inflation_disabled)
+                    )
 
         # Assign each tet to a chamber by centroid (3D grid: X, Y, Z)
+        # tet_chamber_id_np: raw chamber index (0..N-1) for stiffness lookup; tet_chamber_mask_np: -1 if disabled else chamber index for inflation
+        tet_chamber_id_np = np.zeros(len(tetrahedra), dtype=np.int32)
         tet_chamber_mask_np = np.zeros(len(tetrahedra), dtype=np.int32)
         for t in range(len(tetrahedra)):
             vidx = [indices[t * 4 + k] for k in range(4)]
@@ -171,16 +178,59 @@ class Example:
             iy = min(int(norm_y * self.num_chambers_y), self.num_chambers_y - 1)
             iz = min(int(norm_z * self.num_chambers_z), self.num_chambers_z - 1)
             ch = ix * (self.num_chambers_y * self.num_chambers_z) + iy * self.num_chambers_z + iz
-            tet_chamber_mask_np[t] = ch
+            tet_chamber_id_np[t] = ch
+            tet_chamber_mask_np[t] = -1 if ch in self.chamber_inflation_disabled else ch
         for c in range(self.total_chambers):
             n_tets = np.sum(tet_chamber_mask_np == c)
-            print(f"   Chamber {c}: {n_tets} tetrahedra", flush=True)
+            dis = " (inflation disabled)" if c in self.chamber_inflation_disabled else ""
+            print(f"   Chamber {c}: {n_tets} tetrahedra{dis}", flush=True)
+        n_no_inflate = int(np.sum(tet_chamber_mask_np == -1))
+        if n_no_inflate > 0:
+            print(f"   Non-inflatable (mask -1): {n_no_inflate} tetrahedra", flush=True)
         print(
             f"   Chamber grid: {self.num_chambers_x} (X) x {self.num_chambers_y} (Y) x {self.num_chambers_z} (Z) = {self.total_chambers} chambers",
             flush=True,
         )
+        if self.chamber_inflation_disabled:
+            print(f"   Inflation disabled for chamber(s): {sorted(self.chamber_inflation_disabled)} (mask -1)", flush=True)
 
         self.model = builder.finalize()
+
+        # Per-chamber FEM material scaling at init only (not updated at runtime): stiffer backbone (disabled chambers) for worm movement
+        if self.chamber_stiffness_scale is not None:
+            scales = list(self.chamber_stiffness_scale)
+        elif self.chamber_inflation_disabled:
+            # Default: disabled chambers (e.g. 0,2) much stiffer to create worm backbone
+            stiff_scale = 4.0
+            scales = [stiff_scale if c in self.chamber_inflation_disabled else 1.0 for c in range(self.total_chambers)]
+            print(f"   Default stiffness for non-inflatable chambers: {stiff_scale}x (worm backbone)", flush=True)
+        else:
+            scales = None
+        if scales is not None:
+            while len(scales) < self.total_chambers:
+                scales.append(1.0)
+            scales = np.array(scales[: self.total_chambers], dtype=np.float32)
+            materials_np = np.zeros((self.model.tet_count, 3), dtype=np.float32)
+            for t in range(self.model.tet_count):
+                c = tet_chamber_id_np[t]
+                s = scales[c] if c < len(scales) else 1.0
+                materials_np[t, 0] = k_mu * s
+                materials_np[t, 1] = k_lambda * s
+                materials_np[t, 2] = k_damp * s
+            self.model.tet_materials.assign(
+                wp.array(materials_np, dtype=wp.float32, device=self.model.device)
+            )
+            # Verify: read back from model and print mean k_mu per chamber (confirms solver will see stiff backbone)
+            readback = self.model.tet_materials.numpy()
+            for ch in range(self.total_chambers):
+                mask = tet_chamber_id_np == ch
+                if np.any(mask):
+                    mean_k_mu = float(np.mean(readback[mask, 0]))
+                    expected = k_mu * (scales[ch] if ch < len(scales) else 1.0)
+                    label = " (backbone)" if ch in self.chamber_inflation_disabled else ""
+                    print(f"   Chamber {ch}: mean k_mu={mean_k_mu:.0f} (expected {expected:.0f}){label}", flush=True)
+            print(f"   Per-chamber stiffness scale applied (FEM k_mu/k_lambda/k_damp)", flush=True)
+
         self.model.gravity = wp.array(
             [wp.vec3(0.0, 0.0, -gravity)], dtype=wp.vec3, device=self.model.device
         )
@@ -202,7 +252,13 @@ class Example:
             mass=mass,
             max_volume_ratio=max_pressure,
             solver_type="bicgstab",
+            handle_self_contact=True,
+            self_contact_radius=0.012,
+            self_contact_stiffness=8.0e3,
+            self_contact_force_cap=1.0,
+            self_contact_edge_edge=False,
         )
+        # Per-chamber masks: chamber_axis y = side-by-side (bend), z = stacked
         tet_chamber_mask = wp.array(
             tet_chamber_mask_np,
             dtype=wp.int32,
@@ -234,10 +290,11 @@ class Example:
             self.viewer.set_model(self.model)
             self.viewer.show_particles = True
 
+        # Per-chamber pressures (one per chamber; length = total_chambers for grid)
         self.chamber_pressures = [1.0] * self.total_chambers
         self.current_pressure = 1.0  # for single-pressure fallback
         self.pressure_step = 0.15
-        self.active_chamber = 0
+        self.active_chamber = self.inflatable_chambers[0] if self.inflatable_chambers else 0
         self._key_cooldown = 0
 
         if self.viewer:
@@ -255,89 +312,69 @@ class Example:
         self.solver.anisotropy_x = self.anisotropy_x
         self.solver.anisotropy_y = self.anisotropy_y
         self.solver.anisotropy_z = self.anisotropy_z
-        self.solver.set_chamber_pressures(self.chamber_pressures)
+        pressures = list(self.chamber_pressures)
+        for c in self.chamber_inflation_disabled:
+            if 0 <= c < len(pressures):
+                pressures[c] = 1.0
+        self.solver.set_chamber_pressures(pressures)
 
-    def _print_help(self):
-        print(f"\n📦 3D Chambers (anisotropic inflation) ready!", flush=True)
+    def _set_pressure_delta(self, delta: float):
+        if self.active_chamber in self.chamber_inflation_disabled:
+            return
+        p = self.chamber_pressures[self.active_chamber]
+        self.chamber_pressures[self.active_chamber] = np.clip(p + delta, 0.5, self.max_pressure)
+        self._apply_pressure()
+        print(f"   [Chamber {self.active_chamber} pressure: {self.chamber_pressures[self.active_chamber]:.2f}x]", flush=True)
+
+    def _cycle_chamber(self):
+        if not self.inflatable_chambers:
+            return
+        try:
+            idx = self.inflatable_chambers.index(self.active_chamber)
+        except ValueError:
+            idx = -1
+        next_idx = (idx + 1) % len(self.inflatable_chambers)
+        self.active_chamber = self.inflatable_chambers[next_idx]
+        n_inflatable = len(self.inflatable_chambers)
         print(
-            f"   3D box: length={self.length:.2f} width={self.width:.2f} height={self.height:.2f}m, "
-            f"chambers={self.num_chambers_x}x{self.num_chambers_y}x{self.num_chambers_z}={self.total_chambers}, anisotropy=({self.anisotropy_x},{self.anisotropy_y},{self.anisotropy_z})",
+            f"   [Active chamber: {self.active_chamber} / {self.total_chambers} (inflatable {next_idx + 1}/{n_inflatable})]",
             flush=True,
         )
-        print(f"   [I] / [=]  - Inflate", flush=True)
-        print(f"   [K] / [-]  - Deflate", flush=True)
-        print(f"   [C]        - Cycle active chamber (0..{self.total_chambers - 1})", flush=True)
+
+    def _print_help(self):
+        n_inf = len(self.inflatable_chambers)
+        print(
+            f"\n🪱 Worm ready! Box {self.length:.2f}x{self.width:.2f}x{self.height:.2f}m, "
+            f"chambers {self.num_chambers_x}x{self.num_chambers_y}x{self.num_chambers_z}={self.total_chambers} "
+            f"({n_inf} inflatable). [I]/[K] inflate/deflate, [C] cycle (inflatable only).",
+            flush=True,
+        )
 
     def _on_key_press(self, symbol, modifiers):
-        KEY_I = 105
-        KEY_K = 107
-        KEY_C = 99
-        KEY_EQUAL = 61
-        KEY_MINUS = 45
-
-        if symbol in (KEY_I, KEY_EQUAL):
-            p = self.chamber_pressures[self.active_chamber]
-            self.chamber_pressures[self.active_chamber] = min(
-                self.max_pressure, p + self.pressure_step
-            )
-            self._apply_pressure()
-            print(
-                f"   [Chamber {self.active_chamber} pressure: "
-                f"{self.chamber_pressures[self.active_chamber]:.2f}x]",
-                flush=True,
-            )
-        elif symbol in (KEY_K, KEY_MINUS):
-            p = self.chamber_pressures[self.active_chamber]
-            self.chamber_pressures[self.active_chamber] = max(0.5, p - self.pressure_step)
-            self._apply_pressure()
-            print(
-                f"   [Chamber {self.active_chamber} pressure: "
-                f"{self.chamber_pressures[self.active_chamber]:.2f}x]",
-                flush=True,
-            )
-        elif symbol == KEY_C:
-            self.active_chamber = (self.active_chamber + 1) % self.total_chambers
-            print(f"   [Active chamber: {self.active_chamber} / {self.total_chambers}]", flush=True)
+        if symbol in (105, 61):   # I, =
+            self._set_pressure_delta(self.pressure_step)
+        elif symbol in (107, 45):  # K, -
+            self._set_pressure_delta(-self.pressure_step)
+        elif symbol == 99:  # C
+            self._cycle_chamber()
 
     def _check_keys(self):
         if not self.viewer or not hasattr(self.viewer, "renderer"):
             return
-        renderer = self.viewer.renderer
-        if not hasattr(renderer, "is_key_down"):
+        r = self.viewer.renderer
+        if not hasattr(r, "is_key_down"):
             return
-        if not hasattr(self, "_key_cooldown"):
-            self._key_cooldown = 0
-        if self._key_cooldown > 0:
-            self._key_cooldown -= 1
+        cooldown = getattr(self, "_key_cooldown", 0)
+        if cooldown > 0:
+            self._key_cooldown = cooldown - 1
             return
-        KEY_I, KEY_K, KEY_C = 105, 107, 99
-        KEY_EQUAL, KEY_MINUS = 61, 45
-        if renderer.is_key_down(KEY_I) or renderer.is_key_down(KEY_EQUAL):
-            p = self.chamber_pressures[self.active_chamber]
-            self.chamber_pressures[self.active_chamber] = min(
-                self.max_pressure, p + self.pressure_step
-            )
-            self._apply_pressure()
-            print(
-                f"   [Chamber {self.active_chamber} pressure: "
-                f"{self.chamber_pressures[self.active_chamber]:.2f}x]",
-                flush=True,
-            )
+        if r.is_key_down(105) or r.is_key_down(61):
+            self._set_pressure_delta(self.pressure_step)
             self._key_cooldown = 10
-        elif renderer.is_key_down(KEY_K) or renderer.is_key_down(KEY_MINUS):
-            p = self.chamber_pressures[self.active_chamber]
-            self.chamber_pressures[self.active_chamber] = max(0.5, p - self.pressure_step)
-            self._apply_pressure()
-            print(
-                f"   [Chamber {self.active_chamber} pressure: "
-                f"{self.chamber_pressures[self.active_chamber]:.2f}x]",
-                flush=True,
-            )
+        elif r.is_key_down(107) or r.is_key_down(45):
+            self._set_pressure_delta(-self.pressure_step)
             self._key_cooldown = 10
-        elif renderer.is_key_down(KEY_C):
-            self.active_chamber = (self.active_chamber + 1) % self.total_chambers
-            print(f"   [Active chamber: {self.active_chamber}]", flush=True)
-            self._key_cooldown = 10
+        # [C] cycle chamber handled only in _on_key_press to avoid double-cycle (press + key-held)
 
     def step(self):
         self._check_keys()
@@ -364,7 +401,7 @@ class Example:
         self.viewer.end_frame()
 
     def run(self, num_frames: int = 7200):
-        print(f"\n📦 3D Chambers demo running...", flush=True)
+        print(f"\n🪱 Worm (chambers) demo running...", flush=True)
         for frame in range(num_frames):
             self.step()
             self.render()
@@ -377,24 +414,25 @@ class Example:
                     flush=True,
                 )
         info = self.solver.get_inflation_info(self.state_0)
-        print(f"\n📦 Done. Final ratio: {info['current_ratio']:.2f}x", flush=True)
+        print(f"\n🪱 Done. Final ratio: {info['current_ratio']:.2f}x", flush=True)
+
+
+def _parse_csv(s: str | None, cast):
+    return [cast(x.strip()) for x in s.split(",")] if s else None
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Chambers: N-chamber anisotropic inflatable box"
-    )
-    parser.add_argument("--length", type=float, default=0.35, help="Box length (X axis, m)")
-    parser.add_argument("--width", type=float, default=0.35, help="Box width (Y axis, m)")
-    parser.add_argument("--height", type=float, default=0.5, help="Box height (Z axis, m)")
-    parser.add_argument("--subdivisions_x", type=int, default=10, help="Subdivisions along X")
-    parser.add_argument("--subdivisions_y", type=int, default=30, help="Subdivisions along Y")
-    parser.add_argument("--subdivisions_z", type=int, default=2, help="Subdivisions along Z")
-    parser.add_argument("--num_chambers_x", type=int, default=1, help="Chamber splits along X")
-    parser.add_argument("--num_chambers_y", type=int, default=2, help="Chamber splits along Y")
-    parser.add_argument("--num_chambers_z", type=int, default=1, help="Chamber splits along Z")
+    parser = argparse.ArgumentParser(description="Disabled chambers: 3D chamber-grid inflatable")
+    parser.add_argument("--length", type=float, default=0.35)
+    parser.add_argument("--width", type=float, default=0.35)
+    parser.add_argument("--height", type=float, default=0.1)
+    parser.add_argument("--subdivisions_x", type=int, default=10)
+    parser.add_argument("--subdivisions_y", type=int, default=30)
+    parser.add_argument("--subdivisions_z", type=int, default=4)
+    parser.add_argument("--num_chambers_x", type=int, default=1)
+    parser.add_argument("--num_chambers_y", type=int, default=2)
+    parser.add_argument("--num_chambers_z", type=int, default=2)
     parser.add_argument("--initial_height", type=float, default=0.5)
-    parser.add_argument("--pos", type=float, nargs=3, default=None, metavar=("X", "Y", "Z"), help="Position (x y z). Default: (0 0 initial_height).")
     parser.add_argument("--mass", type=float, default=1.0)
     parser.add_argument("--k_mu", type=float, default=1.0e5)
     parser.add_argument("--k_lambda", type=float, default=1.0e5)
@@ -403,23 +441,22 @@ def main():
     parser.add_argument("--spring_kd", type=float, default=1.0)
     parser.add_argument("--gravity", type=float, default=9.81)
     parser.add_argument("--max_pressure", type=float, default=5.0)
-    parser.add_argument(
-        "--anisotropy_x", type=float, default=1.0,
-        help="Anisotropy along X (1.0 = isotropic)",
-    )
-    parser.add_argument(
-        "--anisotropy_y", type=float, default=1.0,
-        help="Anisotropy along Y (1.0 = isotropic)",
-    )
-    parser.add_argument(
-        "--anisotropy_z", type=float, default=1.0,
-        help="Anisotropy along Z (e.g. 1.4 = elongate more vertically)",
-    )
+    parser.add_argument("--anisotropy_x", type=float, default=1.0)
+    parser.add_argument("--anisotropy_y", type=float, default=1.0)
+    parser.add_argument("--anisotropy_z", type=float, default=1.0)
     parser.add_argument("--substeps", type=int, default=5)
-    parser.add_argument("--num_frames", type=int, default=7200, help="Simulation frames (default 7200 = 2 min at 60 fps)")
+    parser.add_argument("--num_frames", type=int, default=7200)
+    parser.add_argument("--chamber_stiffness_scale", type=str, default=None)
+    parser.add_argument("--chamber_inflation_disabled", type=str, default=None)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--headless", action="store_true")
     args = parser.parse_args()
+
+    chamber_stiffness_scale = _parse_csv(args.chamber_stiffness_scale, float)
+    if args.chamber_inflation_disabled is not None and args.chamber_inflation_disabled.strip().lower() in ("none", "all", ""):
+        chamber_inflation_disabled = []
+    else:
+        chamber_inflation_disabled = _parse_csv(args.chamber_inflation_disabled, int)
 
     wp.init()
     with wp.ScopedDevice(args.device):
@@ -447,7 +484,6 @@ def main():
             num_chambers_y=args.num_chambers_y,
             num_chambers_z=args.num_chambers_z,
             initial_height=args.initial_height,
-            pos=args.pos,
             mass=args.mass,
             k_mu=args.k_mu,
             k_lambda=args.k_lambda,
@@ -460,6 +496,8 @@ def main():
             anisotropy_x=args.anisotropy_x,
             anisotropy_y=args.anisotropy_y,
             anisotropy_z=args.anisotropy_z,
+            chamber_stiffness_scale=chamber_stiffness_scale,
+            chamber_inflation_disabled=chamber_inflation_disabled,
         )
         example.run(num_frames=args.num_frames)
 

@@ -294,26 +294,6 @@ class Example:
                 k_lambda=k_lambda,
                 k_damp=k_damp,
             )
-            added_springs = set()
-            for t in range(len(tetrahedra)):
-                tet_idx = [tetra_indices[t * 4 + k] for k in range(4)]
-                edges = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
-                for ei, ej in edges:
-                    i_local, j_local = tet_idx[ei], tet_idx[ej]
-                    if i_local > j_local:
-                        i_local, j_local = j_local, i_local
-                    spring_key = (i_local, j_local)
-                    if spring_key not in added_springs:
-                        added_springs.add(spring_key)
-                        p0, p1 = tetra_vertices[i_local], tetra_vertices[j_local]
-                        rest_length = float(np.linalg.norm(np.array(p1) - np.array(p0)))
-                        builder.add_spring(
-                            start_particle + i_local,
-                            start_particle + j_local,
-                            spring_ke,
-                            spring_kd,
-                            rest_length,
-                        )
             self.soft_particle_counts.append(builder.particle_count - start_particle)
             self.soft_tet_counts.append(builder.tet_count - start_tet)
             self.soft_spring_counts.append(builder.spring_count - start_spring)

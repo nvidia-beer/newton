@@ -197,72 +197,90 @@ def init_barycentric_constraints_batch(
 
 
 @wp.kernel
+def build_system_matrix_diagonal_mass_kernel(
+    rows: wp.array(dtype=wp.int32),
+    cols: wp.array(dtype=wp.int32),
+    values: wp.array(dtype=wp.mat33f),
+    mass: wp.float32,
+):
+    """Add diagonal mass blocks M for all particles. Run first in assembly."""
+    tid = wp.tid()
+    m = mass
+    rows[tid] = tid
+    cols[tid] = tid
+    values[tid] = wp.mat33f(m, 0.0, 0.0, 0.0, m, 0.0, 0.0, 0.0, m)
+
+
+@wp.kernel
+def build_system_matrix_diagonal_kernel(
+    rows: wp.array(dtype=wp.int32),
+    cols: wp.array(dtype=wp.int32),
+    values: wp.array(dtype=wp.mat33f),
+    spring_indices: wp.array(dtype=int),
+    spring_stiffness: wp.array(dtype=wp.float32),
+    spring_damping: wp.array(dtype=wp.float32),
+    dt: wp.float32,
+    mass: wp.float32,
+    Minv: wp.float32,
+    n_springs: wp.int32,
+):
+    """Diagonal blocks only: A_ii = M + sum over springs at i of (dt*D - dt²*K). No duplicate (row,col).
+    Clamped so the row is diagonally dominant (diag >= sum of |off-diag|), keeping A positive definite."""
+    i = wp.tid()
+    dt2 = dt * dt
+    # Declare accumulators as dynamic so Warp allows mutation inside dynamic loop
+    d_acc = float(mass)
+    for s in range(n_springs):
+        ia = spring_indices[s * 2 + 0]
+        ja = spring_indices[s * 2 + 1]
+        if ia == i or ja == i:
+            k = spring_stiffness[s]
+            d = spring_damping[s]
+            d_acc = d_acc + dt * d * Minv - dt2 * k
+    # Second loop: accumulate row sum of stiffness for diagonal dominance
+    k_acc = float(0.0)
+    for s in range(n_springs):
+        ia = spring_indices[s * 2 + 0]
+        ja = spring_indices[s * 2 + 1]
+        if ia == i or ja == i:
+            k_acc = k_acc + spring_stiffness[s]
+    # Diagonal dominance: A_ii >= sum_j |A_ij| so the matrix stays positive definite (avoids solver NaN)
+    off_diag_sum = k_acc * dt2
+    min_diag = off_diag_sum + 1e-6
+    diag = wp.max(d_acc, min_diag)
+    rows[i] = i
+    cols[i] = i
+    values[i] = wp.mat33f(diag, 0.0, 0.0, 0.0, diag, 0.0, 0.0, 0.0, diag)
+
+
+@wp.kernel
 def build_system_matrix_sparse_kernel(
     rows: wp.array(dtype=wp.int32),
     cols: wp.array(dtype=wp.int32),
     values: wp.array(dtype=wp.mat33f),
     indices: wp.array(dtype=int),
     spring_stiffness: wp.array(dtype=wp.float32),
-    spring_damping: wp.array(dtype=wp.float32),
     dt: wp.float32,
-    mass: wp.float32,
-    Minv: wp.float32
+    block_offset: wp.int32,
 ):
-    """Build system matrix for implicit integration."""
+    """Off-diagonal spring blocks only: (i,j) and (j,i) with dt²*k. Diagonal written by build_system_matrix_diagonal_kernel."""
     tid = wp.tid()
     i = indices[tid * 2 + 0]
     j = indices[tid * 2 + 1]
-    
-    # Get spring stiffness
     k = spring_stiffness[tid]
-    
-    # Pre-compute common terms
-    dt2 = dt * dt
-    dt2_k = dt2 * k
-    dt_damping_Minv = dt * spring_damping[tid] * Minv
-    
-    # Create 3x3 blocks for system matrix A = M - h*D - h²*K
-    block_ii = wp.mat33f(
-        mass + dt_damping_Minv - dt2_k, 0.0, 0.0,
-        0.0, mass + dt_damping_Minv - dt2_k, 0.0,
-        0.0, 0.0, mass + dt_damping_Minv - dt2_k
-    )
-    
-    block_jj = wp.mat33f(
-        mass + dt_damping_Minv - dt2_k, 0.0, 0.0,
-        0.0, mass + dt_damping_Minv - dt2_k, 0.0,
-        0.0, 0.0, mass + dt_damping_Minv - dt2_k
-    )
-    
-    # Off-diagonal blocks: positive stiffness coupling
+    dt2_k = dt * dt * k
     block_ij = wp.mat33f(
         dt2_k, 0.0, 0.0,
         0.0, dt2_k, 0.0,
         0.0, 0.0, dt2_k
     )
-    
-    # Store blocks
-    block_idx = tid * 4
-    
-    # (i,i) block
+    block_idx = block_offset + tid * 2
     rows[block_idx] = i
-    cols[block_idx] = i
-    values[block_idx] = block_ii
-    
-    # (j,j) block
+    cols[block_idx] = j
+    values[block_idx] = block_ij
     rows[block_idx + 1] = j
-    cols[block_idx + 1] = j
-    values[block_idx + 1] = block_jj
-    
-    # (i,j) block
-    rows[block_idx + 2] = i
-    cols[block_idx + 2] = j
-    values[block_idx + 2] = block_ij
-    
-    # (j,i) block
-    rows[block_idx + 3] = j
-    cols[block_idx + 3] = i
-    values[block_idx + 3] = block_ij
+    cols[block_idx + 1] = i
+    values[block_idx + 1] = block_ij
 
 
 @wp.kernel
@@ -394,6 +412,9 @@ def eval_tetrahedra(
 
     # Hydrostatic (volumetric) part
     J = wp.determinant(F)
+    # Clamp J to avoid explosion when tet inverts (J < 0) or collapses (J -> 0)
+    J_MIN = 0.01
+    J = wp.max(J, J_MIN)
 
     s = inv_rest_volume / 6.0
     dJdx1 = wp.cross(x20, x30) * s
@@ -415,6 +436,145 @@ def eval_tetrahedra(
     wp.atomic_sub(f, j, f1)
     wp.atomic_sub(f, k, f2)
     wp.atomic_sub(f, l, f3)
+
+
+@wp.kernel
+def build_system_matrix_tet_kernel(
+    x: wp.array(dtype=wp.vec3),
+    indices: wp.array2d(dtype=int),
+    pose: wp.array(dtype=wp.mat33),
+    materials: wp.array2d(dtype=float),
+    dt: wp.float32,
+    block_offset: wp.int32,
+    rows: wp.array(dtype=wp.int32),
+    cols: wp.array(dtype=wp.int32),
+    values: wp.array(dtype=wp.mat33f),
+):
+    """Add tetrahedral FEM tangent stiffness to system matrix: -dt² * dF/dx (Stable Neo-Hookean)."""
+    tid = wp.tid()
+    i = indices[tid, 0]
+    j = indices[tid, 1]
+    k = indices[tid, 2]
+    l = indices[tid, 3]
+
+    k_mu = materials[tid, 0]
+    k_lambda = materials[tid, 1]
+
+    x0 = x[i]
+    x1 = x[j]
+    x2 = x[k]
+    x3 = x[l]
+
+    x10 = x1 - x0
+    x20 = x2 - x0
+    x30 = x3 - x0
+
+    Ds = wp.matrix_from_cols(x10, x20, x30)
+    Dm = pose[tid]
+
+    det_Dm = wp.determinant(Dm)
+    inv_rest_volume = det_Dm * 6.0
+    # Skip degenerate or inverted rest pose (avoid div by zero / negative volume)
+    if inv_rest_volume <= 0.0:
+        zero = wp.mat33f(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        for a in range(4):
+            row_a = i if a == 0 else (j if a == 1 else (k if a == 2 else l))
+            for b in range(4):
+                col_b = i if b == 0 else (j if b == 1 else (k if b == 2 else l))
+                blk = block_offset + tid * 16 + a * 4 + b
+                rows[blk] = row_a
+                cols[blk] = col_b
+                values[blk] = zero
+        return
+    rest_volume = 1.0 / inv_rest_volume
+
+    alpha = 1.0 + k_mu / k_lambda - k_mu / (4.0 * k_lambda)
+    k_mu = k_mu * rest_volume
+    k_lambda = k_lambda * rest_volume
+
+    F = Ds * Dm
+    col1 = wp.vec3(F[0, 0], F[1, 0], F[2, 0])
+    col2 = wp.vec3(F[0, 1], F[1, 1], F[2, 1])
+    col3 = wp.vec3(F[0, 2], F[1, 2], F[2, 2])
+    Ic = wp.dot(col1, col1) + wp.dot(col2, col2) + wp.dot(col3, col3)
+    Ic1 = Ic + 1.0
+    Ic1 = wp.max(Ic1, 1e-6)
+    s = 1.0 - 1.0 / Ic1
+    coef = k_mu * 2.0 / (Ic1 * Ic1)
+
+    # dF/dx_a: 3x3 per node. dF/dx0 = -Dm, dF/dx1 = [Dm_col0,0,0], dF/dx2 = [0,Dm_col1,0], dF/dx3 = [0,0,Dm_col2]
+    dFdx0 = wp.mat33(
+        -Dm[0, 0], -Dm[0, 1], -Dm[0, 2],
+        -Dm[1, 0], -Dm[1, 1], -Dm[1, 2],
+        -Dm[2, 0], -Dm[2, 1], -Dm[2, 2],
+    )
+    dFdx1 = wp.mat33(Dm[0, 0], 0.0, 0.0, Dm[1, 0], 0.0, 0.0, Dm[2, 0], 0.0, 0.0)
+    dFdx2 = wp.mat33(0.0, Dm[0, 1], 0.0, 0.0, Dm[1, 1], 0.0, 0.0, Dm[2, 1], 0.0)
+    dFdx3 = wp.mat33(0.0, 0.0, Dm[0, 2], 0.0, 0.0, Dm[1, 2], 0.0, 0.0, Dm[2, 2])
+
+    J = wp.determinant(F)
+    J_MIN = 0.01
+    J = wp.max(J, J_MIN)
+    s_vol = inv_rest_volume / 6.0
+    dJdx1 = wp.cross(x20, x30) * s_vol
+    dJdx2 = wp.cross(x30, x10) * s_vol
+    dJdx3 = wp.cross(x10, x20) * s_vol
+    dJdx0 = -(dJdx1 + dJdx2 + dJdx3)
+
+    dFdx = wp.mat33()
+    dJdx = wp.vec3()
+
+    dt2 = dt * dt
+    scale = -dt2 * rest_volume
+
+    for a in range(4):
+        if a == 0:
+            dFdx = dFdx0
+            dJdx = dJdx0
+        elif a == 1:
+            dFdx = dFdx1
+            dJdx = dJdx1
+        elif a == 2:
+            dFdx = dFdx2
+            dJdx = dJdx2
+        else:
+            dFdx = dFdx3
+            dJdx = dJdx3
+        for b in range(4):
+            if b == 0:
+                dFdx_b = dFdx0
+                dJdx_b = dJdx0
+            elif b == 1:
+                dFdx_b = dFdx1
+                dJdx_b = dJdx1
+            elif b == 2:
+                dFdx_b = dFdx2
+                dJdx_b = dJdx2
+            else:
+                dFdx_b = dFdx3
+                dJdx_b = dJdx3
+
+            # Deviatoric: K_ab = V * (dFdx_a)^T * (dP/dF)(dFdx_b); dP/dF(B) = k_mu*s*B + coef*F*(F:B)
+            F_dot_dF_b = F[0, 0] * dFdx_b[0, 0] + F[0, 1] * dFdx_b[0, 1] + F[0, 2] * dFdx_b[0, 2]
+            F_dot_dF_b += F[1, 0] * dFdx_b[1, 0] + F[1, 1] * dFdx_b[1, 1] + F[1, 2] * dFdx_b[1, 2]
+            F_dot_dF_b += F[2, 0] * dFdx_b[2, 0] + F[2, 1] * dFdx_b[2, 1] + F[2, 2] * dFdx_b[2, 2]
+            dP_dF_dFdx_b = wp.mat33(
+                k_mu * s * dFdx_b[0, 0] + coef * F[0, 0] * F_dot_dF_b, k_mu * s * dFdx_b[0, 1] + coef * F[0, 1] * F_dot_dF_b, k_mu * s * dFdx_b[0, 2] + coef * F[0, 2] * F_dot_dF_b,
+                k_mu * s * dFdx_b[1, 0] + coef * F[1, 0] * F_dot_dF_b, k_mu * s * dFdx_b[1, 1] + coef * F[1, 1] * F_dot_dF_b, k_mu * s * dFdx_b[1, 2] + coef * F[1, 2] * F_dot_dF_b,
+                k_mu * s * dFdx_b[2, 0] + coef * F[2, 0] * F_dot_dF_b, k_mu * s * dFdx_b[2, 1] + coef * F[2, 1] * F_dot_dF_b, k_mu * s * dFdx_b[2, 2] + coef * F[2, 2] * F_dot_dF_b,
+            )
+            K_dev_ab = wp.transpose(dFdx) * dP_dF_dFdx_b
+
+            # Volumetric: K_ab = k_lambda * (dJdx_a) outer (dJdx_b)
+            K_vol_ab = wp.outer(dJdx, dJdx) * k_lambda
+
+            K_ab = (K_dev_ab + K_vol_ab) * scale
+            row_a = i if a == 0 else (j if a == 1 else (k if a == 2 else l))
+            col_b = i if b == 0 else (j if b == 1 else (k if b == 2 else l))
+            blk = block_offset + tid * 16 + a * 4 + b
+            rows[blk] = row_a
+            cols[blk] = col_b
+            values[blk] = wp.mat33f(K_ab[0, 0], K_ab[0, 1], K_ab[0, 2], K_ab[1, 0], K_ab[1, 1], K_ab[1, 2], K_ab[2, 0], K_ab[2, 1], K_ab[2, 2])
 
 
 @wp.kernel
@@ -516,6 +676,66 @@ def eval_triangles(
     wp.atomic_add(f, i, f0)
     wp.atomic_sub(f, j, f1)
     wp.atomic_sub(f, k, f2)
+
+
+@wp.kernel
+def build_system_matrix_tri_kernel(
+    x: wp.array(dtype=wp.vec3),
+    indices: wp.array2d(dtype=int),
+    pose: wp.array(dtype=wp.mat22),
+    materials: wp.array2d(dtype=float),
+    dt: wp.float32,
+    block_offset: wp.int32,
+    rows: wp.array(dtype=wp.int32),
+    cols: wp.array(dtype=wp.int32),
+    values: wp.array(dtype=wp.mat33f),
+):
+    """Add triangle FEM lumped tangent stiffness to system matrix: -dt² * (k_mu+k_lambda)*area/3 per vertex."""
+    tid = wp.tid()
+    i = indices[tid, 0]
+    j = indices[tid, 1]
+    k = indices[tid, 2]
+
+    k_mu = materials[tid, 0]
+    k_lambda = materials[tid, 1]
+
+    x0 = x[i]
+    x1 = x[j]
+    x2 = x[k]
+    x10 = x1 - x0
+    x20 = x2 - x0
+    Dm = pose[tid]
+    det_Dm = wp.determinant(Dm)
+    inv_rest_area = det_Dm * 2.0
+    # Skip degenerate rest pose (avoid div by zero)
+    if inv_rest_area <= 0.0:
+        zero = wp.mat33f(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        rows[block_offset + tid * 3 + 0] = i
+        cols[block_offset + tid * 3 + 0] = i
+        values[block_offset + tid * 3 + 0] = zero
+        rows[block_offset + tid * 3 + 1] = j
+        cols[block_offset + tid * 3 + 1] = j
+        values[block_offset + tid * 3 + 1] = zero
+        rows[block_offset + tid * 3 + 2] = k
+        cols[block_offset + tid * 3 + 2] = k
+        values[block_offset + tid * 3 + 2] = zero
+        return
+    rest_area = 1.0 / inv_rest_area
+
+    k_mu = k_mu * rest_area
+    k_lambda = k_lambda * rest_area
+    diag_val = -dt * dt * (k_mu + k_lambda) / 3.0
+    block = wp.mat33f(diag_val, 0.0, 0.0, 0.0, diag_val, 0.0, 0.0, 0.0, diag_val)
+
+    rows[block_offset + tid * 3 + 0] = i
+    cols[block_offset + tid * 3 + 0] = i
+    values[block_offset + tid * 3 + 0] = block
+    rows[block_offset + tid * 3 + 1] = j
+    cols[block_offset + tid * 3 + 1] = j
+    values[block_offset + tid * 3 + 1] = block
+    rows[block_offset + tid * 3 + 2] = k
+    cols[block_offset + tid * 3 + 2] = k
+    values[block_offset + tid * 3 + 2] = block
 
 
 @wp.kernel
@@ -680,7 +900,7 @@ def eval_particle_ground_contacts(
     if c >= 0.0:
         return
 
-    jd = min(vn, 0.0) * kd
+    jd = wp.min(vn, 0.0) * kd
 
     fn = jn + jd
 
@@ -863,8 +1083,8 @@ def solve_soft_contacts_constraint(
     if c > particle_ka:
         return
     
-    # Per-particle friction: use particle value so per-vertex friction is effective (not diluted by shape mu)
-    mu = particle_friction[particle_index]
+    # Use shape friction so ground/shape mu from builder (e.g. add_ground_plane(cfg=ShapeConfig(mu=...))) is applied
+    mu = shape_material_mu[shape_index]
     
     # Body velocity
     body_v_s = wp.spatial_vector()
@@ -902,8 +1122,13 @@ def solve_soft_contacts_constraint(
     if denom == 0.0:
         return
     
-    # Friction constraint
-    lambda_f = wp.max(mu * lambda_n, -wp.length(vt) * dt)
+    # Friction cap: use at least 1*radius effective penetration so shallow contacts get grip.
+    # XPBD and semi_implicit use mu*lambda_n / mu*c*ke; shallow contact => tiny cap => sliding.
+    # VBD uses normal_contact_force (can be large); we approximate that with a penetration floor.
+    penetration = wp.max(-lambda_n, 0.0)
+    effective_penetration = wp.max(penetration, 1.0 * particle_radius[particle_index])
+    friction_cap = mu * effective_penetration
+    lambda_f = wp.max(-friction_cap, -wp.length(vt) * dt)
     if wp.length(vt) > 1e-6:
         delta_f = wp.normalize(vt) * lambda_f
     else:

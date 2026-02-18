@@ -15,7 +15,10 @@
 
 from .solver_inflatable import SolverInflatable
 
+# Backward compatibility: SolverBend is now SolverInflatable with torque (spring_rest_direction)
+SolverBend = SolverInflatable
+
 # Re-export from sim for backward compatibility
 from newton._src.sim import TetraSphere, create_tetra_sphere
 
-__all__ = ["SolverInflatable", "TetraSphere", "create_tetra_sphere"]
+__all__ = ["SolverBend", "SolverInflatable", "TetraSphere", "create_tetra_sphere"]

@@ -137,7 +137,6 @@ class RigidSoftInteractionExample:
             )
         )
         
-        start_particle = builder.particle_count
         builder.add_soft_mesh(
             pos=wp.vec3(0.0, 0.0, 0.0),
             rot=wp.quat_identity(),
@@ -150,29 +149,6 @@ class RigidSoftInteractionExample:
             k_lambda=k_lambda,
             k_damp=k_damp,
         )
-        
-        # Add springs for stability
-        spring_ke = k_mu * 0.5
-        spring_kd = k_damp * 0.5
-        num_tets = len(indices) // 4
-        vertex_positions = np.array(vertices)
-        added_springs = set()
-        
-        for tet_idx in range(num_tets):
-            base = tet_idx * 4
-            tet_verts = [indices[base + i] for i in range(4)]
-            for i_local in range(4):
-                for j_local in range(i_local + 1, 4):
-                    a, b = tet_verts[i_local], tet_verts[j_local]
-                    if a > b:
-                        a, b = b, a
-                    spring_key = (a, b)
-                    if spring_key not in added_springs:
-                        added_springs.add(spring_key)
-                        p0, p1 = vertex_positions[a], vertex_positions[b]
-                        rest_len = float(np.linalg.norm(p1 - p0))
-                        builder.add_spring(start_particle + a, start_particle + b,
-                                           spring_ke, spring_kd, 0.0)
         
         # Finalize unified model
         self.model = builder.finalize()
@@ -198,7 +174,12 @@ class RigidSoftInteractionExample:
         
         print(f"Creating SolverSoft...")
         self.soft_solver = SolverSoft(
-            model=self.model, dt=self.sim_dt, mass=soft_ball_mass, solver_type="bicgstab"
+            model=self.model,
+            dt=self.sim_dt,
+            mass=soft_ball_mass,
+            solver_type="bicgstab",
+            linear_solver_maxiter=150,  # larger mesh needs more iterations for convergence
+            use_constraint_contacts=True,  # XPBD-style contact correction for stable rigid-soft and ground contact
         )
         
         if self.solver_type == "mujoco":

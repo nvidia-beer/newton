@@ -111,10 +111,7 @@ class Example:
             )
         )
         
-        # Track particle start index for springs
-        start_particle = builder.particle_count
-        
-        # Add soft mesh - positioned above ground (Z is up)
+        # Add soft mesh - positioned above ground (Z is up); builder adds edge springs
         builder.add_soft_mesh(
             pos=wp.vec3(0.0, 0.0, initial_height),
             rot=wp.quat_identity(),
@@ -127,36 +124,6 @@ class Example:
             k_lambda=k_lambda,
             k_damp=k_damp,
         )
-        
-        # Add springs between mesh vertices for stability
-        num_tets = len(tetrahedra)
-        added_springs = set()
-        
-        for t in range(num_tets):
-            tet_indices = [indices[t * 4 + k] for k in range(4)]
-            edges = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
-            for ei, ej in edges:
-                i_local, j_local = tet_indices[ei], tet_indices[ej]
-                if i_local > j_local:
-                    i_local, j_local = j_local, i_local
-                
-                spring_key = (i_local, j_local)
-                if spring_key not in added_springs:
-                    added_springs.add(spring_key)
-                    
-                    p0 = vertices[i_local]
-                    p1 = vertices[j_local]
-                    rest_length = float(np.linalg.norm(p1 - p0))
-                    
-                    builder.add_spring(
-                        start_particle + i_local,
-                        start_particle + j_local,
-                        spring_ke,
-                        spring_kd,
-                        rest_length
-                    )
-        
-        print(f"   Added {len(added_springs)} springs", flush=True)
         
         self.model = builder.finalize()
         

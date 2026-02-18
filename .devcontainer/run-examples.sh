@@ -21,13 +21,16 @@ declare -a EXAMPLES=(
     "rigid_soft_interaction"
     "soft_on_box"
     "inflatable_box"
+    "inflatable_box_sand"
     "inflatable_sphere"
     "inflatable_rigid_box"
     "inflatable_rigid_sphere"
     "chambers"
     "inflatable_glue"
+    "disabled_chambers"
     "worm"
-    "torque_worm"
+    "inchworm"
+    "mpm_worm_sand"
     "rigid_carpet"
     "inflatable_table_glue"
 )
@@ -38,13 +41,16 @@ declare -A EXAMPLE_DESCRIPTIONS=(
     ["rigid_soft_interaction"]="Rigid-soft interaction (supports --solver xpbd|mujoco)"
     ["soft_on_box"]="Soft object sitting on rigid XPBD box (supports --constraint-contacts)"
     ["inflatable_box"]="Inflatable soft body box with pressure control (Press I/K/O)"
+    ["inflatable_box_sand"]="Inflatable box on MPM sand (two-way coupling; Press I/K/O)"
     ["inflatable_sphere"]="Inflatable soft body sphere with pressure control (Press I/K/O)"
     ["inflatable_rigid_box"]="Inflatable box with rigid plate on top (supports --solver xpbd|mujoco)"
     ["inflatable_rigid_sphere"]="Inflatable sphere with rigid plate on top (supports --solver xpbd|mujoco)"
     ["chambers"]="N-chamber anisotropic inflatable box (Press I/K inflate/deflate, C chamber, N num chambers, A anisotropy)"
     ["inflatable_glue"]="Rigid + Inflatable glued by proximity springs (--top soft|rigid; Press I/K/O, G/F glue)"
-    ["worm"]="Same as chambers (N-chamber inflatable); Press I/K inflate/deflate, C cycle chamber"
-    ["torque_worm"]="Worm with torque (bend about one axis); interactive: stiff_axes, torque, length/width/height, subdivisions; [I]/[K] [C]"
+    ["disabled_chambers"]="Same as chambers (N-chamber inflatable); Press I/K inflate/deflate, C cycle chamber"
+    ["worm"]="Worm with torque (bend about one axis); interactive: stiff_axes, torque, length/width/height, subdivisions; [I]/[K] [C]"
+    ["inchworm"]="Inchworm (arXiv:1911.05227): left/right chambers, phase-shifted harmonic gait; --no_gait for manual [I]/[K] [C]"
+    ["mpm_worm_sand"]="Worm-shaped rigid body on MPM sand (two-way coupling; sand deforms, worm gets reaction forces)"
     ["rigid_carpet"]="DEBUG: Rigid plates on ground + glue (minimal, no soft body)"
     ["inflatable_table_glue"]="Table: 4 soft legs glued to rigid plate (SurfaceBox); Press I/K/O, G/F"
 )
@@ -265,9 +271,9 @@ if [ "$EXAMPLE" == "soft_on_box" ] && [ -z "$*" ]; then
     echo ""
 fi
 
-# Interactive parameter selection for chambers and worm (same parameters)
+# Interactive parameter selection for chambers and disabled_chambers (same parameters)
 CHAMBERS_ARGS=""
-if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "worm" ]; } && [ -z "$*" ]; then
+if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "disabled_chambers" ]; } && [ -z "$*" ]; then
     echo "═══════════════════════════════════════════════════════════════"
     echo "              $EXAMPLE - Parameters (chambers per axis)"
     echo "═══════════════════════════════════════════════════════════════"
@@ -276,7 +282,7 @@ if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "worm" ]; } && [ -z "$*" ];
     if [ -z "$num_chambers_x" ]; then num_chambers_x=1; fi
     read -p "Chambers along Y (default: 2): " num_chambers_y
     if [ -z "$num_chambers_y" ]; then num_chambers_y=2; fi
-    if [ "$EXAMPLE" == "worm" ]; then
+    if [ "$EXAMPLE" == "disabled_chambers" ]; then
         read -p "Chambers along Z (default: 2): " num_chambers_z
         if [ -z "$num_chambers_z" ]; then num_chambers_z=2; fi
     else
@@ -291,7 +297,7 @@ if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "worm" ]; } && [ -z "$*" ];
     if [ -z "$width" ]; then
         width=2
     fi
-    if [ "$EXAMPLE" == "worm" ]; then
+    if [ "$EXAMPLE" == "disabled_chambers" ]; then
         read -p "Height (Z) in m (default: 0.1): " height
         if [ -z "$height" ]; then height=0.1; fi
     else
@@ -306,7 +312,7 @@ if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "worm" ]; } && [ -z "$*" ];
     if [ -z "$subdivisions_y" ]; then
         subdivisions_y=30
     fi
-    if [ "$EXAMPLE" == "worm" ]; then
+    if [ "$EXAMPLE" == "disabled_chambers" ]; then
         read -p "Subdivisions Z (default: 4): " subdivisions_z
         if [ -z "$subdivisions_z" ]; then subdivisions_z=4; fi
     else
@@ -317,7 +323,7 @@ if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "worm" ]; } && [ -z "$*" ];
     if [ -z "$anisotropy_x" ]; then
         anisotropy_x=1.0
     fi
-    if [ "$EXAMPLE" == "worm" ]; then
+    if [ "$EXAMPLE" == "disabled_chambers" ]; then
         read -p "Anisotropy Y for worm movements (default: 1.4): " anisotropy_y
         if [ -z "$anisotropy_y" ]; then
             anisotropy_y=1.4
@@ -334,7 +340,7 @@ if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "worm" ]; } && [ -z "$*" ];
     fi
     chamber_stiffness_scale_arg=""
     chamber_inflation_disabled_arg=""
-    if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "worm" ]; }; then
+    if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "disabled_chambers" ]; }; then
         total_chambers=$((num_chambers_x * num_chambers_y * num_chambers_z))
         echo "Chamber layout (index = ix*(ny*nz)+iy*nz+iz, ${num_chambers_x}x${num_chambers_y}x${num_chambers_z} = $total_chambers chambers):"
         for iz in $(seq 0 $((num_chambers_z - 1))); do
@@ -414,7 +420,7 @@ if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "worm" ]; } && [ -z "$*" ];
     fi
     echo ""
     CHAMBERS_ARGS="--num_chambers_x $num_chambers_x --num_chambers_y $num_chambers_y --num_chambers_z $num_chambers_z --length $length --width $width --height $height --subdivisions_x $subdivisions_x --subdivisions_y $subdivisions_y --subdivisions_z $subdivisions_z --anisotropy_x $anisotropy_x --anisotropy_y $anisotropy_y --anisotropy_z $anisotropy_z --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 14400"
-    if [ "$EXAMPLE" == "worm" ]; then
+    if [ "$EXAMPLE" == "disabled_chambers" ]; then
         if [ -n "$chamber_stiffness_scale_arg" ]; then
             CHAMBERS_ARGS="$CHAMBERS_ARGS $chamber_stiffness_scale_arg"
         fi
@@ -424,11 +430,11 @@ if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "worm" ]; } && [ -z "$*" ];
     fi
 fi
 
-# Interactive parameter selection for torque_worm (single axis stays straight, whole object)
+# Interactive parameter selection for worm (single axis stays straight, whole object)
 TORQUE_WORM_ARGS=""
-if [ "$EXAMPLE" == "torque_worm" ] && [ -z "$*" ] && [ -t 0 ]; then
+if [ "$EXAMPLE" == "worm" ] && [ -z "$*" ] && [ -t 0 ]; then
     echo "═══════════════════════════════════════════════════════════════"
-    echo "              Torque Worm - Which axis stays straight?"
+    echo "              Worm - Which axis stays straight?"
     echo "═══════════════════════════════════════════════════════════════"
     echo ""
     echo "  One axis gets torque on the whole object (all chambers); that axis stays straight."
@@ -448,6 +454,8 @@ if [ "$EXAMPLE" == "torque_worm" ] && [ -z "$*" ] && [ -t 0 ]; then
     torque_stiffness=${torque_stiffness:-100}
     read -p "  Torque damping (default: 2): " torque_damping
     torque_damping=${torque_damping:-2}
+    read -p "  Ground friction mu (0=slippery, 0.8=default for stick-slip, ~1=grip) [0.8]: " ground_friction
+    ground_friction=${ground_friction:-0.8}
     read -p "  Chamber inflation disabled, comma-separated (default: 0,2): " chamber_disabled
     chamber_disabled=${chamber_disabled:-0,2}
     echo ""
@@ -464,9 +472,26 @@ if [ "$EXAMPLE" == "torque_worm" ] && [ -z "$*" ] && [ -t 0 ]; then
     worm_sub_y=${worm_sub_y:-15}
     read -p "    Subdivisions Z [4]: " worm_sub_z
     worm_sub_z=${worm_sub_z:-4}
-    echo "  → stiff_axes=$stiff_axes, geometry ${worm_length}x${worm_width}x${worm_height}, sub ${worm_sub_x}x${worm_sub_y}x${worm_sub_z}"
+    echo "  → stiff_axes=$stiff_axes, ground_friction=$ground_friction, geometry ${worm_length}x${worm_width}x${worm_height}, sub ${worm_sub_x}x${worm_sub_y}x${worm_sub_z}"
     echo ""
-    TORQUE_WORM_ARGS="--stiff_axes $stiff_axes --torque_stiffness $torque_stiffness --torque_damping $torque_damping --chamber_inflation_disabled $chamber_disabled --length $worm_length --width $worm_width --height $worm_height --subdivisions_x $worm_sub_x --subdivisions_y $worm_sub_y --subdivisions_z $worm_sub_z --num_chambers_x 1 --num_chambers_y 2 --num_chambers_z 2 --initial_height 0.3 --mass 1.0 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --spring_ke 5e4 --spring_kd 1.0 --gravity 9.81 --max_pressure 5.0 --anisotropy_x 1.2 --anisotropy_y 1.4 --anisotropy_z 1.2 --substeps 5 --num_frames 14400"
+    TORQUE_WORM_ARGS="--stiff_axes $stiff_axes --torque_stiffness $torque_stiffness --torque_damping $torque_damping --ground_friction $ground_friction --chamber_inflation_disabled $chamber_disabled --length $worm_length --width $worm_width --height $worm_height --subdivisions_x $worm_sub_x --subdivisions_y $worm_sub_y --subdivisions_z $worm_sub_z --num_chambers_x 1 --num_chambers_y 2 --num_chambers_z 2 --initial_height 0.3 --mass 1.0 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --spring_ke 5e4 --spring_kd 1.0 --gravity 9.81 --max_pressure 5.0 --anisotropy_x 1.2 --anisotropy_y 1.4 --anisotropy_z 1.2 --substeps 5 --num_frames 14400"
+fi
+
+# Inflatable box on sand: option to disable sand (box only)
+INFLATABLE_BOX_SAND_ARGS=""
+if [ "$EXAMPLE" == "inflatable_box_sand" ] && [ -z "$*" ]; then
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "              Inflatable Box Sand - Options"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo ""
+    read -p "Enable MPM sand (two-way coupling)? [Y/n]: " sand_choice
+    if [ "$sand_choice" = "n" ] || [ "$sand_choice" = "N" ]; then
+        INFLATABLE_BOX_SAND_ARGS="--no-sand"
+        echo "  → Sand disabled (inflatable box only)"
+    else
+        echo "  → Sand enabled"
+    fi
+    echo ""
 fi
 
 # Default stable parameters for examples that need them
@@ -509,6 +534,10 @@ case "$EXAMPLE" in
             # Using 5x5x5 subdivisions for more particles (125 cells = 750 tetrahedra)
             DEFAULT_ARGS="--size 0.4 0.4 0.4 --initial_height 0.5 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --max_pressure 5.0 --substeps 5 --subdivisions 5 5 5 --num_frames 1800"
             ;;
+        inflatable_box_sand)
+            # Inflatable box on MPM sand; use --no-sand for box only (set via INFLATABLE_BOX_SAND_ARGS)
+            DEFAULT_ARGS="$INFLATABLE_BOX_SAND_ARGS"
+            ;;
         inflatable_sphere)
             # Inflatable soft body sphere with manual pressure control
             # Press I to inflate, K to deflate, O to reset
@@ -538,13 +567,17 @@ case "$EXAMPLE" in
             # Table: 4 soft legs (same size as inflatable_glue), plate not too light or it explodes
             DEFAULT_ARGS="--leg_size 0.4 0.4 0.4 --subdivisions 5 5 5 --plate_width 2.0 --plate_height 0.05 --mass 1.0 --plate_mass 0.05 --rigid_leg_mass 10000000.0 --particle_radius 0.008 --glue_epsilon 0.05 --glue_ke 3e4 --glue_kd 300 --glue_max_vel 1.0 --max_pressure 5.0 --gravity 9.81 --substeps 8 --xpbd_iterations 12 --num_frames 1800"
             ;;
-        torque_worm)
-            # Single axis stays straight (X, Y, or Z); torque on whole object.
+        worm)
+            # Single axis stays straight (X, Y, or Z); torque on whole object. Pass --ground_friction 0.1 for slippery.
             if [ -n "$TORQUE_WORM_ARGS" ]; then
                 DEFAULT_ARGS="$TORQUE_WORM_ARGS"
             else
-                DEFAULT_ARGS="--stiff_axes x --length 1 --width 1.5 --height 0.1 --subdivisions_x 10 --subdivisions_y 15 --subdivisions_z 4 --num_chambers_x 1 --num_chambers_y 2 --num_chambers_z 2 --initial_height 0.3 --mass 1.0 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --spring_ke 5e4 --spring_kd 1.0 --gravity 9.81 --max_pressure 5.0 --anisotropy_x 1.2 --anisotropy_y 1.4 --anisotropy_z 1.2 --torque_stiffness 100 --torque_damping 2 --chamber_inflation_disabled 0,2 --substeps 5 --num_frames 14400"
+                DEFAULT_ARGS="--stiff_axes x --ground_friction 0.8 --length 1 --width 1.5 --height 0.1 --subdivisions_x 10 --subdivisions_y 15 --subdivisions_z 4 --num_chambers_x 1 --num_chambers_y 2 --num_chambers_z 2 --initial_height 0.3 --mass 1.0 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --spring_ke 5e4 --spring_kd 1.0 --gravity 9.81 --max_pressure 5.0 --anisotropy_x 1.2 --anisotropy_y 1.4 --anisotropy_z 1.2 --torque_stiffness 100 --torque_damping 2 --chamber_inflation_disabled 0,2 --substeps 5 --num_frames 14400"
             fi
+            ;;
+        inchworm)
+            # Inchworm: phase-shifted harmonic gait on ch1/ch3; paper-like defaults (higher friction, anisotropy).
+            DEFAULT_ARGS="--ground_friction 0.8 --length 1 --width 1.5 --height 0.1 --subdivisions_x 10 --subdivisions_y 15 --subdivisions_z 4 --num_chambers_x 1 --num_chambers_y 2 --num_chambers_z 2 --initial_height 0.3 --mass 1.0 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --spring_ke 5e4 --spring_kd 1.0 --gravity 9.81 --max_pressure 5.0 --anisotropy_x 1.2 --anisotropy_y 1.5 --anisotropy_z 1.4 --torque_stiffness 100 --torque_damping 2 --chamber_inflation_disabled 0,2 --substeps 5 --num_frames 14400"
             ;;
         chambers)
             # Flat rectangular slab, 2 chambers side-by-side (bends with differential pressure)
@@ -554,8 +587,8 @@ case "$EXAMPLE" in
                 DEFAULT_ARGS="--length 1 --width 2 --height 0.06 --subdivisions_x 10 --subdivisions_y 30 --subdivisions_z 2 --num_chambers_y 2 --pos 0 0 0.3 --anisotropy_x 1.2 --anisotropy_z 1.2 --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 14400"
             fi
             ;;
-        worm)
-            # Worm: same as chambers but default height 0.1, subdivisions_z 4
+        disabled_chambers)
+            # Disabled chambers: same as chambers but default height 0.1, subdivisions_z 4
             if [ -n "$CHAMBERS_ARGS" ]; then
                 DEFAULT_ARGS="$CHAMBERS_ARGS"
             else
