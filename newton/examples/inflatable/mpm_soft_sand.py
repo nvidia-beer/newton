@@ -94,12 +94,25 @@ def emit_sand(
     sand_builder: newton.ModelBuilder,
     voxel_size: float,
     sand_bed_top: float,
+    bed_lo: np.ndarray | None = None,
+    bed_hi: np.ndarray | None = None,
 ) -> None:
-    """Emit a bed of MPM sand particles (shared by inflatable-on-sand examples)."""
+    """Emit a bed of MPM sand particles (shared by inflatable-on-sand examples).
+
+    By default the bed is a box [-1, -1, 0] to [1, 1, sand_bed_top]. Optional bed_lo/bed_hi
+    (each shape (3,) in world x,y,z) restrict the emission region (e.g. sand only to one
+    side of the scene).
+    """
     particles_per_cell = 3.0
     density = 2500.0
-    bed_lo = np.array([-1.0, -1.0, 0.0])
-    bed_hi = np.array([1.0, 1.0, sand_bed_top])
+    if bed_lo is None:
+        bed_lo = np.array([-1.0, -1.0, 0.0])
+    else:
+        bed_lo = np.asarray(bed_lo, dtype=np.float64).reshape(3)
+    if bed_hi is None:
+        bed_hi = np.array([1.0, 1.0, sand_bed_top])
+    else:
+        bed_hi = np.asarray(bed_hi, dtype=np.float64).reshape(3)
     bed_res = np.ceil(particles_per_cell * (bed_hi - bed_lo) / voxel_size).astype(int)
     cell_size = (bed_hi - bed_lo) / bed_res
     radius = float(np.max(cell_size) * 0.5)

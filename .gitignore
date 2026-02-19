@@ -43,3 +43,8 @@ asv/html
 MUJOCO_LOG.TXT
 imgui.ini
 newton/tests/outputs/
+
+#  CSV logs, GIFs, PDFs (all such files)
+*.csv
+*.gif
+*.pdf

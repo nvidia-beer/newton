@@ -14,19 +14,12 @@
 # limitations under the License.
 
 """
-Inchworm example – legged crawling with phase-shifted harmonic gait.
+Inchworm crawling example – built on example_inchworm, uses SolverCrawlable.
 
-Implements the soft robot from arXiv:1911.05227 (Understanding Legged Crawling for
-Soft-Robotics). Paper geometry: three-link model – beam length L=120mm, two segments
-along the length (left and right), each with one bending actuator. Bending is in the
-XZ plane (along the beam, belly down). Torque springs keep the spine stiff along X.
-
-Chamber layout (2×1×2, paper-aligned):
-  - Two segments along X (length): ix=0 = left segment, ix=1 = right segment.
-  - One division in Y (width). Two in Z (height): iz=0 = bottom, iz=1 = top.
-  - ch0=left bottom, ch1=left top, ch2=right bottom, ch3=right top.
-  - Inflate only TOP of each segment (ch1, ch3) so beam bends DOWN (belly to ground).
-  - ch0 and ch2 = backbone (stiff, no inflation).
+Same geometry, chamber layout, and gait as example_inchworm.py (arXiv:1911.05227).
+Uses SolverCrawlable; with --crawlable enables paper stick-slip ground friction.
+Default (--no-crawlable): same behaviour as inchworm, worm visible. Use --crawlable
+to enable the crawlable solver stick-slip features.
 """
 
 import argparse
@@ -37,9 +30,56 @@ import warp as wp
 import numpy as np
 
 import newton
-from newton.solvers import SolverInflatable, TetraBox
+from newton.solvers import SolverCrawlable, TetraBox
 
+# Inchworm package (validation/metrics); params JSON next to crawlable examples
+_this_dir = os.path.dirname(os.path.abspath(__file__))
 from newton.examples.crawlable.inchworm import InchwormValidation, get_paper_metrics
+
+# Params loader inlined so the example works without inchworm.params_loader (e.g. in Docker)
+import json
+from typing import Any
+
+INCHWORM_PARAM_KEYS = [
+    "length", "width", "height",
+    "subdivisions_x", "subdivisions_y", "subdivisions_z",
+    "num_chambers_x", "num_chambers_y", "num_chambers_z",
+    "initial_height", "total_mass", "k_mu", "k_lambda", "k_damp",
+    "spring_ke", "spring_kd", "gravity", "max_pressure", "substeps",
+    "anisotropy_x", "anisotropy_y", "anisotropy_z",
+    "torque_stiffness", "torque_damping",
+    "chamber_stiffness_scale", "chamber_active_inflation",
+    "ground_friction", "contact_offset", "contact_iterations", "ground_ke", "particle_radius",
+    "gait_enabled", "gait_freq", "gait_amplitude", "gait_phase", "gait_baseline",
+    "gait_pressure_min", "gait_pressure_max",
+    "settle_seconds", "start_at_ground_level",
+    "use_crawlable_stick_slip", "stick_slip_scale", "stick_slip_amplitude", "crawl_direction",
+    "num_frames", "validate_contact", "stop_on_lost_contact", "csv_log_interval",
+]
+
+
+def load_params(path: str | os.PathLike[str]) -> dict[str, Any]:
+    path = os.path.expanduser(path)
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    return {k: raw[k] for k in INCHWORM_PARAM_KEYS if k in raw}
+
+
+def save_params(path: str | os.PathLike[str], params: dict[str, Any], comment: str | None = None) -> None:
+    path = os.path.expanduser(path)
+    out: dict[str, Any] = {}
+    if comment is not None:
+        out["_comment"] = comment
+    for k in INCHWORM_PARAM_KEYS:
+        if k in params:
+            out[k] = params[k]
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2)
+
+
+# Params JSON and CSV dir: crawlable/inchworm/ (same dir when run via Docker /workspace/inchworm)
+DEFAULT_PARAMS_PATH = os.path.join(_this_dir, "inchworm", "inchworm_params.json")
 
 
 def _chamber_index(ix: int, iy: int, iz: int, nx: int, ny: int, nz: int, disabled: set) -> int:
@@ -186,7 +226,15 @@ class Example:
         gait_baseline: float = 1.4,  # higher = more lift; keep moderate to avoid losing ground contact
         settle_seconds: float = 1.0,
         start_at_ground_level: bool = True,
+        use_crawlable_stick_slip: bool = False,
+        stick_slip_scale: float = 1.0,
+        stick_slip_amplitude: float = np.pi / 5.0,
+        crawl_direction: float = 1.0,
     ):
+        self.use_crawlable_stick_slip = bool(use_crawlable_stick_slip)
+        self.stick_slip_scale = float(stick_slip_scale)
+        self.stick_slip_amplitude = float(stick_slip_amplitude)
+        self.crawl_direction = 1.0 if float(crawl_direction) >= 0 else -1.0
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.substeps = substeps
@@ -226,7 +274,13 @@ class Example:
         self.stiff_axes = ("x",)
         self.torque_display_axis = "all"
 
-        print("\n🐛 Inchworm (arXiv:1911.05227): left/right chambers, phase-shifted gait.", flush=True)
+        print(
+            "\n🐛 Inchworm crawling (SolverCrawlable): left/right chambers, phase-shifted gait."
+            + (" Stick-slip ON." if self.use_crawlable_stick_slip else " Stick-slip OFF (same as inchworm).")
+            + (" Crawl Y+" if self.use_crawlable_stick_slip and self.crawl_direction >= 0 else "")
+            + (" Crawl Y-" if self.use_crawlable_stick_slip and self.crawl_direction < 0 else ""),
+            flush=True,
+        )
         box = TetraBox(
             size=(self.length, self.width, self.height),
             subdivisions=self.subdivisions,
@@ -250,9 +304,11 @@ class Example:
             float(self.height),
             self.subdivisions,
         )
+        n_x = self.subdivisions[0]
         print(
             f"   Ground (blue): Y+={len(self._bottom_y_plus_indices)}, Y-={len(self._bottom_y_minus_indices)}. "
-            f"Joints (green) φ1={len(self._joint_left_indices)}, φ2={len(self._joint_right_indices)}.",
+            f"Joints (green) φ1={len(self._joint_left_indices)}, φ2={len(self._joint_right_indices)}. "
+            f"(subdivisions_x={n_x} → {n_x + 1} verts/edge)",
             flush=True,
         )
 
@@ -268,8 +324,11 @@ class Example:
             mesh_center_z = -mesh_min_z - self.contact_offset  # slight penetration for grip
 
         builder = newton.ModelBuilder()
+        # When stick-slip crawl is on, use mu=0 for the ground shape so constraint contact
+        # does not apply friction; the crawl kernel is the only source of tangential force (Y motion).
+        ground_shape_mu = 0.0 if self.use_crawlable_stick_slip else ground_friction
         builder.add_ground_plane(
-            cfg=newton.ModelBuilder.ShapeConfig(ke=6e5, kd=2e3, kf=4e4, mu=ground_friction),
+            cfg=newton.ModelBuilder.ShapeConfig(ke=6e5, kd=2e3, kf=4e4, mu=ground_shape_mu),
         )
         builder.add_soft_mesh(
             pos=wp.vec3(0.0, 0.0, mesh_center_z),
@@ -408,7 +467,7 @@ class Example:
 
         # Force-based ground plane: very stiff so no particle can lift. Gentle gait keeps contact.
         ground_plane = (0.0, 0.0, 1.0, 0.0)
-        self.solver = SolverInflatable(
+        self.solver = SolverCrawlable(
             model=self.model,
             dt=self.sim_dt,
             mass=total_mass,
@@ -435,6 +494,46 @@ class Example:
         tet_chamber_mask = wp.array(tet_chamber_mask_np, dtype=wp.int32, device=self.model.device)
         spring_chamber_mask = wp.array(np.array(spring_chamber_list, dtype=np.int32), dtype=wp.int32, device=self.model.device)
         self.solver.set_chamber_mask(tet_chamber_mask, spring_chamber_mask=spring_chamber_mask, num_chambers=self.total_chambers)
+
+        if self.use_crawlable_stick_slip:
+            # Paper stick-slip: crawl axis Y — left/right = two ends along Y (split bottom by Y)
+            bottom_all = list(self._bottom_y_plus_indices) + list(self._bottom_y_minus_indices)
+            mid_y = 0.0
+            left_contact = [i for i in bottom_all if float(vertices[i][1]) < mid_y]
+            right_contact = [i for i in bottom_all if float(vertices[i][1]) >= mid_y]
+            if not left_contact:
+                left_contact = [i for i in bottom_all if float(vertices[i][1]) <= min(float(vertices[j][1]) for j in bottom_all) + 0.001]
+            if not right_contact:
+                right_contact = [i for i in bottom_all if float(vertices[i][1]) >= max(float(vertices[j][1]) for j in bottom_all) - 0.001]
+            if not left_contact:
+                left_contact = bottom_all[: max(1, len(bottom_all) // 2)]
+            if not right_contact:
+                right_contact = bottom_all[max(0, len(bottom_all) // 2) :]
+            self.solver.set_crawl_contact_groups(
+                self.model,
+                left_contact,
+                right_contact,
+                list(self._joint_left_indices),
+                list(self._joint_right_indices),
+            )
+            # Crawl axis 1 = Y; beam length L along Y. Use simple (Δ-only) state machine so one foot
+            # always slips and slip force is applied every step (per guide: motion from slip phase).
+            self.solver.set_gait_params(
+                gamma=np.pi / 2.0,
+                A=self.stick_slip_amplitude,
+                freq_hz=float(gait_freq),
+                psi=float(gait_phase),
+                k=0.1677,
+                M=total_mass,
+                L=self.width,
+                beta=2.0,
+                mu=ground_friction,
+                g=gravity,
+                crawl_axis=1,
+                use_full_state_machine=False,
+                slip_force_scale=self.stick_slip_scale,
+                crawl_direction=self.crawl_direction,
+            )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -498,7 +597,9 @@ class Example:
         print(f"   [Active chamber: {self.active_chamber} / {self.total_chambers}]", flush=True)
 
     def _print_help(self):
-        msg = "\n🐛 Inchworm ready. Ch1=left segment (top), Ch3=right segment (top); bend down; phase-shifted gait."
+        msg = "\n🐛 Inchworm crawling ready. Ch1=left segment (top), Ch3=right segment (top); bend down; phase-shifted gait."
+        if self.use_crawlable_stick_slip:
+            msg += " [Stick-slip ON]"
         if not self.gait_enabled:
             msg += " [I]/[K] inflate/deflate, [C] cycle chamber."
         print(msg, flush=True)
@@ -558,6 +659,8 @@ class Example:
         for _ in range(self.substeps):
             self.state_0.clear_forces()
             self.contacts = self.model.collide(state=self.state_0)
+            if self.use_crawlable_stick_slip:
+                self.solver.set_crawl_time(self.sim_time)
             self.solver.step(
                 state_in=self.state_0,
                 state_out=self.state_1,
@@ -699,7 +802,7 @@ class Example:
                 if validate_contact:
                     ok, info = self.validate_bottom_contact(self.state_0, verbose=True)
                     if stop_on_lost_contact and not ok:
-                        print(f"\n🐛 STOPPED at frame {frame} (bottom Y+ or Y- lost contact with ground).", flush=True)
+                        print(f"\n🐛 Crawling STOPPED at frame {frame} (bottom Y+ or Y- lost contact with ground).", flush=True)
                         break
                 self.render()
                 if csv_log_interval > 0 and frame % csv_log_interval == 0:
@@ -710,6 +813,20 @@ class Example:
                         self._joint_left_indices or [],
                         self._joint_right_indices or [],
                     )
+                    # When stick-slip is on, print CoM Y and chamber pressures every second (gait = inflate/deflate)
+                    if self.use_crawlable_stick_slip and frame > 0 and frame % 60 == 0:
+                        q = self.state_0.particle_q.numpy()
+                        if q.size >= 3:
+                            y_all = q.reshape(-1, 3)[:, 1]
+                            com_y = float(np.mean(y_all))
+                            y_left = float(np.mean(m["y_left_ground"])) if m["y_left_ground"] else 0.0
+                            y_right = float(np.mean(m["y_right_ground"])) if m["y_right_ground"] else 0.0
+                            p1 = self.chamber_pressures[1] if len(self.chamber_pressures) > 1 else 0.0
+                            p3 = self.chamber_pressures[3] if len(self.chamber_pressures) > 3 else 0.0
+                            print(
+                                f"   [crawl] t={self.sim_time:.1f}s  CoM_Y={com_y:.3f}  left_Y={y_left:.3f}  right_Y={y_right:.3f}  ch1={p1:.2f} ch3={p3:.2f}",
+                                flush=True,
+                            )
                     if validation.is_logging:
                         validation.log_row(
                             frame, self.sim_time,
@@ -726,101 +843,59 @@ class Example:
         finally:
             validation.close()
         info = self.solver.get_inflation_info(self.state_0)
-        print(f"\n🐛 Done. Final volume ratio: {info['current_ratio']:.2f}x", flush=True)
+        print(f"\n🐛 Crawling done. Final volume ratio: {info['current_ratio']:.2f}x", flush=True)
         if had_csv and csv_log_path:
             print(f"   CSV saved: {os.path.abspath(csv_log_path)} — render GIF from crawlable/inchworm (e.g. render-inchworm-gif.sh)", flush=True)
 
 
-def _parse_csv(s: str | None, cast):
-    return [cast(x.strip()) for x in s.split(",")] if s else None
-
-
 def main():
     parser = argparse.ArgumentParser(
-        description="Inchworm: two bending actuators (ch1/ch3), phase-shifted harmonic gait (arXiv:1911.05227)."
+        description="Inchworm crawling: physics/calibration from JSON (default: crawlable/inchworm/inchworm_params.json). Override stick-slip with --normal or --stick-slip."
     )
-    worm_geom = parser.add_argument_group("Geometry (paper: L=120mm, M=52g)")
-    worm_geom.add_argument("--length", type=float, default=0.12, help="Length (X, meters)")
-    worm_geom.add_argument("--width", type=float, default=0.03, help="Width (Y, meters)")
-    worm_geom.add_argument("--height", type=float, default=0.015, help="Height (Z, meters)")
-    worm_geom.add_argument("--subdivisions_x", type=int, default=8)
-    worm_geom.add_argument("--subdivisions_y", type=int, default=6)
-    worm_geom.add_argument("--subdivisions_z", type=int, default=3)
-    parser.add_argument("--num_chambers_x", type=int, default=2, help="Paper: 2 segments along length")
-    parser.add_argument("--num_chambers_y", type=int, default=1)
-    parser.add_argument("--num_chambers_z", type=int, default=2, help="Top/bottom for bend direction")
-    parser.add_argument("--initial_height", type=float, default=0.0, help="Mesh center z (m); 0 = auto (legs on floor, slight penetration)")
-    parser.add_argument("--mass", type=float, default=0.052, help="Total mass (kg); paper M=52g")
-    parser.add_argument("--k_mu", type=float, default=4.0e6, help="Shear modulus; lower = softer (paper ~6e7)")
-    parser.add_argument("--k_lambda", type=float, default=4.0e6, help="Bulk modulus; lower = softer")
-    parser.add_argument("--k_damp", type=float, default=3.0, help="Material damping; lower = less resistance to motion")
-    parser.add_argument("--spring_ke", type=float, default=5.0e4)
-    parser.add_argument("--spring_kd", type=float, default=1.0)
-    parser.add_argument("--gravity", type=float, default=9.81)
-    parser.add_argument("--max_pressure", type=float, default=5.0)
-    parser.add_argument("--anisotropy_x", type=float, default=1.5, help="Expand along beam for bend")
-    parser.add_argument("--anisotropy_y", type=float, default=1.0)
-    parser.add_argument("--anisotropy_z", type=float, default=1.15)
-    parser.add_argument("--torque_stiffness", type=float, default=250000.0, help="X-axis spine (paper: stiff)")
-    parser.add_argument("--torque_damping", type=float, default=18.0)
-    parser.add_argument(
-        "--ground_friction",
-        type=float,
-        default=0.39,
-        help="Coulomb friction μ (higher = legs stay on ground; paper 0.389, default 0.8 for grip).",
-    )
-    parser.add_argument(
-        "--contact_offset",
-        type=float,
-        default=0.0022,
-        help="Vertical offset (m): mesh center = rest_height - contact_offset. Smaller = higher rest = more lift, risk of loss of contact (default 0.0022).",
-    )
-    parser.add_argument(
-        "--contact_iterations",
-        type=int,
-        default=64,
-        help="Contact solver iterations per step; more = better friction/contact (default 64).",
-    )
-    parser.add_argument(
-        "--ground_ke",
-        type=float,
-        default=1.0e7,
-        help="Ground normal stiffness; higher = firmer contact, less lift-off (default 1e7).",
-    )
-    parser.add_argument(
-        "--particle_radius",
-        type=float,
-        default=None,
-        metavar="R",
-        help="Override particle contact radius (m); slightly larger = more particles in contact (default: min(0.0018, height*0.14)).",
-    )
-    parser.add_argument("--substeps", type=int, default=100, help="More substeps = better contact, no float")
-    parser.add_argument("--num_frames", type=int, default=14400)
-    parser.add_argument("--validate_contact", action="store_true", default=True, help="Check bottom Y+/Y- verts stay on ground (default: True)")
-    parser.add_argument("--no_validate_contact", action="store_false", dest="validate_contact", help="Disable contact validation")
-    parser.add_argument("--stop_on_lost_contact", action="store_true", help="Stop simulation when bottom loses contact")
-    parser.add_argument("--csv_log", type=str, default=None, metavar="PATH", help="Write metrics and parameters to CSV for tuning (default: inchworm_YYYY-MM-DD_HH-MM-SS.csv). Use --csv_log '' to disable.")
-    parser.add_argument("--csv_log_dir", type=str, default=None, metavar="DIR", help="Directory for default CSV (e.g. /workspace in Docker so file appears on host in mounted isaac-lab).")
-    parser.add_argument("--csv_log_interval", type=int, default=10, metavar="N", help="Log CSV every N frames (default 10; smaller = more samples).")
-    parser.add_argument("--chamber_stiffness_scale", type=str, default=None)
-    parser.add_argument("--chamber_inflation_disabled", type=str, default=None)
-    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--params", type=str, default=DEFAULT_PARAMS_PATH, metavar="PATH", help="Params JSON path.")
+    parser.add_argument("--save_params", type=str, default=None, metavar="PATH", help="Save effective params to JSON at end of run.")
+    parser.add_argument("--normal", action="store_true", help="Override: no stick-slip (same as inchworm).")
+    parser.add_argument("--stick-slip", action="store_true", dest="stick_slip", help="Override: paper stick-slip friction ON.")
+    parser.add_argument("--csv_log_dir", type=str, default=None, metavar="DIR", help="Override: directory for CSV log (from JSON if not set).")
+    parser.add_argument("--csv_log_interval", type=int, default=None, metavar="N", help="Override: log CSV every N frames (from JSON if not set).")
     parser.add_argument("--headless", action="store_true")
-    gait_group = parser.add_argument_group("Gait (phase-shifted harmonic)")
-    gait_group.add_argument("--no_gait", action="store_true", help="Disable automatic gait; use [I]/[K] and [C] to drive")
-    gait_group.add_argument("--gait_freq", type=float, default=0.15, help="Gait frequency (Hz); paper quasistatic 0.1–0.3")
-    gait_group.add_argument("--gait_amplitude", type=float, default=0.80, help="Pressure amplitude; higher = more lift (default 0.80); keep moderate to avoid losing ground contact")
-    gait_group.add_argument("--gait_phase", type=float, default=1.57, help="Phase ψ (rad); paper ψ≈π/2 for robustness")
-    gait_group.add_argument("--gait_baseline", type=float, default=1.4, help="Baseline pressure; higher = stronger bend/lift (default 1.4); keep moderate to avoid losing ground contact")
-    parser.add_argument("--settle_seconds", type=float, default=1.0, help="Seconds with no gait so robot rests on ground before moving (default 1.0); avoids initial jump.")
-    parser.add_argument("--no_start_at_ground_level", action="store_true", help="Place mesh slightly below ground (contact_offset) for grip; default is bottom at z=0 to avoid jump.")
+    parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
 
-    chamber_stiffness_scale = _parse_csv(args.chamber_stiffness_scale, float)
-    if args.chamber_inflation_disabled is not None and args.chamber_inflation_disabled.strip().lower() in ("none", "all", ""):
-        chamber_inflation_disabled = []
+    if not os.path.isfile(args.params):
+        print(f"Params file not found: {args.params}", file=sys.stderr)
+        sys.exit(1)
+    loaded = load_params(args.params)
+    print(f"Loaded params from {args.params}", flush=True)
+    if "use_crawlable_stick_slip" in loaded:
+        print(f"  use_crawlable_stick_slip (from JSON): {loaded['use_crawlable_stick_slip']}", flush=True)
+
+    # Optional: explicit inflation range; if set, overrides gait_baseline/gait_amplitude
+    if "gait_pressure_min" in loaded and "gait_pressure_max" in loaded:
+        mn = float(loaded["gait_pressure_min"])
+        mx = float(loaded["gait_pressure_max"])
+        loaded["gait_baseline"] = (mn + mx) * 0.5
+        loaded["gait_amplitude"] = (mx - mn) * 0.5
+
+    if args.stick_slip:
+        loaded["use_crawlable_stick_slip"] = True
+        print("Override: use_crawlable_stick_slip = True (--stick-slip)", flush=True)
+    elif args.normal:
+        loaded["use_crawlable_stick_slip"] = False
+        print("Override: use_crawlable_stick_slip = False (--normal)", flush=True)
+    if args.csv_log_dir is not None:
+        loaded["csv_log_dir"] = args.csv_log_dir
+    if args.csv_log_interval is not None:
+        loaded["csv_log_interval"] = args.csv_log_interval
+
+    chamber_stiffness_scale = loaded.get("chamber_stiffness_scale")
+    if chamber_stiffness_scale is not None and isinstance(chamber_stiffness_scale, list):
+        chamber_stiffness_scale = [float(x) for x in chamber_stiffness_scale]
+    active = loaded.get("chamber_active_inflation")
+    if isinstance(active, list):
+        chamber_inflation_disabled = [i for i, b in enumerate(active) if b != 1]
     else:
-        chamber_inflation_disabled = _parse_csv(args.chamber_inflation_disabled, int)
+        chamber_inflation_disabled = [0, 2]
 
     wp.init()
     with wp.ScopedDevice(args.device):
@@ -836,54 +911,66 @@ def main():
                 except Exception as e2:
                     print(f"Rerun viewer failed: {e2}")
                     viewer = None
+        nch = loaded["num_chambers_x"] * loaded["num_chambers_y"] * loaded["num_chambers_z"]
         example = Example(
             viewer=viewer,
-            length=args.length,
-            width=args.width,
-            height=args.height,
-            subdivisions_x=args.subdivisions_x,
-            subdivisions_y=args.subdivisions_y,
-            subdivisions_z=args.subdivisions_z,
-            num_chambers_x=args.num_chambers_x,
-            num_chambers_y=args.num_chambers_y,
-            num_chambers_z=args.num_chambers_z,
-            initial_height=args.initial_height,
-            total_mass=args.mass,
-            k_mu=args.k_mu,
-            k_lambda=args.k_lambda,
-            k_damp=args.k_damp,
-            spring_ke=args.spring_ke,
-            spring_kd=args.spring_kd,
-            gravity=args.gravity,
-            max_pressure=args.max_pressure,
-            substeps=args.substeps,
-            anisotropy_x=args.anisotropy_x,
-            anisotropy_y=args.anisotropy_y,
-            anisotropy_z=args.anisotropy_z,
-            torque_stiffness=args.torque_stiffness,
-            torque_damping=args.torque_damping,
+            length=loaded["length"],
+            width=loaded["width"],
+            height=loaded["height"],
+            subdivisions_x=loaded["subdivisions_x"],
+            subdivisions_y=loaded["subdivisions_y"],
+            subdivisions_z=loaded["subdivisions_z"],
+            num_chambers_x=loaded["num_chambers_x"],
+            num_chambers_y=loaded["num_chambers_y"],
+            num_chambers_z=loaded["num_chambers_z"],
+            initial_height=loaded["initial_height"],
+            total_mass=loaded["total_mass"],
+            k_mu=loaded["k_mu"],
+            k_lambda=loaded["k_lambda"],
+            k_damp=loaded["k_damp"],
+            spring_ke=loaded["spring_ke"],
+            spring_kd=loaded["spring_kd"],
+            gravity=loaded["gravity"],
+            max_pressure=loaded["max_pressure"],
+            substeps=loaded["substeps"],
+            anisotropy_x=loaded["anisotropy_x"],
+            anisotropy_y=loaded["anisotropy_y"],
+            anisotropy_z=loaded["anisotropy_z"],
+            torque_stiffness=loaded["torque_stiffness"],
+            torque_damping=loaded["torque_damping"],
             chamber_stiffness_scale=chamber_stiffness_scale,
             chamber_inflation_disabled=chamber_inflation_disabled,
-            ground_friction=args.ground_friction,
-            contact_offset=args.contact_offset,
-            contact_iterations=args.contact_iterations,
-            ground_ke=args.ground_ke,
-            particle_radius=args.particle_radius,
-            gait_enabled=not args.no_gait,
-            gait_freq=args.gait_freq,
-            gait_amplitude=args.gait_amplitude,
-            gait_phase=args.gait_phase,
-            gait_baseline=args.gait_baseline,
-            settle_seconds=args.settle_seconds,
-            start_at_ground_level=not args.no_start_at_ground_level,
+            ground_friction=loaded["ground_friction"],
+            contact_offset=loaded["contact_offset"],
+            contact_iterations=loaded["contact_iterations"],
+            ground_ke=loaded["ground_ke"],
+            particle_radius=loaded.get("particle_radius"),
+            gait_enabled=loaded["gait_enabled"],
+            gait_freq=loaded["gait_freq"],
+            gait_amplitude=loaded["gait_amplitude"],
+            gait_phase=loaded["gait_phase"],
+            gait_baseline=loaded["gait_baseline"],
+            settle_seconds=loaded["settle_seconds"],
+            start_at_ground_level=loaded["start_at_ground_level"],
+            use_crawlable_stick_slip=loaded.get("use_crawlable_stick_slip", False),
+            stick_slip_scale=loaded.get("stick_slip_scale", 1.0),
+            stick_slip_amplitude=loaded.get("stick_slip_amplitude", np.pi / 5.0),
+            crawl_direction=loaded.get("crawl_direction", 1.0),
         )
         example.run(
-            num_frames=args.num_frames,
-            validate_contact=args.validate_contact,
-            stop_on_lost_contact=args.stop_on_lost_contact,
-            csv_log_path=InchwormValidation.csv_log_path(args.csv_log, args.csv_log_dir),
-            csv_log_interval=args.csv_log_interval,
+            num_frames=loaded["num_frames"],
+            validate_contact=loaded["validate_contact"],
+            stop_on_lost_contact=loaded["stop_on_lost_contact"],
+            csv_log_path=InchwormValidation.csv_log_path(loaded.get("csv_log"), loaded.get("csv_log_dir")),
+            csv_log_interval=loaded["csv_log_interval"],
         )
+
+        if args.save_params:
+            effective = {k: loaded[k] for k in INCHWORM_PARAM_KEYS if k in loaded}
+            effective["chamber_stiffness_scale"] = chamber_stiffness_scale
+            effective["chamber_active_inflation"] = [1 if i not in chamber_inflation_disabled else 0 for i in range(nch)]
+            save_params(args.save_params, effective, comment="Inchworm calibration (inchworm_crawling)")
+            print(f"Saved params to {args.save_params}", flush=True)
 
 
 if __name__ == "__main__":

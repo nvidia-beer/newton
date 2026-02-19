@@ -30,6 +30,8 @@ declare -a EXAMPLES=(
     "disabled_chambers"
     "worm"
     "inchworm"
+    "inchworm_crawling"
+    "inchworm_crawling_sand"
     "mpm_worm_sand"
     "rigid_carpet"
     "inflatable_table_glue"
@@ -50,6 +52,8 @@ declare -A EXAMPLE_DESCRIPTIONS=(
     ["disabled_chambers"]="Same as chambers (N-chamber inflatable); Press I/K inflate/deflate, C cycle chamber"
     ["worm"]="Worm with torque (bend about one axis); interactive: stiff_axes, torque, length/width/height, subdivisions; [I]/[K] [C]"
     ["inchworm"]="Inchworm (arXiv:1911.05227): left/right chambers, phase-shifted harmonic gait; --no_gait for manual [I]/[K] [C]"
+    ["inchworm_crawling"]="Inchworm crawling (SolverCrawlable): same as inchworm; menu asks Normal vs Debug (stick-slip)"
+    ["inchworm_crawling_sand"]="Inchworm crawling on MPM sand (two-way coupling; --no-sand = same as inchworm_crawling)"
     ["mpm_worm_sand"]="Worm-shaped rigid body on MPM sand (two-way coupling; sand deforms, worm gets reaction forces)"
     ["rigid_carpet"]="DEBUG: Rigid plates on ground + glue (minimal, no soft body)"
     ["inflatable_table_glue"]="Table: 4 soft legs glued to rigid plate (SurfaceBox); Press I/K/O, G/F"
@@ -477,6 +481,27 @@ if [ "$EXAMPLE" == "worm" ] && [ -z "$*" ] && [ -t 0 ]; then
     TORQUE_WORM_ARGS="--stiff_axes $stiff_axes --torque_stiffness $torque_stiffness --torque_damping $torque_damping --ground_friction $ground_friction --chamber_inflation_disabled $chamber_disabled --length $worm_length --width $worm_width --height $worm_height --subdivisions_x $worm_sub_x --subdivisions_y $worm_sub_y --subdivisions_z $worm_sub_z --num_chambers_x 1 --num_chambers_y 2 --num_chambers_z 2 --initial_height 0.3 --mass 1.0 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --spring_ke 5e4 --spring_kd 1.0 --gravity 9.81 --max_pressure 5.0 --anisotropy_x 1.2 --anisotropy_y 1.4 --anisotropy_z 1.2 --substeps 5 --num_frames 14400"
 fi
 
+# Inchworm crawling: use_crawlable_stick_slip comes from JSON (--params); no prompt so JSON wins.
+# To override from CLI, pass --normal or --stick-slip after the example name.
+CRAWL_EXTRA=""
+
+# Inchworm crawling on sand: optional --no-sand (same as inchworm_crawling)
+CRAWL_SAND_EXTRA=""
+if [ "$EXAMPLE" == "inchworm_crawling_sand" ] && [ -z "$*" ] && [ -t 0 ]; then
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "              Inchworm Crawling Sand - Options"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo ""
+    read -p "Enable MPM sand (two-way coupling)? [Y/n]: " crawl_sand_choice
+    if [ "$crawl_sand_choice" = "n" ] || [ "$crawl_sand_choice" = "N" ]; then
+        CRAWL_SAND_EXTRA="--no-sand"
+        echo "  → Sand disabled (same as inchworm_crawling)"
+    else
+        echo "  → Sand enabled"
+    fi
+    echo ""
+fi
+
 # Inflatable box on sand: option to disable sand (box only)
 INFLATABLE_BOX_SAND_ARGS=""
 if [ "$EXAMPLE" == "inflatable_box_sand" ] && [ -z "$*" ]; then
@@ -576,8 +601,17 @@ case "$EXAMPLE" in
             fi
             ;;
         inchworm)
-            # Inchworm: phase-shifted harmonic gait on ch1/ch3; paper-like defaults (higher friction, anisotropy).
-            DEFAULT_ARGS="--ground_friction 0.8 --length 1 --width 1.5 --height 0.1 --subdivisions_x 10 --subdivisions_y 15 --subdivisions_z 4 --num_chambers_x 1 --num_chambers_y 2 --num_chambers_z 2 --initial_height 0.3 --mass 1.0 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --spring_ke 5e4 --spring_kd 1.0 --gravity 9.81 --max_pressure 5.0 --anisotropy_x 1.2 --anisotropy_y 1.5 --anisotropy_z 1.4 --torque_stiffness 100 --torque_damping 2 --chamber_inflation_disabled 0,2 --substeps 5 --num_frames 14400"
+            # Inchworm: start on ground (no --initial_height: default 0 = bottom at z=0), then settle_seconds before gait.
+            # --csv_log_dir so CSV lands in newton/inchworm/ when run via Docker.
+            DEFAULT_ARGS="--csv_log_dir /workspace/inchworm --csv_log_interval 10 --ground_friction 1.0 --length 1 --width 1.5 --height 0.1 --subdivisions_x 10 --subdivisions_y 15 --subdivisions_z 4 --num_chambers_x 1 --num_chambers_y 2 --num_chambers_z 2 --mass 1.0 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --spring_ke 5e4 --spring_kd 1.0 --gravity 9.81 --max_pressure 5.0 --anisotropy_x 1.2 --anisotropy_y 1.5 --anisotropy_z 1.4 --torque_stiffness 100 --torque_damping 2 --chamber_inflation_disabled 0,2 --substeps 5 --num_frames 14400"
+            ;;
+        inchworm_crawling)
+            # Params from JSON (newton/inchworm/inchworm_params.json). CRAWL_EXTRA adds --normal or --stick-slip from menu.
+            DEFAULT_ARGS="--params /workspace/inchworm/inchworm_params.json --csv_log_dir /workspace/inchworm --csv_log_interval 10"
+            ;;
+        inchworm_crawling_sand)
+            # Same params as inchworm_crawling; CRAWL_EXTRA = --normal/--stick-slip, CRAWL_SAND_EXTRA = optional --no-sand.
+            DEFAULT_ARGS="--params /workspace/inchworm/inchworm_params.json --csv_log_dir /workspace/inchworm --csv_log_interval 10 ${CRAWL_SAND_EXTRA:-}"
             ;;
         chambers)
             # Flat rectangular slab, 2 chambers side-by-side (bends with differential pressure)
@@ -636,7 +670,7 @@ case "$EXAMPLE" in
     esac
 
 # Merge defaults with user overrides (user args go last, so they override)
-EXTRA_ARGS="$DEFAULT_ARGS $*"
+EXTRA_ARGS="$DEFAULT_ARGS ${CRAWL_EXTRA:-} $*"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NEWTON_DIR="$(dirname "$SCRIPT_DIR")"
@@ -704,7 +738,9 @@ docker run --rm -it \
     --ulimit memlock=-1 \
     --ulimit stack=67108864 \
     -e NEWTON_DISABLE_CUDA_INTEROP=1 \
+    -e PYTHONPATH=/workspace \
     "${DOCKER_X11_ARGS[@]}" \
     -v "$NEWTON_DIR/newton:/workspace/newton/newton" \
+    -v "$NEWTON_DIR/newton/examples/crawlable/inchworm:/workspace/inchworm" \
     newton:latest \
     python -m newton.examples "$EXAMPLE" $SOLVER_ARG $EXTRA_ARGS

@@ -20,6 +20,7 @@ Soft body chain: SolverSoft → SolverDeformable (+ self-collision)
 → SolverInflatable (+ inflation). See newton/docs/soft_solvers.md.
 """
 
+from .crawlable import SolverCrawlable
 from .deformable import SolverDeformable
 from .featherstone import SolverFeatherstone
 from .flags import SolverNotifyFlags
@@ -48,6 +49,7 @@ from ..sim import (
 __all__ = [
     "SolverBase",
     "SolverBend",
+    "SolverCrawlable",
     "SolverDeformable",
     "SolverFeatherstone",
     "SolverImplicitMPM",

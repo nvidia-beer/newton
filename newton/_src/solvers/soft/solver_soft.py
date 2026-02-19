@@ -410,11 +410,15 @@ class SolverSoft(SolverBase):
         """Particle–ground contact forces.
 
         If ground_plane=(nx,ny,nz,d) was passed at construction, applies force-based
-        ground contact and Coulomb friction. Otherwise returns zero (ground via
-        collision pipeline: use_constraint_contacts=True and model.collide(state)).
+        ground contact and Coulomb friction: normal resists penetration (no jump up),
+        tangential force |f_t| <= mu * N_eff with N_eff = min(|f_n|, m*g) so sliding is possible.
         """
         if self._ground_plane is None:
             return wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        g = self._get_gravity_vec3(model)
+        gravity_mag = float((g[0] ** 2 + g[1] ** 2 + g[2] ** 2) ** 0.5)
+        if gravity_mag < 1e-9:
+            gravity_mag = 9.81
         forces = wp.zeros(
             model.particle_count, dtype=wp.vec3, device=model.device
         )
@@ -425,12 +429,14 @@ class SolverSoft(SolverBase):
                 state.particle_q,
                 state.particle_qd,
                 model.particle_radius,
+                model.particle_inv_mass,
                 model.particle_flags,
                 self._ground_ke,
                 self._ground_kd,
                 self._ground_kf,
                 self._ground_mu,
                 self._ground_plane,
+                gravity_mag,
             ],
             outputs=[forces],
             device=model.device,

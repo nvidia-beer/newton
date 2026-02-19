@@ -45,10 +45,10 @@ class Example:
         self,
         viewer,
         length: float = 1.0,
-        width: float = 1.5,
+        width: float = 2.0,
         height: float = 0.1,
         subdivisions_x: int = 10,
-        subdivisions_y: int = 15,
+        subdivisions_y: int = 30,
         subdivisions_z: int = 4,
         num_chambers_x: int = 1,
         num_chambers_y: int = 2,
@@ -64,7 +64,7 @@ class Example:
         max_pressure: float = 5.0,
         substeps: int = 5,
         anisotropy_x: float = 1.2,
-        anisotropy_y: float = 1.4,
+        anisotropy_y: float = 1.2,
         anisotropy_z: float = 1.2,
         torque_stiffness: float = 100.0,
         torque_damping: float = 2.0,
@@ -72,7 +72,7 @@ class Example:
         torque_display_axis: str = "all",  # which torque springs to draw: "all" | "x" | "y" | "z"
         chamber_stiffness_scale: list[float] | None = None,
         chamber_inflation_disabled: list[int] | None = None,
-        ground_friction: float = 0.8,  # ground friction coefficient mu (0=slippery, 0.8=default for stick-slip, ~1=high grip)
+        ground_friction: float = 0.8,  # from example 12 (disabled_chambers)
     ):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -109,7 +109,7 @@ class Example:
         disp = (torque_display_axis or "all").strip().lower()
         self.torque_display_axis = disp if disp in ("all", "x", "y", "z") else "all"
 
-        print(f"\n🪱 Torque worm: {self.stiff_axes[0].upper()} stays straight.", flush=True)
+        print(f"\n🪱 Torque worm: {self.stiff_axes[0].upper()} stays straight. Ground friction μ = {ground_friction}", flush=True)
         box = TetraBox(
             size=(self.length, self.width, self.height),
             subdivisions=self.subdivisions,
@@ -239,6 +239,7 @@ class Example:
             np.full(self.model.particle_count, 0.008), dtype=wp.float32, device=self.model.device
         )
 
+        ground_plane = (0.0, 0.0, 1.0, 0.0)
         self.solver = SolverInflatable(
             model=self.model,
             dt=self.sim_dt,
@@ -256,6 +257,8 @@ class Example:
             handle_self_contact=True,  # prevent worm body from passing through itself when bending
             self_contact_radius=0.025,  # slightly larger to catch thin body folds
             self_contact_stiffness=2.0e5,  # stiffer to resist sharp bends
+            ground_plane=ground_plane,
+            ground_mu=ground_friction,
         )
         tet_chamber_mask = wp.array(tet_chamber_mask_np, dtype=wp.int32, device=self.model.device)
         spring_chamber_mask = wp.array(np.array(spring_chamber_list, dtype=np.int32), dtype=wp.int32, device=self.model.device)
@@ -390,16 +393,16 @@ def main():
     parser.add_argument("--stiff_axes", type=str, default="x", help="Single axis that stays straight: x, y, or z (torque on whole object)")
     worm_geom = parser.add_argument_group("Worm geometry (size and subdivisions)")
     worm_geom.add_argument("--length", type=float, default=1.0, help="Worm length (X size, meters)")
-    worm_geom.add_argument("--width", type=float, default=1.5, help="Worm width (Y size, meters)")
+    worm_geom.add_argument("--width", type=float, default=2.0, help="Worm width (Y size, meters)")
     worm_geom.add_argument("--height", type=float, default=0.1, help="Worm height (Z size, meters)")
     worm_geom.add_argument("--subdivisions_x", type=int, default=10, help="Mesh subdivisions along length (X)")
-    worm_geom.add_argument("--subdivisions_y", type=int, default=15, help="Mesh subdivisions along width (Y)")
+    worm_geom.add_argument("--subdivisions_y", type=int, default=30, help="Mesh subdivisions along width (Y)")
     worm_geom.add_argument("--subdivisions_z", type=int, default=4, help="Mesh subdivisions along height (Z)")
     parser.add_argument("--num_chambers_x", type=int, default=1)
     parser.add_argument("--num_chambers_y", type=int, default=2)
     parser.add_argument("--num_chambers_z", type=int, default=2)
     parser.add_argument("--initial_height", type=float, default=0.3)
-    parser.add_argument("--mass", type=float, default=1.0)
+    parser.add_argument("--mass", type=float, default=1.0, help="From example 12 (disabled_chambers)")
     parser.add_argument("--k_mu", type=float, default=1.0e5)
     parser.add_argument("--k_lambda", type=float, default=1.0e5)
     parser.add_argument("--k_damp", type=float, default=1.0)
@@ -408,7 +411,7 @@ def main():
     parser.add_argument("--gravity", type=float, default=9.81)
     parser.add_argument("--max_pressure", type=float, default=5.0)
     parser.add_argument("--anisotropy_x", type=float, default=1.2)
-    parser.add_argument("--anisotropy_y", type=float, default=1.4)
+    parser.add_argument("--anisotropy_y", type=float, default=1.2)
     parser.add_argument("--anisotropy_z", type=float, default=1.2)
     parser.add_argument("--torque_stiffness", type=float, default=100.0)
     parser.add_argument("--torque_damping", type=float, default=2.0)
@@ -423,7 +426,7 @@ def main():
         "--ground_friction",
         type=float,
         default=0.8,
-        help="Ground friction coefficient mu (0=slippery, 0.8=default for stick-slip, ~1=high grip). Use e.g. 0.1 for slippery.",
+        help="Ground friction (from example 12). Use e.g. 0.1 for slippery.",
     )
     parser.add_argument("--substeps", type=int, default=5)
     parser.add_argument("--num_frames", type=int, default=14400)

@@ -270,7 +270,12 @@ class SolverInflatable(SolverDeformable):
             Initial volume of the soft body
         """
         if self._initial_volume is None:
-            self._initial_volume = self.compute_volume(state)
+            vol = self.compute_volume(state)
+            # Only cache if sensible (avoids caching 0 or garbage from uninitialized state)
+            if np.isfinite(vol) and vol > 1.0e-12:
+                self._initial_volume = vol
+            else:
+                return 1.0  # fallback so ratio = current/1.0 and can be clamped
         return self._initial_volume
     
     def get_volume_ratio(self, state: State) -> float:
@@ -285,14 +290,20 @@ class SolverInflatable(SolverDeformable):
         Returns
         -------
         float
-            Current volume / initial volume
+            Current volume / initial volume (clamped to sane range)
         """
         initial = self.get_initial_volume(state)
-        if initial <= 0.0:
+        # Guard against zero or denormal initial (uninitialized or bad state)
+        if initial <= 1.0e-12:
             return 1.0
-        ratio = self.compute_volume(state) / initial
+        current = self.compute_volume(state)
+        if not np.isfinite(current) or current <= 0.0:
+            return 1.0
+        ratio = current / initial
         if not np.isfinite(ratio):
             return 1.0
+        # Clamp to sane range to avoid garbage (e.g. 1e18 from bad initial)
+        ratio = float(np.clip(ratio, 0.0, max(10.0, self.max_volume_ratio * 2.0)))
         return ratio
     
     def set_chamber_mask(

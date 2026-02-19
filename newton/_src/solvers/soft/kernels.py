@@ -874,15 +874,22 @@ def eval_particle_ground_contacts(
     particle_x: wp.array(dtype=wp.vec3),
     particle_v: wp.array(dtype=wp.vec3),
     particle_radius: wp.array(dtype=float),
+    particle_inv_mass: wp.array(dtype=float),
     particle_flags: wp.array(dtype=wp.int32),
     ke: float,
     kd: float,
     kf: float,
     mu: float,
     ground: wp.array(dtype=float),
+    gravity_magnitude: float,
     f: wp.array(dtype=wp.vec3),
 ):
-    """Evaluate particle-ground contact forces."""
+    """Particle-ground contact: normal prevents interpenetration (no jump up); Coulomb friction (slide when |f_t| > mu*N).
+
+    Coulomb law: |f_tangent| <= mu * N with N = normal contact force. Use N_eff = min(|f_n|, m*g)
+    so the effective normal force for friction is at most the weight that particle can support;
+    with stiff penalty (large ke), |f_n| can be huge, so capping by m*g keeps sliding possible.
+    """
     tid = wp.tid()
     if (particle_flags[tid] & PARTICLE_FLAG_ACTIVE) == 0:
         return
@@ -890,6 +897,7 @@ def eval_particle_ground_contacts(
     x = particle_x[tid]
     v = particle_v[tid]
     radius = particle_radius[tid]
+    inv_m = particle_inv_mass[tid]
 
     n = wp.vec3(ground[0], ground[1], ground[2])
     c = wp.min(wp.dot(n, x) + ground[3] - radius, 0.0)
@@ -910,7 +918,12 @@ def eval_particle_ground_contacts(
     if vs > 0.0:
         vt = vt / vs
 
-    ft = wp.min(vs * kf, mu * wp.abs(fn))
+    # Coulomb: |f_t| <= mu * N. N_eff = min(|f_n|, m*g) so friction cap is physical (weight-supported).
+    inv_m_safe = wp.max(inv_m, 1e-9)  # avoid div by zero when both wp.where branches are evaluated
+    m = wp.where(inv_m > 0.0, 1.0 / inv_m_safe, 0.0)
+    n_cap = m * gravity_magnitude
+    fn_eff = wp.min(wp.abs(fn), n_cap)
+    ft = wp.min(vs * kf, mu * fn_eff)
 
     f[tid] = f[tid] - n * fn - vt * ft
 
@@ -1122,12 +1135,10 @@ def solve_soft_contacts_constraint(
     if denom == 0.0:
         return
     
-    # Friction cap: use at least 1*radius effective penetration so shallow contacts get grip.
-    # XPBD and semi_implicit use mu*lambda_n / mu*c*ke; shallow contact => tiny cap => sliding.
-    # VBD uses normal_contact_force (can be large); we approximate that with a penetration floor.
+    # Coulomb friction in constraint form: tangential correction limited by mu * (normal correction).
+    # penetration = normal correction magnitude; friction_cap = mu * penetration (no arbitrary floor).
     penetration = wp.max(-lambda_n, 0.0)
-    effective_penetration = wp.max(penetration, 1.0 * particle_radius[particle_index])
-    friction_cap = mu * effective_penetration
+    friction_cap = mu * penetration
     lambda_f = wp.max(-friction_cap, -wp.length(vt) * dt)
     if wp.length(vt) > 1e-6:
         delta_f = wp.normalize(vt) * lambda_f

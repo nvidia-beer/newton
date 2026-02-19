@@ -59,6 +59,7 @@ examples = [
     "GitPython>=3.1.44",    # for downloading assets via newton.utils.download_asset()
     "imgui_bundle>=1.92.0", # for viewer GUI
     "pyyaml>=6.0.2",
+    "matplotlib>=3.8.0",    # for inchworm GIF rendering (render_inchworm_gif.py)
 ]
 
 # Extra dependency needed to run examples that inference an RL policy

@@ -114,6 +114,7 @@ Supported Features
 from ._src.solvers import (
     SolverBase,
     SolverBend,
+    SolverCrawlable,
     SolverDeformable,
     SolverFeatherstone,
     SolverImplicitMPM,
@@ -137,6 +138,7 @@ from ._src.solvers import (
 __all__ = [
     "SolverBase",
     "SolverBend",
+    "SolverCrawlable",
     "SolverDeformable",
     "SolverFeatherstone",
     "SolverImplicitMPM",
