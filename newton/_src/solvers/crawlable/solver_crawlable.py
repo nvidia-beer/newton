@@ -8,21 +8,27 @@ from __future__ import annotations
 import numpy as np
 import warp as wp
 
+from warp.optim.linear import preconditioner
+
 from newton._src.sim import Contacts, Control, Model, State
 from newton._src.solvers.inflatable import SolverInflatable
 from newton._src.solvers.soft.kernels import eval_particle_ground_contacts
 
+# Defaults from paper Table I; override via set_gait_params(M=..., L=..., ...).
+_DEFAULT_M = 0.052  # kg
+_DEFAULT_L = 0.120  # m
+_DEFAULT_BETA = 2.0
+_DEFAULT_K = 0.1677  # Nm/rad
+_DEFAULT_MU = 0.389
+_DEFAULT_G = 9.81
+# Dimensionless k/(M·g·L) from paper; when use_paper_ratios we set k = this * M * g * L.
+_K_OVER_MGL = 0.1677 / (0.052 * 9.81 * 0.120)
+
 from .paper_model import (
-    PAPER_BETA,
-    PAPER_G,
-    PAPER_K,
-    PAPER_L,
-    PAPER_M,
-    PAPER_MU,
     compute_d,
     compute_l,
     compute_theta,
-    crawl_state_step,
+    crawl_state_step_simple,
     joint_angles_from_positions,
 )
 from .kernels_crawlable import (
@@ -51,34 +57,39 @@ class SolverCrawlable(SolverInflatable):
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._crawl_enabled = False
         self._crawl_left_indices: list[int] | None = None
         self._crawl_right_indices: list[int] | None = None
+        super().__init__(*args, **kwargs)
+        self._crawl_enabled = False
         self._crawl_left_joint_indices: list[int] | None = None
         self._crawl_right_joint_indices: list[int] | None = None
         self._crawl_particle_in_left: wp.array | None = None
         self._crawl_particle_in_right: wp.array | None = None
         self._crawl_d_prev = 0.0
-        self._crawl_state: str = "STICK_STICK"
-        self._crawl_slip_direction = 1
         self._crawl_time = 0.0
         self._crawl_gamma = np.pi / 2.0
         self._crawl_A = np.pi / 6.0
         self._crawl_omega = 2.0 * np.pi * 0.1
         self._crawl_psi = np.pi / 4.0
-        self._crawl_k = PAPER_K
+        self._crawl_k = _DEFAULT_K
         self._crawl_M: float | None = None
         self._crawl_L: float | None = None
-        self._crawl_beta = PAPER_BETA
-        self._crawl_mu = PAPER_MU
-        self._crawl_g = PAPER_G
+        self._crawl_beta = _DEFAULT_BETA
+        self._crawl_mu = _DEFAULT_MU
+        self._crawl_g = _DEFAULT_G
         self._crawl_axis = 0
-        self._crawl_use_full_state_machine = True
         self._crawl_slip_force_scale = 1.0
         self._crawl_direction = 1.0  # +1 = Y+ (or +X if axis 0), -1 = Y- (or -X)
         self._crawl_last_slip_leg: int = 2  # 0=left slip, 1=right slip, 2=both stick
         self._crawl_apply_kinematic_disp: bool = True  # apply paper's ±Δd position update when slipping
+        self._crawl_last_fn_left_raw: float = 0.0  # sum F·n left (for CSV only)
+        self._crawl_last_fn_right_raw: float = 0.0  # sum F·n right (for CSV only)
+        self._crawl_last_ft_signed: float = 0.0  # tangential force for CSV (Fig. 6)
+        self._crawl_last_slip_dir: int | None = None  # ±1; hysteresis when d_dot ≈ 0 to avoid single-frame flips
+        self._crawl_phase_in_cycle: float | None = None  # 0..1 for min-dwell (set by example before step)
+        self._crawl_last_flip_phase: float | None = None  # phase when slip_dir last changed
+        self._crawl_phi1_prev: float | None = None  # previous step joint angles for ḋ from angular velocities
+        self._crawl_phi2_prev: float | None = None
         # Paper: Δ = x_c − d/2; when Δ=0 switching occurs (equal f_n). When flat (φ₁=φ₂=π), Δ=0.
         self._crawl_kick_min_bend: float = 0.08  # rad; when max|φ−π| < this, treat as stick-stick (Δ≈0), no slip force/displacement
 
@@ -108,12 +119,19 @@ class SolverCrawlable(SolverInflatable):
         self._crawl_particle_in_right = wp.array(in_right, dtype=wp.int32, device=model.device)
         self._crawl_enabled = True
         self._crawl_d_prev = 0.0
-        self._crawl_state = "STICK_STICK"
-        self._crawl_slip_direction = 1
+        self._crawl_last_slip_dir = None
+        self._crawl_phase_in_cycle = None
+        self._crawl_last_flip_phase = None
+        self._crawl_phi1_prev = None
+        self._crawl_phi2_prev = None
 
     def set_crawl_time(self, t: float) -> None:
         """Set current time for gait reference angles (call before each step)."""
         self._crawl_time = t
+
+    def set_crawl_phase(self, phase_0_to_1: float) -> None:
+        """Set phase in current cycle (0..1) for min-dwell; call before each step to avoid ft chattering."""
+        self._crawl_phase_in_cycle = float(phase_0_to_1)
 
     def set_gait_params(
         self,
@@ -122,18 +140,22 @@ class SolverCrawlable(SolverInflatable):
         omega: float | None = None,
         psi: float = np.pi / 4.0,
         freq_hz: float | None = None,
-        k: float = PAPER_K,
-        M: float = PAPER_M,
-        L: float = PAPER_L,
-        beta: float = PAPER_BETA,
-        mu: float = PAPER_MU,
-        g: float = PAPER_G,
+        k: float | None = None,
+        M: float = _DEFAULT_M,
+        L: float = _DEFAULT_L,
+        beta: float = _DEFAULT_BETA,
+        mu: float = _DEFAULT_MU,
+        g: float = _DEFAULT_G,
         crawl_axis: int = 0,
-        use_full_state_machine: bool = True,
         slip_force_scale: float = 1.0,
         crawl_direction: float = 1.0,
+        use_paper_ratios: bool = True,
+        contact_constraint_stiffness: float = 0.0,
     ) -> None:
-        """Set paper gait and physical parameters. crawl_direction: +1 = move toward +crawl_axis (e.g. Y+), -1 = toward -axis (e.g. Y-)."""
+        """Set paper gait and physical parameters. L = total length along crawl axis (mesh extent).
+        If use_paper_ratios is True (default), k is set from the paper ratio k/(M·g·L) so dynamics match at any scale.
+        crawl_direction: +1 = toward +crawl_axis, -1 = toward -axis.
+        contact_constraint_stiffness: if > 0, add implicit (matrix) penalty so left and right contact mean height match (paper Eq. 2)."""
         self._crawl_gamma = gamma
         self._crawl_A = A
         if omega is not None:
@@ -141,16 +163,19 @@ class SolverCrawlable(SolverInflatable):
         elif freq_hz is not None:
             self._crawl_omega = 2.0 * np.pi * freq_hz
         self._crawl_psi = psi
-        self._crawl_k = k
+        if use_paper_ratios:
+            self._crawl_k = _K_OVER_MGL * M * g * L
+        else:
+            self._crawl_k = k if k is not None else _DEFAULT_K
         self._crawl_M = M
         self._crawl_L = L
         self._crawl_beta = beta
         self._crawl_mu = mu
         self._crawl_g = g
         self._crawl_axis = crawl_axis
-        self._crawl_use_full_state_machine = use_full_state_machine
         self._crawl_slip_force_scale = max(0.01, float(slip_force_scale))
         self._crawl_direction = 1.0 if float(crawl_direction) >= 0 else -1.0
+        self._crawl_contact_constraint_stiffness = max(0.0, float(contact_constraint_stiffness))
 
     def eval_particle_ground_contact_forces(self, model: Model, control: Control, state: State):
         """Ground contact: paper stick-slip when crawl enabled, else default Coulomb."""
@@ -181,29 +206,32 @@ class SolverCrawlable(SolverInflatable):
             crawl_axis=self._crawl_axis, vertical_axis=2,
         )
 
-        M = self._crawl_M if self._crawl_M is not None else getattr(self, "mass", PAPER_M)
-        L = self._crawl_L if self._crawl_L is not None else PAPER_L
+        M = self._crawl_M if self._crawl_M is not None else getattr(self, "mass", _DEFAULT_M)
+        L = self._crawl_L if self._crawl_L is not None else _DEFAULT_L
         dt = getattr(self, "_step_dt", 1.0 / 60.0)
+        period = (2.0 * np.pi) / self._crawl_omega if self._crawl_omega > 1e-12 else None
 
-        if self._crawl_use_full_state_machine:
-            state_out, ft_mag, slip_dir, d = crawl_state_step(
-                phi1, phi2,
-                self._crawl_d_prev, dt, self._crawl_time,
-                self._crawl_state, self._crawl_slip_direction,
-                M=M, L=L, beta=self._crawl_beta, k=self._crawl_k,
-                mu=self._crawl_mu, g=self._crawl_g,
-                gamma=self._crawl_gamma, A=self._crawl_A,
-                omega=self._crawl_omega, psi=self._crawl_psi,
-            )
-            self._crawl_state = state_out
-            self._crawl_slip_direction = slip_dir
-        else:
-            from .paper_model import crawl_state_step_simple
-            state_out, ft_mag, slip_dir, d = crawl_state_step_simple(
-                phi1, phi2, self._crawl_d_prev, dt,
-                M=M, L=L, beta=self._crawl_beta, mu=self._crawl_mu, g=self._crawl_g,
-            )
+        # Use angular velocities for ḋ so slip_dir flips once per half-cycle (ft shows one rectangle per cycle).
+        phi1_dot = (phi1 - self._crawl_phi1_prev) / dt if self._crawl_phi1_prev is not None else None
+        phi2_dot = (phi2 - self._crawl_phi2_prev) / dt if self._crawl_phi2_prev is not None else None
+
+        state_out, ft_signed, slip_dir, d, fn1, fn2, flip_occurred = crawl_state_step_simple(
+            phi1, phi2, self._crawl_d_prev, dt,
+            M=M, L=L, beta=self._crawl_beta, mu=self._crawl_mu, g=self._crawl_g,
+            phi1_dot=phi1_dot,
+            phi2_dot=phi2_dot,
+            previous_slip_dir=self._crawl_last_slip_dir,
+            period=period,
+            phase_in_cycle=getattr(self, "_crawl_phase_in_cycle", None),
+            last_flip_phase=getattr(self, "_crawl_last_flip_phase", None),
+            min_dwell_phase=0.05,
+        )
         self._crawl_d_prev = d
+        self._crawl_phi1_prev = float(phi1)
+        self._crawl_phi2_prev = float(phi2)
+        self._crawl_last_slip_dir = slip_dir
+        if flip_occurred and self._crawl_phase_in_cycle is not None:
+            self._crawl_last_flip_phase = self._crawl_phase_in_cycle
 
         if state_out == "STICK_STICK":
             slip_leg = 2
@@ -219,8 +247,9 @@ class SolverCrawlable(SolverInflatable):
         min_bend = getattr(self, "_crawl_kick_min_bend", 0.08)
         if bend < min_bend:
             slip_leg = 2
-            ft_mag = 0.0
+            ft_signed = 0.0
 
+        ft_mag = abs(ft_signed)
         g = self._get_gravity_vec3(model)
         gravity_mag = float((g[0] ** 2 + g[1] ** 2 + g[2] ** 2) ** 0.5)
         if gravity_mag < 1e-9:
@@ -228,6 +257,12 @@ class SolverCrawlable(SolverInflatable):
 
         self._crawl_last_slip_leg = slip_leg
         self._crawl_apply_kinematic_disp = (slip_leg != 2 and bend >= min_bend)
+        # CSV "ft" column: discrete slip direction from model (-1, 0, 1). Log model slip_dir so plot shows waveform
+        # even when we force stick-stick for flat worm (slip_leg=2); use 0 only when model says stick-stick.
+        self._crawl_last_ft_signed = float(slip_dir) if state_out != "STICK_STICK" else 0.0
+
+        # Paper: f_t = μ f_{n,s} sign(ḋ); apply force in slip direction (sign(d_dot)) × crawl axis
+        slip_direction_sign = float(slip_dir * self._crawl_direction)
 
         forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
         wp.launch(
@@ -249,7 +284,7 @@ class SolverCrawlable(SolverInflatable):
                 gravity_mag,
                 slip_leg,
                 float(ft_mag),
-                float(self._crawl_direction),
+                slip_direction_sign,
                 n_left,
                 n_right,
                 self._crawl_axis,
@@ -258,6 +293,23 @@ class SolverCrawlable(SolverInflatable):
             outputs=[forces],
             device=model.device,
         )
+        # Sum F·n per group (raw normal force magnitude) for CSV logging.
+        if hasattr(self._ground_plane, "numpy"):
+            plane = np.array(self._ground_plane.numpy(), dtype=np.float64)
+        else:
+            plane = np.array(self._ground_plane, dtype=np.float64)
+        n_vec = np.array([float(plane[0]), float(plane[1]), float(plane[2])], dtype=np.float64)
+        n_sq = float(np.dot(n_vec, n_vec))
+        if n_sq < 1e-18:
+            n_vec = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            n_sq = 1.0
+        forces_np = np.array(forces.numpy(), dtype=np.float64)
+        if forces_np.ndim == 1:
+            forces_np = forces_np.reshape(-1, 3)
+        fn_left_raw = sum(float(np.dot(forces_np[i], n_vec)) for i in left_idx) / n_sq
+        fn_right_raw = sum(float(np.dot(forces_np[i], n_vec)) for i in right_idx) / n_sq
+        self._crawl_last_fn_left_raw = float(fn_left_raw)
+        self._crawl_last_fn_right_raw = float(fn_right_raw)
         return forces
 
     def _eval_default_ground_forces(self, model: Model, state: State):
@@ -289,7 +341,7 @@ class SolverCrawlable(SolverInflatable):
         return forces
 
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
-        """Same as parent; when crawl enabled, apply paper kinematic displacement ±Δd then optional velocity kick."""
+        """Same as parent; when crawl enabled, apply paper kinematic displacement ±Δd."""
         self._step_dt = dt
         state_out = super().step(state_in, state_out, control, contacts, dt)
 
@@ -323,6 +375,16 @@ class SolverCrawlable(SolverInflatable):
                 )
         return state_out
 
+    def get_crawl_contact_forces(self) -> tuple[float, float, float] | None:
+        """
+        Return (fn_left_raw, fn_right_raw, ft_signed) from the last ground-contact evaluation.
+        Raw normal force sums (F·n) per foot and tangential force [N]; for CSV logging (Fig. 6).
+        Returns None if crawl contact is not enabled.
+        """
+        if not self._crawl_enabled:
+            return None
+        return (self._crawl_last_fn_left_raw, self._crawl_last_fn_right_raw, self._crawl_last_ft_signed)
+
     def _crawl_d_from_state(self, state: State) -> float:
         """Contact distance d from current geometry (paper formula)."""
         q = state.particle_q.numpy()
@@ -336,8 +398,8 @@ class SolverCrawlable(SolverInflatable):
             left_contact, left_joint, right_joint, right_contact,
             crawl_axis=self._crawl_axis, vertical_axis=2,
         )
-        M = self._crawl_M if self._crawl_M is not None else PAPER_M
-        L = self._crawl_L if self._crawl_L is not None else PAPER_L
+        M = self._crawl_M if self._crawl_M is not None else _DEFAULT_M
+        L = self._crawl_L if self._crawl_L is not None else _DEFAULT_L
         beta = self._crawl_beta
         l = compute_l(M, L, beta)
         theta = compute_theta(phi1, phi2, beta)

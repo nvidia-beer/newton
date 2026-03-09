@@ -39,7 +39,11 @@ import numpy as np
 import newton
 from newton.solvers import SolverInflatable, TetraBox
 
-from newton.examples.crawlable.inchworm import InchwormValidation, get_paper_metrics
+from newton.examples.crawlable.inchworm import (
+    InchwormValidation,
+    angles_and_contacts_from_metrics,
+    get_paper_metrics,
+)
 
 
 def _chamber_index(ix: int, iy: int, iz: int, nx: int, ny: int, nz: int, disabled: set) -> int:
@@ -711,12 +715,15 @@ class Example:
                         self._joint_right_indices or [],
                     )
                     if validation.is_logging:
+                        phi1_deg, phi2_deg, x1_mm, x2_mm = angles_and_contacts_from_metrics(m)
                         validation.log_row(
                             frame, self.sim_time,
                             m["y_left_ground"], m["z_left_ground"],
                             m["y_right_ground"], m["z_right_ground"],
                             m["y_link_left"], m["z_link_left"],
                             m["y_link_right"], m["z_link_right"],
+                            t_norm=None, phi1_deg=phi1_deg, phi2_deg=phi2_deg, x1_mm=x1_mm, x2_mm=x2_mm,
+                            fn_left_raw=None, fn_right_raw=None, ft=None,
                         )
                     else:
                         vol_ratio = self.solver.get_volume_ratio(self.state_0)

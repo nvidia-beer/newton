@@ -393,6 +393,8 @@ def main():
                     print(f"Rerun viewer failed: {e2}")
                     viewer = None
         nch = loaded["num_chambers_x"] * loaded["num_chambers_y"] * loaded["num_chambers_z"]
+        # Paper (Gamus et al.) three-link model: joints at 1/(2+β) and (1+β)/(2+β) along crawl axis.
+        paper_beta = loaded.get("paper_beta", 2.0)
         example = Example(
             viewer=viewer,
             sand=not args.no_sand,
@@ -438,6 +440,7 @@ def main():
             stick_slip_scale=loaded["stick_slip_scale"],
             stick_slip_amplitude=loaded["stick_slip_amplitude"],
             crawl_direction=loaded["crawl_direction"],
+            paper_beta=paper_beta,
         )
         csv_path = InchwormValidation.csv_log_path(loaded.get("csv_log"), loaded.get("csv_log_dir"))
         example.run(

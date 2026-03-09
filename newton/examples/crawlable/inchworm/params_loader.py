@@ -16,8 +16,9 @@ import os
 from typing import Any
 
 # Keys accepted in the params JSON (same as Example __init__ + run kwargs).
-# Order and presence here define what we save; extra keys in JSON are ignored when applying.
+# paper_beta = paper dimensionless shape parameter β; joint fractions 1/(2+β), (1+β)/(2+β).
 INCHWORM_PARAM_KEYS = [
+    "paper_beta",
     "length",
     "width",
     "height",

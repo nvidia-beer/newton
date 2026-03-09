@@ -38,12 +38,42 @@ def _arr_to_str(arr: list[float]) -> str:
     return " ".join(str(_round5(x)) for x in arr)
 
 
-# frame, t, then 4 arrays: left_ground, right_ground, link_left, link_right (y and z each = space-separated).
+# frame, t, t_norm (= gait_time/period, so 0..1 = 1st cycle, 1..2 = 2nd, etc.), then angles/contacts, contact forces, 4 arrays.
+# Plot scripts (fig4, fig6) use last full cycle.
 CSV_HEADER = [
-    "frame", "t",
+    "frame", "t", "t_norm",
+    "phi1_deg", "phi2_deg", "x1_mm", "x2_mm",
+    "fn_left_raw", "fn_right_raw", "ft",
     "y_left_ground", "z_left_ground", "y_right_ground", "z_right_ground",
     "y_link_left", "z_link_left", "y_link_right", "z_link_right",
 ]
+
+
+def _pt(y_arr: list[float], z_arr: list[float]) -> tuple[float, float]:
+    if not y_arr or not z_arr:
+        return 0.0, 0.0
+    return float(np.mean(y_arr)), float(min(z_arr))
+
+
+def angles_and_contacts_from_metrics(m: dict[str, Any]) -> tuple[float, float, float, float]:
+    """From get_paper_metrics output compute phi1_deg, phi2_deg, x1_mm, x2_mm (same convention as plot)."""
+    y1, z1 = _pt(m.get("y_left_ground", []), m.get("z_left_ground", []))
+    y2, z2 = _pt(m.get("y_link_left", []), m.get("z_link_left", []))
+    y3, z3 = _pt(m.get("y_link_right", []), m.get("z_link_right", []))
+    y4, z4 = _pt(m.get("y_right_ground", []), m.get("z_right_ground", []))
+    # Interior angles φ1, φ2 (rad) from 4 points
+    v1x, v1y = y2 - y1, z2 - z1
+    v2x, v2y = y3 - y2, z3 - z2
+    n1 = (v1x * v1x + v1y * v1y) ** 0.5
+    n2 = (v2x * v2x + v2y * v2y) ** 0.5
+    phi1 = np.pi if (n1 < 1e-12 or n2 < 1e-12) else np.pi - np.arccos(np.clip((v1x * v2x + v1y * v2y) / (n1 * n2), -1.0, 1.0))
+    w1x, w1y = y3 - y2, z3 - z2
+    w2x, w2y = y4 - y3, z4 - z3
+    nw1, nw2 = (w1x * w1x + w1y * w1y) ** 0.5, (w2x * w2x + w2y * w2y) ** 0.5
+    phi2 = np.pi if (nw1 < 1e-12 or nw2 < 1e-12) else np.pi - np.arccos(np.clip((w1x * w2x + w1y * w2y) / (nw1 * nw2), -1.0, 1.0))
+    x1_mm = y1 * 1000.0
+    x2_mm = y4 * 1000.0
+    return float(np.degrees(phi1)), float(np.degrees(phi2)), x1_mm, x2_mm
 
 
 class InchwormValidation:
@@ -85,18 +115,35 @@ class InchwormValidation:
         z_link_left: list[float],
         y_link_right: list[float],
         z_link_right: list[float],
+        t_norm: float | None = None,
+        phi1_deg: float | None = None,
+        phi2_deg: float | None = None,
+        x1_mm: float | None = None,
+        x2_mm: float | None = None,
+        fn_left_raw: float | None = None,
+        fn_right_raw: float | None = None,
+        ft: float | None = None,
     ) -> None:
-        """Write one row: frame, t, and the 4 arrays (space-separated)."""
+        """Write one row: frame, t, t_norm, angles/contacts, fn_left_raw/fn_right_raw/ft, and the 4 arrays."""
         if self._writer is None:
             return
-        self._writer.writerow([
+        row = [
             frame,
             round(sim_time, 4),
+            _round5(t_norm) if t_norm is not None else "",
+            _round5(phi1_deg) if phi1_deg is not None else "",
+            _round5(phi2_deg) if phi2_deg is not None else "",
+            _round5(x1_mm) if x1_mm is not None else "",
+            _round5(x2_mm) if x2_mm is not None else "",
+            _round5(fn_left_raw) if fn_left_raw is not None else "",
+            _round5(fn_right_raw) if fn_right_raw is not None else "",
+            _round5(ft) if ft is not None else "",
             _arr_to_str(y_left_ground), _arr_to_str(z_left_ground),
             _arr_to_str(y_right_ground), _arr_to_str(z_right_ground),
             _arr_to_str(y_link_left), _arr_to_str(z_link_left),
             _arr_to_str(y_link_right), _arr_to_str(z_link_right),
-        ])
+        ]
+        self._writer.writerow(row)
         if self._file is not None:
             self._file.flush()
 

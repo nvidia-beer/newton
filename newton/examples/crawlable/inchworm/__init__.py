@@ -6,6 +6,7 @@
 from .paper import (
     CSV_HEADER,
     InchwormValidation,
+    angles_and_contacts_from_metrics,
     get_paper_metrics,
 )
 from .params_loader import (
@@ -18,6 +19,7 @@ __all__ = [
     "CSV_HEADER",
     "INCHWORM_PARAM_KEYS",
     "InchwormValidation",
+    "angles_and_contacts_from_metrics",
     "get_paper_metrics",
     "load_params",
     "save_params",

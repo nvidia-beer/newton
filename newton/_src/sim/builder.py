@@ -3050,15 +3050,26 @@ class ModelBuilder:
                 if last_dynamic_body > -1:
                     source_m = body_data[last_dynamic_body]["mass"]
                     source_com = body_data[last_dynamic_body]["com"]
+                    source_com_v = (
+                        wp.vec3(source_com[0], source_com[1], source_com[2])
+                        if not isinstance(source_com, wp.vec3)
+                        else source_com
+                    )
                     # add inertia to last_dynamic_body
                     m = body_data[child_body]["mass"]
-                    com = wp.transform_point(incoming_xform, body_data[child_body]["com"])
+                    child_com = body_data[child_body]["com"]
+                    child_com_v = (
+                        wp.vec3(child_com[0], child_com[1], child_com[2])
+                        if not isinstance(child_com, wp.vec3)
+                        else child_com
+                    )
+                    com = wp.transform_point(incoming_xform, child_com_v)
                     inertia = body_data[child_body]["inertia"]
                     body_data[last_dynamic_body]["inertia"] += transform_inertia(
                         m, inertia, incoming_xform.p, incoming_xform.q
                     )
                     body_data[last_dynamic_body]["mass"] += m
-                    body_data[last_dynamic_body]["com"] = (m * com + source_m * source_com) / (m + source_m)
+                    body_data[last_dynamic_body]["com"] = (m * com + source_m * source_com_v) / (m + source_m)
                     # indicate to recompute inverse mass, inertia for this body
                     body_data[last_dynamic_body]["inv_mass"] = None
             else:

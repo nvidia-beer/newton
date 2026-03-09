@@ -33,6 +33,8 @@ rspec.xml
 # Documentation
 docs/_build/
 docs/api/_generated/
+newton/documentation/figures/
+newton/documentation/build/
 
 # Airspeed Velocity
 asv/env
@@ -44,7 +46,11 @@ MUJOCO_LOG.TXT
 imgui.ini
 newton/tests/outputs/
 
-#  CSV logs, GIFs, PDFs (all such files)
+# CSV logs, GIFs, PDFs (all such files)
 *.csv
 *.gif
 *.pdf
+
+# Crawlable inchworm example outputs (plots, renders)
+newton/examples/crawlable/inchworm/*.gif
+newton/examples/crawlable/inchworm/*.png

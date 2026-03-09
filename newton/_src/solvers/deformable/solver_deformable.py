@@ -60,6 +60,7 @@ class SolverDeformable(SolverSoft):
         vertex_collision_buffer_pre_alloc: int = 8,
         edge_collision_buffer_pre_alloc: int = 8,
         edge_edge_parallel_epsilon: float = 1.0e-5,
+        extra_matrix_blocks: int | None = None,
     ):
         """
         Args:
@@ -76,7 +77,8 @@ class SolverDeformable(SolverSoft):
             edge_collision_buffer_pre_alloc: Per-edge collision buffer size for BVH detection.
             edge_edge_parallel_epsilon: Epsilon for near-parallel edge handling in edge–edge.
         """
-        extra_matrix_blocks = model.particle_count if handle_self_contact else 0
+        if extra_matrix_blocks is None:
+            extra_matrix_blocks = model.particle_count if handle_self_contact else 0
         super().__init__(
             model=model,
             dt=dt,

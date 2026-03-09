@@ -34,13 +34,14 @@ from newton.solvers import SolverCrawlable, TetraBox
 
 # Inchworm package (validation/metrics); params JSON next to crawlable examples
 _this_dir = os.path.dirname(os.path.abspath(__file__))
-from newton.examples.crawlable.inchworm import InchwormValidation, get_paper_metrics
+from newton.examples.crawlable.inchworm import InchwormValidation, angles_and_contacts_from_metrics, get_paper_metrics
 
 # Params loader inlined so the example works without inchworm.params_loader (e.g. in Docker)
 import json
 from typing import Any
 
 INCHWORM_PARAM_KEYS = [
+    "paper_beta",
     "length", "width", "height",
     "subdivisions_x", "subdivisions_y", "subdivisions_z",
     "num_chambers_x", "num_chambers_y", "num_chambers_z",
@@ -53,7 +54,7 @@ INCHWORM_PARAM_KEYS = [
     "gait_enabled", "gait_freq", "gait_amplitude", "gait_phase", "gait_baseline",
     "gait_pressure_min", "gait_pressure_max",
     "settle_seconds", "start_at_ground_level",
-    "use_crawlable_stick_slip", "stick_slip_scale", "stick_slip_amplitude", "crawl_direction",
+    "use_crawlable_stick_slip", "stick_slip_scale", "stick_slip_amplitude", "crawl_direction", "contact_constraint_stiffness",
     "num_frames", "validate_contact", "stop_on_lost_contact", "csv_log_interval",
 ]
 
@@ -91,19 +92,16 @@ def _chamber_index(ix: int, iy: int, iz: int, nx: int, ny: int, nz: int, disable
 def _bottom_edge_vertex_indices(
     vertices: np.ndarray, height: float, width: float, tol_face: float = 0.001, tol_y: float = 0.001
 ) -> tuple[list[int], list[int]]:
-    """Return (indices of bottom vertices at Y+, indices at Y-) in local frame.
-    Bottom = z <= -height/2 + tol_face; Y+ = y >= width/2 - tol_y; Y- = y <= -width/2 + tol_y."""
-    half_h = height * 0.5
+    """Return (indices of all vertices on Y+ face, all on Y- face) in local frame.
+    The two sides of the box that create friction when it bends. Y+ = y >= width/2 - tol_y;
+    Y- = y <= -width/2 + tol_y. No z filter: whole faces, not only the bottom edge."""
     half_w = width * 0.5
-    bottom_z_max = -half_h + tol_face
     y_plus_min = half_w - tol_y
     y_minus_max = -half_w + tol_y
     y_plus_indices = []
     y_minus_indices = []
     for i in range(len(vertices)):
-        x, y, z = float(vertices[i, 0]), float(vertices[i, 1]), float(vertices[i, 2])
-        if z > bottom_z_max:
-            continue
+        y = float(vertices[i, 1])
         if y >= y_plus_min:
             y_plus_indices.append(i)
         if y <= y_minus_max:
@@ -140,22 +138,25 @@ def _joint_cross_section_vertex_indices_y(
     width: float,
     height: float,
     subdivisions_y: int = 6,
-    tol_z: float = 0.001,
+    tol_face: float = 0.001,
+    paper_beta: float = 2.0,
 ) -> tuple[list[int], list[int]]:
-    """Return (φ1 joint verts, φ2 joint verts) as the top line of verts (Z+ surface) at 1/3 and 2/3 along Y.
-    Same number of verts per joint: one row on the Z+ face at each y position."""
+    """Return (φ1 joint verts, φ2 joint verts) as the bottom line of verts (same base as _bottom_edge_vertex_indices).
+    Bottom = z <= -height/2 + tol_face; then split by Y at paper fractions 1/(2+β) and (1+β)/(2+β) along crawl axis (Y)."""
     half_w = width * 0.5
     half_h = height * 0.5
-    top_z_min = half_h - tol_z
-    y_phi1 = -half_w + width / 3.0   # 1/3 along Y (left joint)
-    y_phi2 = -half_w + 2.0 * width / 3.0  # 2/3 along Y (right joint)
+    bottom_z_max = -half_h + tol_face
+    joint_left_fraction = 1.0 / (2.0 + paper_beta)
+    joint_right_fraction = (1.0 + paper_beta) / (2.0 + paper_beta)
+    y_phi1 = -half_w + width * joint_left_fraction
+    y_phi2 = -half_w + width * joint_right_fraction
     grid_spacing_y = width / max(subdivisions_y, 1)
     tol_y = grid_spacing_y * 0.45
     left_indices = []
     right_indices = []
     for i in range(len(vertices)):
         x, y, z = float(vertices[i, 0]), float(vertices[i, 1]), float(vertices[i, 2])
-        if z < top_z_min:
+        if z > bottom_z_max:
             continue
         if abs(y - y_phi1) <= tol_y:
             left_indices.append(i)
@@ -170,20 +171,43 @@ def _inchworm_contact_and_joint_vertex_indices(
     width: float,
     height: float,
     subdivisions: tuple[int, int, int],
+    paper_beta: float = 2.0,
 ) -> tuple[list[int], list[int], list[int], list[int]]:
     """Compute the 4 vertex index arrays for the inchworm (initialization, once).
     Returns (ground_y_plus, ground_y_minus, joint_phi1, joint_phi2).
-    - Ground (blue): bottom Y+ and Y- edges for contact validation and display.
-    - Joints (green): top line (Z+ surface) at 1/3 and 2/3 along Y; same vert count per joint."""
+    Paper: joints at 1/(2+β) and (1+β)/(2+β) along Y."""
     ground_y_plus, ground_y_minus = _bottom_edge_vertex_indices(vertices, height, width)
     joint_phi1, joint_phi2 = _joint_cross_section_vertex_indices_y(
-        vertices, width, height, subdivisions_y=subdivisions[1]
+        vertices, width, height, subdivisions_y=subdivisions[1], paper_beta=paper_beta
     )
     return (ground_y_plus, ground_y_minus, joint_phi1, joint_phi2)
 
 
 class Example:
-    """Inchworm: two segments along length (paper); inflate top of each (ch1, ch3) → bend down; very stiff."""
+    """Inchworm: two segments along length (paper); inflate top of each (ch1, ch3) → bend down; very stiff.
+
+    Changing the angles of the soft robot (lift the base higher)
+    ---------------------------------------------------------
+    Lifting the base higher means a smaller joint angle (more arch): the middle of the robot
+    rises and the posture is more bent. To achieve this:
+
+    - **CLI (override params file):**
+      Run with e.g. ``--gait_baseline 1.7 --gait_amplitude 0.5``. Higher gait_baseline →
+      more lift; increase further (e.g. 2.0, 2.2) for even higher base. Example:
+      ``run-examples.sh inchworm_crawling --gait_baseline 2.0 --gait_amplitude 0.55``
+
+    - **Params JSON:** Set ``gait_baseline`` and ``gait_amplitude``, or ``gait_pressure_min``
+      and ``gait_pressure_max`` (loader derives baseline/amplitude from the latter). Higher
+      values → more pressure → more bend → higher base (smaller angle).
+
+    - **Other knobs:** Lower ``total_mass`` so the same pressure lifts more; lower
+      ``chamber_stiffness_scale`` for active chambers (ch1, ch3) for softer bend; softer
+      material (lower ``k_mu``/``k_lambda``) gives more deformation per pressure.
+
+    If the middle (belly) sags when both legs are up: the center is chambers 0 and 2
+    (backbone). Increase their ``chamber_stiffness_scale`` (e.g. 35–50) so the belly
+    stays stiff; or increase k_mu/k_lambda so the whole mesh resists sagging.
+    """
 
     def __init__(
         self,
@@ -223,16 +247,20 @@ class Example:
         gait_freq: float = 0.15,
         gait_amplitude: float = 0.80,
         gait_phase: float = 1.57,
-        gait_baseline: float = 1.4,  # higher = more lift; keep moderate to avoid losing ground contact
+        gait_baseline: float = 1.4,  # higher = more lift; see class docstring for smaller joint angles (more lift)
         settle_seconds: float = 1.0,
         start_at_ground_level: bool = True,
         use_crawlable_stick_slip: bool = False,
         stick_slip_scale: float = 1.0,
-        stick_slip_amplitude: float = np.pi / 5.0,
+        stick_slip_amplitude: float = np.pi / 6.0,  # paper range 60–120° (γ=90°, A=π/6)
         crawl_direction: float = 1.0,
+        paper_beta: float = 2.0,
+        contact_constraint_stiffness: float = 0.0,
     ):
+        self.paper_beta = float(paper_beta)
         self.use_crawlable_stick_slip = bool(use_crawlable_stick_slip)
         self.stick_slip_scale = float(stick_slip_scale)
+        self.contact_constraint_stiffness = max(0.0, float(contact_constraint_stiffness))
         self.stick_slip_amplitude = float(stick_slip_amplitude)
         self.crawl_direction = 1.0 if float(crawl_direction) >= 0 else -1.0
         self.fps = 60
@@ -303,6 +331,7 @@ class Example:
             float(self.width),
             float(self.height),
             self.subdivisions,
+            paper_beta=self.paper_beta,
         )
         n_x = self.subdivisions[0]
         print(
@@ -408,14 +437,7 @@ class Example:
 
         self.model = builder.finalize()
 
-        if self.chamber_stiffness_scale is not None:
-            scales = list(self.chamber_stiffness_scale)
-        elif self.chamber_inflation_disabled:
-            # Softer backbone (stiff_scale 15) for very compliant motion; 60 = stiffer.
-            stiff_scale = 15.0
-            scales = [stiff_scale if c in self.chamber_inflation_disabled else 1.0 for c in range(self.total_chambers)]
-        else:
-            scales = None
+        scales = list(self.chamber_stiffness_scale) if self.chamber_stiffness_scale is not None else None
         if scales is not None:
             while len(scales) < self.total_chambers:
                 scales.append(1.0)
@@ -516,23 +538,25 @@ class Example:
                 list(self._joint_left_indices),
                 list(self._joint_right_indices),
             )
-            # Crawl axis 1 = Y; beam length L along Y. Use simple (Δ-only) state machine so one foot
-            # always slips and slip force is applied every step (per guide: motion from slip phase).
+            # Crawl axis 1 = Y; beam length L along Y. use_paper_ratios=True (default) sets k from
+            # paper ratio k/(M·g·L) so dynamics match at any mesh scale. Simple (Δ-only) state machine.
+            # Paper Eq. (2): both feet same height. If > 0, both feet stay in contact (no alternating lift).
+            # Set contact_constraint_stiffness to 0 in params to allow one foot to lift so legs alternate in Fig. 6 improved.
+            k_constraint = float(self.contact_constraint_stiffness)
             self.solver.set_gait_params(
                 gamma=np.pi / 2.0,
                 A=self.stick_slip_amplitude,
                 freq_hz=float(gait_freq),
                 psi=float(gait_phase),
-                k=0.1677,
                 M=total_mass,
                 L=self.width,
-                beta=2.0,
+                beta=self.paper_beta,
                 mu=ground_friction,
                 g=gravity,
                 crawl_axis=1,
-                use_full_state_machine=False,
                 slip_force_scale=self.stick_slip_scale,
                 crawl_direction=self.crawl_direction,
+                contact_constraint_stiffness=k_constraint,
             )
 
         self.state_0 = self.model.state()
@@ -661,6 +685,10 @@ class Example:
             self.contacts = self.model.collide(state=self.state_0)
             if self.use_crawlable_stick_slip:
                 self.solver.set_crawl_time(self.sim_time)
+                period = 1.0 / self.gait_freq if self.gait_freq > 0 else 1.0
+                gait_time = max(0.0, self.sim_time - self.settle_seconds)
+                phase = (gait_time / period) % 1.0 if period > 0 else 0.0
+                self.solver.set_crawl_phase(phase)
             self.solver.step(
                 state_in=self.state_0,
                 state_out=self.state_1,
@@ -680,7 +708,7 @@ class Example:
     def _update_particle_colors_for_contact(self, state):
         """Set particle_colors and particle_display_radius:
         - Bottom Y+/Y-: blue (in contact, larger radius) or hot pink (lost contact).
-        - Joints φ1, φ2 at 1/3 and 2/3 along Y (X-aligned cross-sections): green.
+        - Joints φ1, φ2 at paper fractions 1/(2+β) and (1+β)/(2+β) along Y (X-aligned): green.
         - Rest: default."""
         q = np.array(state.particle_q.numpy(), dtype=np.float64)
         if q.ndim == 1:
@@ -695,7 +723,7 @@ class Example:
         blue = np.array([0.0, 0.4, 1.0], dtype=np.float32)
         hot_pink = np.array([1.0, 0.41, 0.71], dtype=np.float32)
         green = np.array([0.0, 1.0, 0.25], dtype=np.float32)  # bright green for φ1, φ2 joints
-        # Joints at 1/3 and 2/3 along Y, X-aligned (paper Fig. 3 = Y–Z slice)
+        # Joints at paper fractions 1/(2+β), (1+β)/(2+β) along Y, X-aligned (paper Fig. 3 = Y–Z slice)
         for i in self._joint_left_indices:
             colors_np[i] = green
             radii_np[i] = green_radius
@@ -730,7 +758,7 @@ class Example:
 
     def get_joint_vertex_indices(self) -> tuple[list[int], list[int]]:
         """Return (φ1 joint indices, φ2 joint indices) for the three-link model (paper Fig. 3).
-        Paper is Y–Z slice; joints at 1/3 and 2/3 along Y, X-aligned cross-sections. Use for
+        Paper is Y–Z slice; joints at 1/(2+β) and (1+β)/(2+β) along Y (from config paper_beta). Use for
         observations or segment angles; component to the movement like τ1, τ2 in the paper."""
         return (list(self._joint_left_indices), list(self._joint_right_indices))
 
@@ -792,7 +820,7 @@ class Example:
         validate_contact: bool = True,
         stop_on_lost_contact: bool = False,
         csv_log_path: str | None = None,
-        csv_log_interval: int = 10,
+        csv_log_interval: int = 2,
     ):
         validation = InchwormValidation(csv_log_path, log_interval=csv_log_interval)
         had_csv = validation.is_logging
@@ -813,7 +841,7 @@ class Example:
                         self._joint_left_indices or [],
                         self._joint_right_indices or [],
                     )
-                    # When stick-slip is on, print CoM Y and chamber pressures every second (gait = inflate/deflate)
+                    # When stick-slip is on, print CoM Y, paper Eq. (2) height residual, and chamber pressures
                     if self.use_crawlable_stick_slip and frame > 0 and frame % 60 == 0:
                         q = self.state_0.particle_q.numpy()
                         if q.size >= 3:
@@ -821,19 +849,35 @@ class Example:
                             com_y = float(np.mean(y_all))
                             y_left = float(np.mean(m["y_left_ground"])) if m["y_left_ground"] else 0.0
                             y_right = float(np.mean(m["y_right_ground"])) if m["y_right_ground"] else 0.0
+                            z_left = float(np.mean(m["z_left_ground"])) if m["z_left_ground"] else 0.0
+                            z_right = float(np.mean(m["z_right_ground"])) if m["z_right_ground"] else 0.0
+                            z_err = z_left - z_right  # paper Eq. (2): constraint drives this toward 0
                             p1 = self.chamber_pressures[1] if len(self.chamber_pressures) > 1 else 0.0
                             p3 = self.chamber_pressures[3] if len(self.chamber_pressures) > 3 else 0.0
                             print(
-                                f"   [crawl] t={self.sim_time:.1f}s  CoM_Y={com_y:.3f}  left_Y={y_left:.3f}  right_Y={y_right:.3f}  ch1={p1:.2f} ch3={p3:.2f}",
+                                f"   [crawl] t={self.sim_time:.1f}s  CoM_Y={com_y:.3f}  left_Y={y_left:.3f}  right_Y={y_right:.3f}  z_err={z_err:+.4f}  ch1={p1:.2f} ch3={p3:.2f}",
                                 flush=True,
                             )
                     if validation.is_logging:
+                        # Log gait time (t=0 at start of first gait cycle) and cycle phase for Fig. 4
+                        gait_time = max(0.0, self.sim_time - self.settle_seconds)
+                        period = 1.0 / self.gait_freq if self.gait_freq > 0 else 1.0
+                        t_norm = (gait_time / period) if period > 0 else 0.0
+                        phi1_deg, phi2_deg, x1_mm, x2_mm = angles_and_contacts_from_metrics(m)
+                        fn_left_raw, fn_right_raw, ft = None, None, None
+                        if self.use_crawlable_stick_slip:
+                            cf = self.solver.get_crawl_contact_forces()
+                            if cf is not None:
+                                fn_left_raw, fn_right_raw, ft = cf
                         validation.log_row(
-                            frame, self.sim_time,
+                            frame, gait_time,
                             m["y_left_ground"], m["z_left_ground"],
                             m["y_right_ground"], m["z_right_ground"],
                             m["y_link_left"], m["z_link_left"],
                             m["y_link_right"], m["z_link_right"],
+                            t_norm=t_norm, phi1_deg=phi1_deg, phi2_deg=phi2_deg,
+                            x1_mm=x1_mm, x2_mm=x2_mm,
+                            fn_left_raw=fn_left_raw, fn_right_raw=fn_right_raw, ft=ft,
                         )
                     else:
                         vol_ratio = self.solver.get_volume_ratio(self.state_0)
@@ -850,7 +894,8 @@ class Example:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Inchworm crawling: physics/calibration from JSON (default: crawlable/inchworm/inchworm_params.json). Override stick-slip with --normal or --stick-slip."
+        description="Inchworm crawling: physics/calibration from JSON (default: crawlable/inchworm/inchworm_params.json). "
+        "Override stick-slip with --normal or --stick-slip. To change soft robot angles (lift base higher): use --gait_baseline and --gait_amplitude (higher baseline = more lift)."
     )
     parser.add_argument("--params", type=str, default=DEFAULT_PARAMS_PATH, metavar="PATH", help="Params JSON path.")
     parser.add_argument("--save_params", type=str, default=None, metavar="PATH", help="Save effective params to JSON at end of run.")
@@ -858,6 +903,8 @@ def main():
     parser.add_argument("--stick-slip", action="store_true", dest="stick_slip", help="Override: paper stick-slip friction ON.")
     parser.add_argument("--csv_log_dir", type=str, default=None, metavar="DIR", help="Override: directory for CSV log (from JSON if not set).")
     parser.add_argument("--csv_log_interval", type=int, default=None, metavar="N", help="Override: log CSV every N frames (from JSON if not set).")
+    parser.add_argument("--gait_baseline", type=float, default=None, metavar="F", help="Override: baseline pressure; higher = more lift / smaller joint angle (from JSON if not set).")
+    parser.add_argument("--gait_amplitude", type=float, default=None, metavar="F", help="Override: gait pressure amplitude; use with gait_baseline to tune lift (from JSON if not set).")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
@@ -887,6 +934,12 @@ def main():
         loaded["csv_log_dir"] = args.csv_log_dir
     if args.csv_log_interval is not None:
         loaded["csv_log_interval"] = args.csv_log_interval
+    if args.gait_baseline is not None:
+        loaded["gait_baseline"] = args.gait_baseline
+        print(f"Override: gait_baseline = {args.gait_baseline}", flush=True)
+    if args.gait_amplitude is not None:
+        loaded["gait_amplitude"] = args.gait_amplitude
+        print(f"Override: gait_amplitude = {args.gait_amplitude}", flush=True)
 
     chamber_stiffness_scale = loaded.get("chamber_stiffness_scale")
     if chamber_stiffness_scale is not None and isinstance(chamber_stiffness_scale, list):
@@ -912,6 +965,8 @@ def main():
                     print(f"Rerun viewer failed: {e2}")
                     viewer = None
         nch = loaded["num_chambers_x"] * loaded["num_chambers_y"] * loaded["num_chambers_z"]
+        # Paper (Gamus et al.) three-link model: joints at 1/(2+β) and (1+β)/(2+β) along crawl axis.
+        paper_beta = loaded.get("paper_beta", 2.0)
         example = Example(
             viewer=viewer,
             length=loaded["length"],
@@ -954,8 +1009,10 @@ def main():
             start_at_ground_level=loaded["start_at_ground_level"],
             use_crawlable_stick_slip=loaded.get("use_crawlable_stick_slip", False),
             stick_slip_scale=loaded.get("stick_slip_scale", 1.0),
-            stick_slip_amplitude=loaded.get("stick_slip_amplitude", np.pi / 5.0),
+            stick_slip_amplitude=loaded.get("stick_slip_amplitude", np.pi / 6.0),
             crawl_direction=loaded.get("crawl_direction", 1.0),
+            paper_beta=paper_beta,
+            contact_constraint_stiffness=loaded.get("contact_constraint_stiffness", 0.0),
         )
         example.run(
             num_frames=loaded["num_frames"],

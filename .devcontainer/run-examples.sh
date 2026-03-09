@@ -35,6 +35,8 @@ declare -a EXAMPLES=(
     "mpm_worm_sand"
     "rigid_carpet"
     "inflatable_table_glue"
+    "robot_humanoid"
+    "menteebot_humanoid_usda"
 )
 
 declare -A EXAMPLE_DESCRIPTIONS=(
@@ -57,6 +59,8 @@ declare -A EXAMPLE_DESCRIPTIONS=(
     ["mpm_worm_sand"]="Worm-shaped rigid body on MPM sand (two-way coupling; sand deforms, worm gets reaction forces)"
     ["rigid_carpet"]="DEBUG: Rigid plates on ground + glue (minimal, no soft body)"
     ["inflatable_table_glue"]="Table: 4 soft legs glued to rigid plate (SurfaceBox); Press I/K/O, G/F"
+    ["robot_humanoid"]="Humanoid articulation from MJCF (nv_humanoid); supports --num-worlds"
+    ["menteebot_humanoid_usda"]="Humanoid articulation from USDA (menteebot_robot.usda or humanoid.usda); supports --num-worlds"
 )
 
 declare -A EXAMPLE_SOLVER_OPTIONS=(
@@ -78,7 +82,8 @@ if [ $# -eq 0 ]; then
     done
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
-    read -p "Select example (1-${#EXAMPLES[@]}): " choice
+    read -p "Select example (1-${#EXAMPLES[@]}, Enter for 15=inchworm_crawling): " choice
+    choice="${choice:-15}"
     echo ""
     
     # Validate choice

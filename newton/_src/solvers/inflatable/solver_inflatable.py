@@ -116,6 +116,7 @@ class SolverInflatable(SolverDeformable):
         ground_kd: float = 1.0e2,
         ground_kf: float = 1.0e3,
         ground_mu: float = 0.5,
+        extra_matrix_blocks: int | None = None,
     ):
         super().__init__(
             model=model,
@@ -139,6 +140,7 @@ class SolverInflatable(SolverDeformable):
             self_contact_stiffness=self_contact_stiffness,
             self_contact_force_cap=self_contact_force_cap,
             self_contact_edge_edge=self_contact_edge_edge,
+            extra_matrix_blocks=extra_matrix_blocks,
         )
         
         self.max_volume_ratio = max_volume_ratio
