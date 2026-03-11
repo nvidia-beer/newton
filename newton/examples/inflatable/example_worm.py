@@ -289,6 +289,57 @@ class Example:
         self._apply_pressure()
         self._print_help()
 
+        # CUDA graph capture: warmup, capture one frame, then test launch.
+        self.graph = None
+        self._graph_needs_reset = False
+        if wp.get_device().is_cuda:
+            try:
+                self._simulate()
+                self._reset_state()
+                with wp.ScopedCapture() as capture:
+                    self._simulate()
+                self.graph = capture.graph
+                wp.synchronize_device(self.model.device)
+                try:
+                    wp.capture_launch(self.graph)
+                    wp.synchronize_device(self.model.device)
+                    self._graph_needs_reset = True
+                    print("   CUDA graph captured and launch verified", flush=True)
+                except RuntimeError as e:
+                    if "Graph creation error" in str(e) or "invalid argument" in str(e).lower():
+                        wp.synchronize_device(self.model.device)
+                        self.graph = None
+                        self._reset_state()
+                        print(f"   CUDA graph launch not supported ({e}). Running without graph.", flush=True)
+                    else:
+                        raise
+            except Exception as e:
+                self.graph = None
+                self._reset_state()
+                print(f"   CUDA graph capture skipped ({e}). Running without graph.", flush=True)
+        else:
+            print("   Running on CPU; graph capture skipped", flush=True)
+
+    def _reset_state(self):
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+        self.state_1.assign(self.state_0)
+        self.sim_time = 0.0
+
+    def _simulate(self):
+        self._apply_pressure()
+        for _ in range(self.substeps):
+            self.state_0.clear_forces()
+            self.contacts = self.model.collide(state=self.state_0)
+            self.solver.step(
+                state_in=self.state_0,
+                state_out=self.state_1,
+                control=self.control,
+                contacts=self.contacts,
+                dt=self.sim_dt,
+            )
+            self.state_0, self.state_1 = self.state_1, self.state_0
+            self.sim_time += self.sim_dt
+
     def _apply_pressure(self):
         self.solver.anisotropy_x = self.anisotropy_x
         self.solver.anisotropy_y = self.anisotropy_y
@@ -348,18 +399,39 @@ class Example:
 
     def step(self):
         self._check_keys()
-        for _ in range(self.substeps):
-            self.state_0.clear_forces()
-            self.contacts = self.model.collide(state=self.state_0)
-            self.solver.step(
-                state_in=self.state_0,
-                state_out=self.state_1,
-                control=self.control,
-                contacts=self.contacts,
-                dt=self.sim_dt,
-            )
-            self.state_0, self.state_1 = self.state_1, self.state_0
-            self.sim_time += self.sim_dt
+        self._apply_pressure()
+        if self.graph is not None:
+            if self._graph_needs_reset:
+                self.sim_time = 0.0
+                self._graph_needs_reset = False
+            try:
+                wp.capture_launch(self.graph)
+            except RuntimeError as e:
+                if "Graph creation error" in str(e) or "invalid argument" in str(e).lower():
+                    print(f"   [fallback] Graph launch failed ({e}), continuing without graph.", flush=True)
+                    self.graph = None
+                    wp.synchronize_device(self.model.device)
+                    self._reset_state()
+                    self._simulate()
+                    return
+                raise
+            self.sim_time += self.frame_dt
+            if self.substeps % 2 == 1:
+                self.state_0, self.state_1 = self.state_1, self.state_0
+            wp.synchronize_device(self.model.device)
+        else:
+            for _ in range(self.substeps):
+                self.state_0.clear_forces()
+                self.contacts = self.model.collide(state=self.state_0)
+                self.solver.step(
+                    state_in=self.state_0,
+                    state_out=self.state_1,
+                    control=self.control,
+                    contacts=self.contacts,
+                    dt=self.sim_dt,
+                )
+                self.state_0, self.state_1 = self.state_1, self.state_0
+                self.sim_time += self.sim_dt
 
     def render(self):
         if self.viewer is None:
@@ -371,6 +443,8 @@ class Example:
         self.viewer.end_frame()
 
     def run(self, num_frames: int = 14400):
+        if self.graph is not None:
+            wp.synchronize_device(self.model.device)
         for frame in range(num_frames):
             self.step()
             self.render()

@@ -558,6 +558,8 @@ class Example:
                 crawl_direction=self.crawl_direction,
                 contact_constraint_stiffness=k_constraint,
             )
+            # Use device-side crawl state so stick-slip works with graph capture (per-substep state on GPU)
+            self.solver.set_crawl_use_state_buf(True)
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -590,6 +592,70 @@ class Example:
 
         self._apply_pressure()
         self._print_help()
+
+        # CUDA graph capture (stick-slip uses device-side per-substep state, so graph is safe)
+        self.graph = None
+        self._graph_needs_reset = False
+        if wp.get_device().is_cuda:
+            try:
+                self._reset_state()
+                if self.use_crawlable_stick_slip:
+                    self.solver.init_crawl_persistent_from_state(self.model, self.state_0)
+                self._simulate()
+                self._reset_state()
+                if self.use_crawlable_stick_slip:
+                    self.solver.init_crawl_persistent_from_state(self.model, self.state_0)
+                with wp.ScopedCapture() as capture:
+                    self._simulate()
+                self.graph = capture.graph
+                wp.synchronize_device(self.model.device)
+                try:
+                    wp.capture_launch(self.graph)
+                    wp.synchronize_device(self.model.device)
+                    self._graph_needs_reset = True
+                    print("   CUDA graph captured and launch verified", flush=True)
+                except RuntimeError as e:
+                    if "Graph creation error" in str(e) or "invalid argument" in str(e).lower():
+                        wp.synchronize_device(self.model.device)
+                        self.graph = None
+                        self._reset_state()
+                        if self.use_crawlable_stick_slip:
+                            self.solver.init_crawl_persistent_from_state(self.model, self.state_0)
+                        print(f"   CUDA graph launch not supported ({e}). Running without graph.", flush=True)
+                    else:
+                        raise
+            except Exception as e:
+                self.graph = None
+                self._reset_state()
+                if self.use_crawlable_stick_slip:
+                    self.solver.init_crawl_persistent_from_state(self.model, self.state_0)
+                print(f"   CUDA graph capture skipped ({e}). Running without graph.", flush=True)
+        else:
+            print("   Running on CPU; graph capture skipped", flush=True)
+
+    def _reset_state(self):
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+        self.state_1.assign(self.state_0)
+        self.sim_time = 0.0
+        self._apply_pressure()
+
+    def _simulate(self):
+        """One frame of simulation (substep loop). No settle block (run after sync in step() when using graph)."""
+        self._check_keys()
+        if self.gait_enabled:
+            self._update_gait_pressure()
+        for _ in range(self.substeps):
+            self.state_0.clear_forces()
+            self.contacts = self.model.collide(state=self.state_0)
+            self.solver.step(
+                state_in=self.state_0,
+                state_out=self.state_1,
+                control=self.control,
+                contacts=self.contacts,
+                dt=self.sim_dt,
+            )
+            self.state_0, self.state_1 = self.state_1, self.state_0
+            self.sim_time += self.sim_dt
 
     def _apply_pressure(self):
         self.solver.anisotropy_x = self.anisotropy_x
@@ -680,25 +746,58 @@ class Example:
         self._check_keys()
         if self.gait_enabled:
             self._update_gait_pressure()
-        for _ in range(self.substeps):
-            self.state_0.clear_forces()
-            self.contacts = self.model.collide(state=self.state_0)
+        if self.graph is not None:
+            if self._graph_needs_reset:
+                self.sim_time = 0.0
+                self._graph_needs_reset = False
             if self.use_crawlable_stick_slip:
-                self.solver.set_crawl_time(self.sim_time)
                 period = 1.0 / self.gait_freq if self.gait_freq > 0 else 1.0
                 gait_time = max(0.0, self.sim_time - self.settle_seconds)
                 phase = (gait_time / period) % 1.0 if period > 0 else 0.0
-                self.solver.set_crawl_phase(phase)
-            self.solver.step(
-                state_in=self.state_0,
-                state_out=self.state_1,
-                control=self.control,
-                contacts=self.contacts,
-                dt=self.sim_dt,
-            )
-            self.state_0, self.state_1 = self.state_1, self.state_0
-            self.sim_time += self.sim_dt
-        # During settle: zero velocities so the robot rests on the ground without bouncing
+                self.solver.set_crawl_device_params(period, phase)
+            try:
+                wp.capture_launch(self.graph)
+            except RuntimeError as e:
+                if "Graph creation error" in str(e) or "invalid argument" in str(e).lower():
+                    print(f"   [fallback] Graph launch failed ({e}), continuing without graph.", flush=True)
+                    self.graph = None
+                    wp.synchronize_device(self.model.device)
+                    self._reset_state()
+                    if self.use_crawlable_stick_slip:
+                        self.solver.init_crawl_persistent_from_state(self.model, self.state_0)
+                    self._simulate()
+                    self._apply_settle_velocities()
+                    return
+                raise
+            self.sim_time += self.frame_dt
+            if self.substeps % 2 == 1:
+                self.state_0, self.state_1 = self.state_1, self.state_0
+            wp.synchronize_device(self.model.device)
+            self._apply_settle_velocities()
+        else:
+            for _ in range(self.substeps):
+                self.state_0.clear_forces()
+                self.contacts = self.model.collide(state=self.state_0)
+                if self.use_crawlable_stick_slip:
+                    self.solver.set_crawl_time(self.sim_time)
+                    period = 1.0 / self.gait_freq if self.gait_freq > 0 else 1.0
+                    gait_time = max(0.0, self.sim_time - self.settle_seconds)
+                    phase = (gait_time / period) % 1.0 if period > 0 else 0.0
+                    self.solver.set_crawl_phase(phase)
+                    self.solver.set_crawl_device_params(period, phase)
+                self.solver.step(
+                    state_in=self.state_0,
+                    state_out=self.state_1,
+                    control=self.control,
+                    contacts=self.contacts,
+                    dt=self.sim_dt,
+                )
+                self.state_0, self.state_1 = self.state_1, self.state_0
+                self.sim_time += self.sim_dt
+            self._apply_settle_velocities()
+
+    def _apply_settle_velocities(self):
+        """During settle: zero velocities so the robot rests on the ground without bouncing."""
         if self.sim_time <= self.settle_seconds and self.settle_seconds > 0:
             n = self.model.particle_count
             self.state_0.particle_qd.assign(
@@ -749,6 +848,11 @@ class Example:
     def render(self):
         if self.viewer is None:
             return
+        # Ensure graph and all device work have completed before we pass state to the viewer
+        if self.model.device.is_cuda:
+            wp.synchronize_device(self.model.device)
+        # Force host to see current state so viewer gets a coherent snapshot (D2H sync)
+        _ = self.state_0.particle_q.numpy()
         self._update_particle_colors_for_contact(self.state_0)
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
@@ -824,6 +928,8 @@ class Example:
     ):
         validation = InchwormValidation(csv_log_path, log_interval=csv_log_interval)
         had_csv = validation.is_logging
+        if self.graph is not None:
+            wp.synchronize_device(self.model.device)
         try:
             for frame in range(num_frames):
                 self.step()

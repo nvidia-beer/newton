@@ -224,6 +224,39 @@ class RigidSoftInteractionExample:
                 self.rigid_shape_id: rigid_color,
             })
         
+        # CUDA graph capture (XPBD only; MuJoCo path not captured).
+        self.graph = None
+        self._graph_needs_reset = False
+        if wp.get_device().is_cuda and self.solver_type == "xpbd":
+            try:
+                self._simulate()
+                self._reset_state()
+                with wp.ScopedCapture() as capture:
+                    self._simulate()
+                self.graph = capture.graph
+                wp.synchronize_device(self.model.device)
+                try:
+                    wp.capture_launch(self.graph)
+                    wp.synchronize_device(self.model.device)
+                    self._graph_needs_reset = True
+                    print("   CUDA graph captured and launch verified", flush=True)
+                except RuntimeError as e:
+                    if "Graph creation error" in str(e) or "invalid argument" in str(e).lower():
+                        wp.synchronize_device(self.model.device)
+                        self.graph = None
+                        self._reset_state()
+                        print(f"   CUDA graph launch not supported ({e}). Running without graph.", flush=True)
+                    else:
+                        raise
+            except Exception as e:
+                self.graph = None
+                self._reset_state()
+                print(f"   CUDA graph capture skipped ({e}). Running without graph.", flush=True)
+        elif self.solver_type == "mujoco":
+            print("   Graph capture skipped (MuJoCo solver)", flush=True)
+        else:
+            print("   Running on CPU; graph capture skipped", flush=True)
+        
         if self.solver_type == "mujoco":
             print(f"\n  Rigid Solver: MuJoCo {'(CPU)' if use_mujoco_cpu else '(GPU)'}")
             print(f"  Soft Solver: Newton SolverSoft (Implicit FEM)")
@@ -235,33 +268,62 @@ class RigidSoftInteractionExample:
             print(f"  GREEN: Rigid ball")
             print(f"  BLUE:  Soft ball")
     
-    def step(self):
+    def _reset_state(self):
+        """Reset to initial state (after warmup or capture)."""
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+        self.state_1.assign(self.state_0)
+        self.sim_time = 0.0
+        self.contacts = self.model.collide(state=self.state_0)
+
+    def _do_substep(self):
+        """One substep: collide, soft step, rigid step, combine, swap."""
+        self.state_0.clear_forces()
+        self.contacts = self.model.collide(state=self.state_0)
+        self.soft_solver.step(
+            self.state_0, self.state_soft, self.control, self.contacts, self.sim_dt
+        )
+        self.rigid_solver.step(
+            self.state_0, self.state_rigid, self.control, self.contacts, self.sim_dt
+        )
+        wp.copy(self.state_1.particle_q, self.state_soft.particle_q)
+        wp.copy(self.state_1.particle_qd, self.state_soft.particle_qd)
+        wp.copy(self.state_1.body_q, self.state_rigid.body_q)
+        wp.copy(self.state_1.body_qd, self.state_rigid.body_qd)
+        wp.copy(self.state_1.joint_q, self.state_rigid.joint_q)
+        wp.copy(self.state_1.joint_qd, self.state_rigid.joint_qd)
+        self.state_0, self.state_1 = self.state_1, self.state_0
+        self.sim_time += self.sim_dt
+
+    def _simulate(self):
+        """One frame of simulation (substep loop)."""
         for _ in range(self.substeps):
-            self.state_0.clear_forces()
-            
-            # Unified collision detection (detects rigid-rigid, rigid-soft, soft-ground, etc.)
+            self._do_substep()
+
+    def step(self):
+        """Run one frame of simulation."""
+        if self.graph is not None:
+            if self._graph_needs_reset:
+                self.sim_time = 0.0
+                self._graph_needs_reset = False
+            try:
+                wp.capture_launch(self.graph)
+            except RuntimeError as e:
+                if "Graph creation error" in str(e) or "invalid argument" in str(e).lower():
+                    print(f"   [fallback] Graph launch failed ({e}), continuing without graph.", flush=True)
+                    self.graph = None
+                    wp.synchronize_device(self.model.device)
+                    self._reset_state()
+                    self._simulate()
+                    return
+                raise
+            self.sim_time += self.frame_dt
+            if self.substeps % 2 == 1:
+                self.state_0, self.state_1 = self.state_1, self.state_0
+            wp.synchronize_device(self.model.device)
             self.contacts = self.model.collide(state=self.state_0)
-            
-            # Soft solver updates particles
-            self.soft_solver.step(
-                self.state_0, self.state_soft, self.control, self.contacts, self.sim_dt
-            )
-            
-            # Rigid solver updates bodies
-            self.rigid_solver.step(
-                self.state_0, self.state_rigid, self.control, self.contacts, self.sim_dt
-            )
-            
-            # Combine results: particles from soft, bodies from rigid
-            wp.copy(self.state_1.particle_q, self.state_soft.particle_q)
-            wp.copy(self.state_1.particle_qd, self.state_soft.particle_qd)
-            wp.copy(self.state_1.body_q, self.state_rigid.body_q)
-            wp.copy(self.state_1.body_qd, self.state_rigid.body_qd)
-            wp.copy(self.state_1.joint_q, self.state_rigid.joint_q)
-            wp.copy(self.state_1.joint_qd, self.state_rigid.joint_qd)
-            
-            self.state_0, self.state_1 = self.state_1, self.state_0
-            self.sim_time += self.sim_dt
+        else:
+            for _ in range(self.substeps):
+                self._do_substep()
     
     def render(self):
         if self.viewer:
@@ -271,8 +333,10 @@ class RigidSoftInteractionExample:
                 self.viewer.log_contacts(self.contacts, self.state_0)
             self.viewer.end_frame()
     
-    def run(self, num_frames: int = 600):
+    def run(self, num_frames: int = 1800):
         print(f"\nRunning {num_frames} frames...")
+        if self.graph is not None:
+            wp.synchronize_device(self.model.device)
         for frame in range(num_frames):
             self.step()
             self.render()
@@ -293,7 +357,7 @@ def main():
     parser.add_argument("--ball-radius", type=float, default=0.3)
     parser.add_argument("--drop-height", type=float, default=1.5)
     parser.add_argument("--substeps", type=int, default=16)
-    parser.add_argument("--num-frames", type=int, default=600)
+    parser.add_argument("--num-frames", type=int, default=1800)
     parser.add_argument("--use-mujoco-cpu", action="store_true",
                         help="Use MuJoCo CPU backend (MuJoCo only)")
     parser.add_argument("--headless", action="store_true")

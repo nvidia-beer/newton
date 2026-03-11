@@ -362,7 +362,69 @@ class Example:
         print(f"   [K] or [-]     - Decrease pressure (deflate)", flush=True)
         print(f"   [O]            - Reset to Original rest size", flush=True)
         print(f"   [F]            - Toggle wireframe mode", flush=True)
+
+        # CUDA graph capture (XPBD only; MuJoCo path not captured).
+        self.graph = None
+        self._graph_needs_reset = False
+        if wp.get_device().is_cuda and self.solver_type == "xpbd":
+            try:
+                self._simulate()
+                self._reset_state()
+                with wp.ScopedCapture() as capture:
+                    self._simulate()
+                self.graph = capture.graph
+                wp.synchronize_device(self.model.device)
+                try:
+                    wp.capture_launch(self.graph)
+                    wp.synchronize_device(self.model.device)
+                    self._graph_needs_reset = True
+                    print("   CUDA graph captured and launch verified", flush=True)
+                except RuntimeError as e:
+                    if "Graph creation error" in str(e) or "invalid argument" in str(e).lower():
+                        wp.synchronize_device(self.model.device)
+                        self.graph = None
+                        self._reset_state()
+                        print(f"   CUDA graph launch not supported ({e}). Running without graph.", flush=True)
+                    else:
+                        raise
+            except Exception as e:
+                self.graph = None
+                self._reset_state()
+                print(f"   CUDA graph capture skipped ({e}). Running without graph.", flush=True)
+        elif self.solver_type == "mujoco":
+            print("   Graph capture skipped (MuJoCo solver)", flush=True)
+        else:
+            print("   Running on CPU; graph capture skipped", flush=True)
     
+    def _reset_state(self):
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+        self.state_1.assign(self.state_0)
+        self.sim_time = 0.0
+        self.contacts = self.model.collide(state=self.state_0)
+
+    def _do_substep(self):
+        self.state_0.clear_forces()
+        self.contacts = self.model.collide(state=self.state_0)
+        self.soft_solver.step(
+            self.state_0, self.state_soft, self.control, self.contacts, self.sim_dt
+        )
+        self.rigid_solver.step(
+            self.state_0, self.state_rigid, self.control, self.contacts, self.sim_dt
+        )
+        wp.copy(self.state_1.particle_q, self.state_soft.particle_q)
+        wp.copy(self.state_1.particle_qd, self.state_soft.particle_qd)
+        wp.copy(self.state_1.body_q, self.state_rigid.body_q)
+        wp.copy(self.state_1.body_qd, self.state_rigid.body_qd)
+        wp.copy(self.state_1.joint_q, self.state_rigid.joint_q)
+        wp.copy(self.state_1.joint_qd, self.state_rigid.joint_qd)
+        self.state_0, self.state_1 = self.state_1, self.state_0
+        self.sim_time += self.sim_dt
+
+    def _simulate(self):
+        self.soft_solver.set_pressure(self.current_pressure)
+        for _ in range(self.substeps):
+            self._do_substep()
+
     def _on_key_press(self, symbol, modifiers):
         """Handle keyboard input for pressure control."""
         # Key codes
@@ -543,57 +605,61 @@ class Example:
     
     def step(self):
         """Run one frame of simulation with inflation and rigid-soft interaction."""
-        # Check keyboard for pressure control
         self._check_keys()
-        
-        # Apply current pressure (controlled by keyboard)
         self.soft_solver.set_pressure(self.current_pressure)
-        
-        for _ in range(self.substeps):
-            self.state_0.clear_forces()
-            
-            # Unified collision detection (detects rigid-rigid, rigid-soft, soft-ground, etc.)
+        if self.graph is not None:
+            if self._graph_needs_reset:
+                self.sim_time = 0.0
+                self._graph_needs_reset = False
+            try:
+                wp.capture_launch(self.graph)
+            except RuntimeError as e:
+                if "Graph creation error" in str(e) or "invalid argument" in str(e).lower():
+                    print(f"   [fallback] Graph launch failed ({e}), continuing without graph.", flush=True)
+                    self.graph = None
+                    wp.synchronize_device(self.model.device)
+                    self._reset_state()
+                    self._simulate()
+                    return
+                raise
+            self.sim_time += self.frame_dt
+            if self.substeps % 2 == 1:
+                self.state_0, self.state_1 = self.state_1, self.state_0
+            wp.synchronize_device(self.model.device)
             self.contacts = self.model.collide(state=self.state_0)
-            
-            # Debug: Check soft contact count and rigid body position (only for MuJoCo, first few substeps)
-            if self.solver_type == "mujoco" and hasattr(self, '_debug_step_count'):
-                self._debug_step_count += 1
-                if self._debug_step_count <= 50:  # More debug output
-                    if self.contacts and hasattr(self.contacts, 'soft_contact_count'):
-                        count = int(self.contacts.soft_contact_count.numpy()[0])
-                        # Get rigid body position BEFORE stepping
-                        body_q = self.state_0.body_q.numpy()
-                        if len(body_q) > 0:
-                            rigid_pos = body_q[self.rigid_body_id]
-                            rigid_z = rigid_pos[2]
-                            body_vel = self.state_0.body_qd.numpy()[self.rigid_body_id]
-                            rigid_vz = body_vel[2]
-                            if self._debug_step_count % 10 == 0:  # Every 10 substeps
-                                print(f"   [DEBUG MuJoCo substep {self._debug_step_count}] z={rigid_z:.4f}m, vz={rigid_vz:.4f}m/s, contacts={count}", flush=True)
-            elif not hasattr(self, '_debug_step_count'):
-                self._debug_step_count = 0
-            
-            # Soft solver updates particles (SolverInflatable handles inflation + FEM)
-            self.soft_solver.step(
-                self.state_0, self.state_soft, self.control, self.contacts, self.sim_dt
-            )
-            
-            # Rigid solver updates bodies
-            self.rigid_solver.step(
-                self.state_0, self.state_rigid, self.control, self.contacts, self.sim_dt
-            )
-            
-            # Combine results: particles from soft, bodies from rigid
-            wp.copy(self.state_1.particle_q, self.state_soft.particle_q)
-            wp.copy(self.state_1.particle_qd, self.state_soft.particle_qd)
-            wp.copy(self.state_1.body_q, self.state_rigid.body_q)
-            wp.copy(self.state_1.body_qd, self.state_rigid.body_qd)
-            wp.copy(self.state_1.joint_q, self.state_rigid.joint_q)
-            wp.copy(self.state_1.joint_qd, self.state_rigid.joint_qd)
-            
-            # Swap states
-            self.state_0, self.state_1 = self.state_1, self.state_0
-            self.sim_time += self.sim_dt
+        else:
+            for _ in range(self.substeps):
+                self.state_0.clear_forces()
+                self.contacts = self.model.collide(state=self.state_0)
+                if self.solver_type == "mujoco" and hasattr(self, '_debug_step_count'):
+                    self._debug_step_count += 1
+                    if self._debug_step_count <= 50:
+                        if self.contacts and hasattr(self.contacts, 'soft_contact_count'):
+                            count = int(self.contacts.soft_contact_count.numpy()[0])
+                            body_q = self.state_0.body_q.numpy()
+                            if len(body_q) > 0:
+                                rigid_pos = body_q[self.rigid_body_id]
+                                rigid_z = rigid_pos[2]
+                                body_vel = self.state_0.body_qd.numpy()[self.rigid_body_id]
+                                rigid_vz = body_vel[2]
+                                if self._debug_step_count % 10 == 0:
+                                    print(f"   [DEBUG MuJoCo substep {self._debug_step_count}] z={rigid_z:.4f}m, vz={rigid_vz:.4f}m/s, contacts={count}", flush=True)
+                elif not hasattr(self, '_debug_step_count'):
+                    self._debug_step_count = 0
+                self.soft_solver.step(
+                    self.state_0, self.state_soft, self.control, self.contacts, self.sim_dt
+                )
+                self.rigid_solver.step(
+                    self.state_0, self.state_rigid, self.control, self.contacts, self.sim_dt
+                )
+                wp.copy(self.state_1.particle_q, self.state_soft.particle_q)
+                wp.copy(self.state_1.particle_qd, self.state_soft.particle_qd)
+                wp.copy(self.state_1.body_q, self.state_rigid.body_q)
+                wp.copy(self.state_1.body_qd, self.state_rigid.body_qd)
+                wp.copy(self.state_1.joint_q, self.state_rigid.joint_q)
+                wp.copy(self.state_1.joint_qd, self.state_rigid.joint_qd)
+                self.state_0, self.state_1 = self.state_1, self.state_0
+                self.sim_time += self.sim_dt
     
     def render(self):
         """Render current frame."""
@@ -611,7 +677,8 @@ class Example:
         print(f"\n🎈 Starting inflation + rigid interaction demo...", flush=True)
         color_name = "RED" if self.solver_type == "mujoco" else "GREEN"
         print(f"   Watch the {color_name} box rise and fall!", flush=True)
-        
+        if self.graph is not None:
+            wp.synchronize_device(self.model.device)
         for frame in range(num_frames):
             self.step()
             self.render()

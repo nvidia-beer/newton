@@ -181,9 +181,40 @@ class Example:
             self.viewer.set_model(self.model)
             self.viewer.show_particles = True
         
-        # Inflation state - manual control only
+        # Inflation state (needed for _simulate() during graph capture)
         self.current_pressure = 1.0
-        self.pressure_step = 0.1  # Pressure adjustment per key press
+        self.pressure_step = 0.1
+        
+        # CUDA graph capture: warmup, capture one frame, then test launch.
+        self.graph = None
+        self._graph_needs_reset = False
+        if wp.get_device().is_cuda:
+            try:
+                self._simulate()
+                self._reset_state()
+                with wp.ScopedCapture() as capture:
+                    self._simulate()
+                self.graph = capture.graph
+                wp.synchronize_device(self.model.device)
+                try:
+                    wp.capture_launch(self.graph)
+                    wp.synchronize_device(self.model.device)
+                    self._graph_needs_reset = True
+                    print("   CUDA graph captured and launch verified", flush=True)
+                except RuntimeError as e:
+                    if "Graph creation error" in str(e) or "invalid argument" in str(e).lower():
+                        wp.synchronize_device(self.model.device)
+                        self.graph = None
+                        self._reset_state()
+                        print(f"   CUDA graph launch not supported ({e}). Running without graph.", flush=True)
+                    else:
+                        raise
+            except Exception as e:
+                self.graph = None
+                self._reset_state()
+                print(f"   CUDA graph capture skipped ({e}). Running without graph.", flush=True)
+        else:
+            print("   Running on CPU; graph capture skipped", flush=True)
         
         # Register keyboard controls if viewer supports it
         if self.viewer:
@@ -260,32 +291,69 @@ class Example:
             print(f"   [Reset to rest size]", flush=True)
             self._key_cooldown = 10
     
-    def step(self):
-        """Run one frame of simulation with inflation."""
-        # Check keyboard for pressure control
-        self._check_keys()
-        
-        # Apply current pressure (controlled by keyboard)
+    def _reset_state(self):
+        """Reset to initial state (after warmup or capture)."""
+        newton.eval_fk(
+            self.model,
+            self.model.joint_q,
+            self.model.joint_qd,
+            self.state_0,
+        )
+        self.state_1.assign(self.state_0)
+        self.sim_time = 0.0
+
+    def _simulate(self):
+        """One frame of simulation (substep loop)."""
         self.solver.set_pressure(self.current_pressure)
-        
         for _ in range(self.substeps):
             self.state_0.clear_forces()
-            
-            # Collision detection
             self.contacts = self.model.collide(state=self.state_0)
-            
-            # Physics step
             self.solver.step(
                 state_in=self.state_0,
                 state_out=self.state_1,
                 control=self.control,
                 contacts=self.contacts,
-                dt=self.sim_dt
+                dt=self.sim_dt,
             )
-            
-            # Swap states
             self.state_0, self.state_1 = self.state_1, self.state_0
             self.sim_time += self.sim_dt
+
+    def step(self):
+        """Run one frame of simulation with inflation."""
+        self._check_keys()
+        self.solver.set_pressure(self.current_pressure)
+        if self.graph is not None:
+            if self._graph_needs_reset:
+                self.sim_time = 0.0
+                self._graph_needs_reset = False
+            try:
+                wp.capture_launch(self.graph)
+            except RuntimeError as e:
+                if "Graph creation error" in str(e) or "invalid argument" in str(e).lower():
+                    print(f"   [fallback] Graph launch failed ({e}), continuing without graph.", flush=True)
+                    self.graph = None
+                    wp.synchronize_device(self.model.device)
+                    self._reset_state()
+                    self._simulate()
+                    return
+                raise
+            self.sim_time += self.frame_dt
+            if self.substeps % 2 == 1:
+                self.state_0, self.state_1 = self.state_1, self.state_0
+            wp.synchronize_device(self.model.device)
+        else:
+            for _ in range(self.substeps):
+                self.state_0.clear_forces()
+                self.contacts = self.model.collide(state=self.state_0)
+                self.solver.step(
+                    state_in=self.state_0,
+                    state_out=self.state_1,
+                    control=self.control,
+                    contacts=self.contacts,
+                    dt=self.sim_dt,
+                )
+                self.state_0, self.state_1 = self.state_1, self.state_0
+                self.sim_time += self.sim_dt
     
     def render(self):
         """Render current frame."""
@@ -302,7 +370,8 @@ class Example:
         """Run simulation loop."""
         print(f"\n📦 Starting inflation demo...", flush=True)
         print(f"   Cycling pressure from 1.0x to {self.max_pressure:.1f}x", flush=True)
-        
+        if self.graph is not None:
+            wp.synchronize_device(self.model.device)
         for frame in range(num_frames):
             self.step()
             self.render()

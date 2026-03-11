@@ -86,6 +86,9 @@ class Example(InchwormCrawlingExample):
             kwargs.setdefault("substeps", 8)
         super().__init__(viewer, **kwargs)
         self.sand_enabled = sand
+        if self.sand_enabled:
+            # Sand step includes numpy + MPM; do not use base class graph.
+            self.graph = None
         if not self.sand_enabled:
             if self.viewer:
                 print("Inchworm crawling (no sand). [I]/[K] pressure, --normal/--stick-slip.", flush=True)

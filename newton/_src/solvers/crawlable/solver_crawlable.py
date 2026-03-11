@@ -33,7 +33,13 @@ from .paper_model import (
 )
 from .kernels_crawlable import (
     apply_crawl_kinematic_displacement,
+    apply_crawl_kinematic_from_buf,
+    crawl_joint_angles_from_means,
+    crawl_paper_state_step,
+    crawl_reduce_init,
+    crawl_reduce_positions,
     eval_particle_ground_contacts_crawl,
+    eval_particle_ground_contacts_crawl_from_buf,
 )
 
 
@@ -109,14 +115,35 @@ class SolverCrawlable(SolverInflatable):
         n = model.particle_count
         in_left = np.zeros(n, dtype=np.int32)
         in_right = np.zeros(n, dtype=np.int32)
+        in_left_j = np.zeros(n, dtype=np.int32)
+        in_right_j = np.zeros(n, dtype=np.int32)
         for i in left_contact_indices:
             if 0 <= i < n:
                 in_left[i] = 1
         for i in right_contact_indices:
             if 0 <= i < n:
                 in_right[i] = 1
+        for i in left_joint_indices:
+            if 0 <= i < n:
+                in_left_j[i] = 1
+        for i in right_joint_indices:
+            if 0 <= i < n:
+                in_right_j[i] = 1
         self._crawl_particle_in_left = wp.array(in_left, dtype=wp.int32, device=model.device)
         self._crawl_particle_in_right = wp.array(in_right, dtype=wp.int32, device=model.device)
+        self._crawl_in_left_contact = wp.array(in_left, dtype=wp.int32, device=model.device)
+        self._crawl_in_right_contact = wp.array(in_right, dtype=wp.int32, device=model.device)
+        self._crawl_in_left_joint = wp.array(in_left_j, dtype=wp.int32, device=model.device)
+        self._crawl_in_right_joint = wp.array(in_right_j, dtype=wp.int32, device=model.device)
+        # state_buf: [slip_leg, ft_mag, slip_direction_sign, d_current, d_prev] (5 for device-full + displacement)
+        self._crawl_state_buf = wp.array([2.0, 0.0, 0.0, 0.0, 0.0], dtype=wp.float32, device=model.device)
+        self._crawl_reduce_buf = wp.zeros(16, dtype=wp.float32, device=model.device)
+        self._crawl_angles_buf = wp.zeros(2, dtype=wp.float32, device=model.device)
+        # persistent_buf: [d_prev, phi1_prev, phi2_prev, last_slip_dir, last_flip_phase]
+        self._crawl_persistent_buf = wp.array([0.0, 0.0, 0.0, 0.0, -1.0], dtype=wp.float32, device=model.device)
+        # params_buf: [period, phase_in_cycle] (set by example before each frame/launch); last_flip_phase in persistent_buf[4]
+        self._crawl_params_buf = wp.array([1.0, 0.0], dtype=wp.float32, device=model.device)
+        self._crawl_use_state_buf = False
         self._crawl_enabled = True
         self._crawl_d_prev = 0.0
         self._crawl_last_slip_dir = None
@@ -132,6 +159,16 @@ class SolverCrawlable(SolverInflatable):
     def set_crawl_phase(self, phase_0_to_1: float) -> None:
         """Set phase in current cycle (0..1) for min-dwell; call before each step to avoid ft chattering."""
         self._crawl_phase_in_cycle = float(phase_0_to_1)
+
+    def set_crawl_device_params(self, period: float, phase_in_cycle: float) -> None:
+        """Set period, phase_in_cycle on device (for graph capture; call before each frame/launch). last_flip_phase lives in persistent_buf[4]."""
+        if getattr(self, "_crawl_params_buf", None) is not None:
+            arr = wp.array([float(period), float(phase_in_cycle)], dtype=wp.float32, device=self._crawl_params_buf.device)
+            self._crawl_params_buf.assign(arr)
+
+    def set_crawl_use_state_buf(self, use: bool) -> None:
+        """When True, ground contact reads slip state from _crawl_state_buf (no host sync, graph-capture safe)."""
+        self._crawl_use_state_buf = use
 
     def set_gait_params(
         self,
@@ -183,6 +220,11 @@ class SolverCrawlable(SolverInflatable):
             return wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
         if not self._crawl_enabled or self._crawl_particle_in_left is None or self._crawl_particle_in_right is None:
             return self._eval_default_ground_forces(model, state)
+
+        if getattr(self, "_crawl_use_state_buf", False) and getattr(self, "_crawl_state_buf", None) is not None:
+            if getattr(self, "_crawl_reduce_buf", None) is not None:
+                self._update_crawl_state_on_device(model, state)
+            return self._eval_crawl_forces_from_buf(model, state)
 
         q = state.particle_q.numpy()
         if q.ndim == 1:
@@ -312,6 +354,179 @@ class SolverCrawlable(SolverInflatable):
         self._crawl_last_fn_right_raw = float(fn_right_raw)
         return forces
 
+    def _eval_crawl_forces_from_buf(self, model: Model, state: State):
+        """Crawl ground forces reading slip state from _crawl_state_buf (no host sync, graph-capture safe)."""
+        gravity_mag = 9.81
+        n_left = len(self._crawl_left_indices)
+        n_right = len(self._crawl_right_indices)
+        forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        wp.launch(
+            kernel=eval_particle_ground_contacts_crawl_from_buf,
+            dim=model.particle_count,
+            inputs=[
+                state.particle_q,
+                state.particle_qd,
+                model.particle_radius,
+                model.particle_inv_mass,
+                model.particle_flags,
+                self._crawl_particle_in_left,
+                self._crawl_particle_in_right,
+                self._ground_ke,
+                self._ground_kd,
+                self._ground_kf,
+                self._ground_mu,
+                self._ground_plane,
+                gravity_mag,
+                self._crawl_state_buf,
+                n_left,
+                n_right,
+                self._crawl_axis,
+                self._crawl_slip_force_scale,
+            ],
+            outputs=[forces],
+            device=model.device,
+        )
+        return forces
+
+    def _update_crawl_state_on_device(self, model: Model, state: State) -> None:
+        """Run reduce -> joint angles -> paper state on device (no host sync; graph-capture safe)."""
+        dev = model.device
+        wp.launch(kernel=crawl_reduce_init, dim=16, inputs=[self._crawl_reduce_buf], device=dev)
+        wp.launch(
+            kernel=crawl_reduce_positions,
+            dim=model.particle_count,
+            inputs=[
+                state.particle_q,
+                self._crawl_in_left_contact,
+                self._crawl_in_right_contact,
+                self._crawl_in_left_joint,
+                self._crawl_in_right_joint,
+                self._crawl_reduce_buf,
+            ],
+            device=dev,
+        )
+        wp.launch(
+            kernel=crawl_joint_angles_from_means,
+            dim=1,
+            inputs=[self._crawl_reduce_buf, self._crawl_angles_buf, self._crawl_axis],
+            device=dev,
+        )
+        M = self._crawl_M if self._crawl_M is not None else _DEFAULT_M
+        L = self._crawl_L if self._crawl_L is not None else _DEFAULT_L
+        g = self._crawl_g
+        dt = getattr(self, "_step_dt", 1.0 / 60.0)
+        min_dwell = 0.05
+        min_bend = getattr(self, "_crawl_kick_min_bend", 0.08)
+        wp.launch(
+            kernel=crawl_paper_state_step,
+            dim=1,
+            inputs=[
+                self._crawl_angles_buf,
+                self._crawl_persistent_buf,
+                self._crawl_params_buf,
+                self._crawl_state_buf,
+                M, L, self._crawl_beta, self._crawl_mu, g,
+                dt, min_dwell, min_bend, float(self._crawl_direction),
+            ],
+            device=dev,
+        )
+
+    def prepare_crawl_state_from_state(self, model: Model, state: State) -> None:
+        """
+        Compute crawl slip state from current state (uses host sync), update internal state and _crawl_state_buf.
+        Call this before each capture_launch when using graph capture with stick-slip so the replayed graph uses the current frame's crawl state.
+        """
+        if not self._crawl_enabled or self._crawl_state_buf is None:
+            return
+        q = state.particle_q.numpy()
+        if q.ndim == 1:
+            q = q.reshape(-1, 3)
+        n = model.particle_count
+        left_idx = self._crawl_left_indices
+        right_idx = self._crawl_right_indices
+        left_j = self._crawl_left_joint_indices
+        right_j = self._crawl_right_joint_indices
+        if not left_idx or not right_idx or not left_j or not right_j:
+            return
+        left_contact = np.mean(q[left_idx], axis=0)
+        right_contact = np.mean(q[right_idx], axis=0)
+        left_joint = np.mean(q[left_j], axis=0)
+        right_joint = np.mean(q[right_j], axis=0)
+        phi1, phi2 = joint_angles_from_positions(
+            left_contact, left_joint, right_joint, right_contact,
+            crawl_axis=self._crawl_axis, vertical_axis=2,
+        )
+        M = self._crawl_M if self._crawl_M is not None else getattr(self, "mass", _DEFAULT_M)
+        L = self._crawl_L if self._crawl_L is not None else _DEFAULT_L
+        dt = getattr(self, "_step_dt", 1.0 / 60.0)
+        period = (2.0 * np.pi) / self._crawl_omega if self._crawl_omega > 1e-12 else None
+        phi1_dot = (phi1 - self._crawl_phi1_prev) / dt if self._crawl_phi1_prev is not None else None
+        phi2_dot = (phi2 - self._crawl_phi2_prev) / dt if self._crawl_phi2_prev is not None else None
+        state_out, ft_signed, slip_dir, d, fn1, fn2, flip_occurred = crawl_state_step_simple(
+            phi1, phi2, self._crawl_d_prev, dt,
+            M=M, L=L, beta=self._crawl_beta, mu=self._crawl_mu, g=self._crawl_g,
+            phi1_dot=phi1_dot, phi2_dot=phi2_dot,
+            previous_slip_dir=self._crawl_last_slip_dir,
+            period=period,
+            phase_in_cycle=getattr(self, "_crawl_phase_in_cycle", None),
+            last_flip_phase=getattr(self, "_crawl_last_flip_phase", None),
+            min_dwell_phase=0.05,
+        )
+        self._crawl_d_prev = d
+        self._crawl_phi1_prev = float(phi1)
+        self._crawl_phi2_prev = float(phi2)
+        self._crawl_last_slip_dir = slip_dir
+        if flip_occurred and self._crawl_phase_in_cycle is not None:
+            self._crawl_last_flip_phase = self._crawl_phase_in_cycle
+        if state_out == "STICK_STICK":
+            slip_leg = 2
+        elif state_out == "SLIP_STICK":
+            slip_leg = 0
+        else:
+            slip_leg = 1
+        bend = max(abs(phi1 - np.pi), abs(phi2 - np.pi))
+        min_bend = getattr(self, "_crawl_kick_min_bend", 0.08)
+        if bend < min_bend:
+            slip_leg = 2
+            ft_signed = 0.0
+        ft_mag = abs(ft_signed)
+        slip_direction_sign = float(slip_dir * self._crawl_direction)
+        self._crawl_last_slip_leg = slip_leg
+        self._crawl_apply_kinematic_disp = (slip_leg != 2 and bend >= min_bend)
+        self._crawl_last_ft_signed = float(slip_dir) if state_out != "STICK_STICK" else 0.0
+        buf = np.array([float(slip_leg), ft_mag, slip_direction_sign], dtype=np.float32)
+        self._crawl_state_buf.assign(wp.array(buf, dtype=wp.float32, device=model.device))
+
+    def apply_crawl_kinematic_after_step(self, model: Model, state_out: State) -> None:
+        """Apply paper kinematic displacement ±Δd after a step (uses host sync). Call after sync when using graph + stick-slip."""
+        if not getattr(self, "_crawl_use_state_buf", False):
+            return
+        if not self._crawl_enabled or self._crawl_left_indices is None or self._crawl_right_indices is None:
+            return
+        if not self._crawl_left_joint_indices or not self._crawl_right_joint_indices:
+            return
+        apply_disp = getattr(self, "_crawl_apply_kinematic_disp", True)
+        if not apply_disp:
+            return
+        d_new = self._crawl_d_from_state(state_out)
+        if abs(d_new - self._crawl_d_prev) <= 1e-9:
+            return
+        delta_d = d_new - self._crawl_d_prev
+        slip_leg = self._crawl_last_slip_leg
+        if slip_leg == 0:
+            body_disp = -delta_d * float(self._crawl_direction)
+        elif slip_leg == 1:
+            body_disp = delta_d * float(self._crawl_direction)
+        else:
+            body_disp = 0.0
+        if abs(body_disp) > 1e-12:
+            wp.launch(
+                kernel=apply_crawl_kinematic_displacement,
+                dim=self.model.particle_count,
+                inputs=[state_out.particle_q, self._crawl_axis, float(body_disp)],
+                device=self.model.device,
+            )
+
     def _eval_default_ground_forces(self, model: Model, state: State):
         """Default Coulomb ground contact (parent behavior)."""
         g = self._get_gravity_vec3(model)
@@ -349,6 +564,22 @@ class SolverCrawlable(SolverInflatable):
             return state_out
         if not self._crawl_left_joint_indices or not self._crawl_right_joint_indices:
             return state_out
+        if getattr(self, "_crawl_use_state_buf", False) and getattr(self, "_crawl_reduce_buf", None) is not None:
+            # Device-full mode: apply kinematic displacement from state_buf (already computed this substep)
+            wp.launch(
+                kernel=apply_crawl_kinematic_from_buf,
+                dim=self.model.particle_count,
+                inputs=[
+                    state_out.particle_q,
+                    self._crawl_axis,
+                    self._crawl_state_buf,
+                    float(self._crawl_direction),
+                ],
+                device=self.model.device,
+            )
+            return state_out
+        if getattr(self, "_crawl_use_state_buf", False):
+            return state_out
 
         # Paper kinematics: "Update contact positions: sticking contact unchanged,
         # slipping contact position changes by Δd in slip direction." So body displaces by ±Δd.
@@ -384,6 +615,45 @@ class SolverCrawlable(SolverInflatable):
         if not self._crawl_enabled:
             return None
         return (self._crawl_last_fn_left_raw, self._crawl_last_fn_right_raw, self._crawl_last_ft_signed)
+
+    def init_crawl_persistent_from_state(self, model: Model, state: State) -> None:
+        """
+        Initialize device _crawl_persistent_buf from current state (d, phi1, phi2, slip_dir=1, last_flip=-1).
+        Call after _reset_state() when using device-side crawl so the first substep has valid d_prev, phi1_prev, phi2_prev
+        instead of zeros (which would produce huge d_dot and NaNs).
+        """
+        if not self._crawl_enabled or getattr(self, "_crawl_persistent_buf", None) is None:
+            return
+        q = state.particle_q.numpy()
+        if q.ndim == 1:
+            q = q.reshape(-1, 3)
+        left_idx = self._crawl_left_indices
+        right_idx = self._crawl_right_indices
+        left_j = self._crawl_left_joint_indices
+        right_j = self._crawl_right_joint_indices
+        if not left_idx or not right_idx or not left_j or not right_j:
+            return
+        left_contact = np.mean(q[left_idx], axis=0)
+        right_contact = np.mean(q[right_idx], axis=0)
+        left_joint = np.mean(q[left_j], axis=0)
+        right_joint = np.mean(q[right_j], axis=0)
+        phi1, phi2 = joint_angles_from_positions(
+            left_contact, left_joint, right_joint, right_contact,
+            crawl_axis=self._crawl_axis, vertical_axis=2,
+        )
+        M = self._crawl_M if self._crawl_M is not None else _DEFAULT_M
+        L = self._crawl_L if self._crawl_L is not None else _DEFAULT_L
+        beta = self._crawl_beta
+        l = compute_l(M, L, beta)
+        theta = compute_theta(phi1, phi2, beta)
+        d = float(compute_d(phi1, phi2, theta, l, beta))
+        # persistent_buf: [d_prev, phi1_prev, phi2_prev, last_slip_dir, last_flip_phase]
+        arr = wp.array(
+            [d, float(phi1), float(phi2), 1.0, -1.0],
+            dtype=wp.float32,
+            device=self._crawl_persistent_buf.device,
+        )
+        self._crawl_persistent_buf.assign(arr)
 
     def _crawl_d_from_state(self, state: State) -> float:
         """Contact distance d from current geometry (paper formula)."""

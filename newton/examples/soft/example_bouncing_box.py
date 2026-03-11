@@ -210,11 +210,47 @@ class Example:
             self.model.joint_qd,
             self.state_0
         )
+        # Backup initial state for reset after graph capture (restore by copy to avoid eval_fk/stream issues).
+        self._state_initial = self.model.state()
+        self._state_initial.assign(self.state_0)
         
         # Set up viewer
         if self.viewer:
             self.viewer.set_model(self.model)
             self.viewer.show_particles = True  # Enable soft body visualization
+        
+        # CUDA graph capture: warmup, capture one frame, then test launch (some drivers fail at create exec).
+        self.graph = None
+        self._graph_needs_reset = False
+        if wp.get_device().is_cuda:
+            try:
+                self._simulate()  # warmup: load linear solver module
+                self._reset_state()
+                with wp.ScopedCapture() as capture:
+                    self._simulate()
+                self.graph = capture.graph
+                wp.synchronize_device(self.model.device)
+                # Test that graph can be launched (cudaGraphInstantiate can fail with invalid argument on some drivers).
+                try:
+                    wp.capture_launch(self.graph)
+                    wp.synchronize_device(self.model.device)
+                    # Launch succeeded; state advanced one frame. Defer reset to first step().
+                    self._graph_needs_reset = True
+                    print("   CUDA graph captured and launch verified", flush=True)
+                except RuntimeError as e:
+                    if "Graph creation error" in str(e) or "invalid argument" in str(e).lower():
+                        wp.synchronize_device(self.model.device)  # clear error state before further use
+                        self.graph = None
+                        self._reset_state()
+                        print(f"   CUDA graph launch not supported on this driver ({e}). Running without graph.", flush=True)
+                    else:
+                        raise
+            except Exception as e:
+                self.graph = None
+                self._reset_state()
+                print(f"   CUDA graph capture skipped ({e}). Running without graph.", flush=True)
+        else:
+            print("   Running on CPU; graph capture skipped", flush=True)
         
         # Tracking variables
         self.bounce_count = 0
@@ -226,46 +262,74 @@ class Example:
         print(f"   Box size: {self.size}", flush=True)
         print(f"   Stiffness: μ={k_mu:.0e}, λ={k_lambda:.0e}", flush=True)
     
-    def step(self):
-        """Run one frame of simulation."""
+    def _reset_state(self):
+        """Reset to initial state (after warmup or capture)."""
+        newton.eval_fk(
+            self.model,
+            self.model.joint_q,
+            self.model.joint_qd,
+            self.state_0,
+        )
+        self.state_1.assign(self.state_0)
+        self.sim_time = 0.0
+
+    def _simulate(self):
+        """One frame of simulation (substep loop)."""
         for _ in range(self.substeps):
             self.state_0.clear_forces()
-            
-            # Collision detection
             self.contacts = self.model.collide(state=self.state_0)
-            
-            # Physics step
             self.solver.step(
                 state_in=self.state_0,
                 state_out=self.state_1,
                 control=self.control,
                 contacts=self.contacts,
-                dt=self.sim_dt
+                dt=self.sim_dt,
             )
-            
-            # Swap states
             self.state_0, self.state_1 = self.state_1, self.state_0
             self.sim_time += self.sim_dt
-    
+
+    def step(self):
+        """Run one frame of simulation."""
+        if self.graph is not None:
+            if self._graph_needs_reset:
+                self.sim_time = 0.0
+                self._graph_needs_reset = False
+            try:
+                wp.capture_launch(self.graph)
+            except RuntimeError as e:
+                if "Graph creation error" in str(e) or "invalid argument" in str(e).lower():
+                    print(f"   [fallback] Graph launch failed ({e}), continuing without graph.", flush=True)
+                    self.graph = None
+                    wp.synchronize_device(self.model.device)
+                    self._reset_state()
+                    self._simulate()
+                    return
+                raise
+            self.sim_time += self.frame_dt
+            if self.substeps % 2 == 1:
+                self.state_0, self.state_1 = self.state_1, self.state_0
+            wp.synchronize_device(self.model.device)
+        else:
+            self._simulate()
+
     def render(self):
         """Render current frame."""
         if self.viewer is None:
             return
-            
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
         if self.contacts:
             self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
-    
-    def run(self, num_frames: int = 600):
+
+    def run(self, num_frames: int = 1800):
         """Run simulation loop."""
         print(f"\n📦 Dropping the box...", flush=True)
-        
+        if self.graph is not None:
+            wp.synchronize_device(self.model.device)
         for frame in range(num_frames):
             self.step()
             self.render()
-            
             # Track box position (Z is up)
             positions = self.state_0.particle_q.numpy()
             center = positions.mean(axis=0)
@@ -317,8 +381,8 @@ def main():
     # Simulation parameters
     parser.add_argument('--substeps', type=int, default=8,
                         help='Substeps per frame (default: 8)')
-    parser.add_argument('--num_frames', type=int, default=600,
-                        help='Number of frames (default: 600)')
+    parser.add_argument('--num_frames', type=int, default=1800,
+                        help='Number of frames (default: 1800)')
     parser.add_argument('--device', type=str, default=None,
                         help='Compute device')
     parser.add_argument('--headless', action='store_true',

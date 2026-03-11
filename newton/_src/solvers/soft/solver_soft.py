@@ -577,6 +577,7 @@ class SolverSoft(SolverBase):
     def implicit_integration(self, model: Model, state_in: State, state_out: State, dt: float):
         """Perform implicit integration step using sparse matrix solver."""
         maxiter = self.linear_solver_maxiter
+        # check_every=0: device-side convergence only, no host sync during solve (graph-capture safe)
         if self.solver_type == "cg":
             iterations, residual, _ = cg(
                 self.A_bsr,
@@ -585,7 +586,8 @@ class SolverSoft(SolverBase):
                 tol=1e-2,
                 maxiter=maxiter,
                 M=self.M_bsr,
-                use_cuda_graph=True
+                check_every=0,
+                use_cuda_graph=True,
             )
         elif self.solver_type == "bicgstab":
             iterations, residual, _ = bicgstab(
@@ -595,7 +597,8 @@ class SolverSoft(SolverBase):
                 tol=1e-2,
                 maxiter=maxiter,
                 M=self.M_bsr,
-                use_cuda_graph=True
+                check_every=0,
+                use_cuda_graph=True,
             )
         elif self.solver_type == "gmres":
             iterations, residual, _ = gmres(
@@ -605,7 +608,8 @@ class SolverSoft(SolverBase):
                 tol=1e-2,
                 maxiter=maxiter,
                 M=self.M_bsr,
-                use_cuda_graph=True
+                check_every=0,
+                use_cuda_graph=True,
             )
         elif self.solver_type == "cr":
             iterations, residual, _ = cr(
@@ -615,7 +619,8 @@ class SolverSoft(SolverBase):
                 tol=1e-2,
                 maxiter=maxiter,
                 M=self.M_bsr,
-                use_cuda_graph=True
+                check_every=0,
+                use_cuda_graph=True,
             )
         else:
             raise ValueError(f"Invalid solver type: {self.solver_type}")

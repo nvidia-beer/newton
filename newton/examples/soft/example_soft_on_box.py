@@ -259,52 +259,80 @@ class SoftOnBoxExample:
             self.viewer.show_particles = True  # Enable soft body visualization
             self.viewer.show_triangles = True  # Enable mesh surface rendering
         
+        # CUDA graph capture only when plate is static (plate_amplitude == 0); otherwise replay would freeze plate motion.
+        self.graph = None
+        self._graph_needs_reset = False
+        if wp.get_device().is_cuda and self.plate_amplitude == 0.0:
+            try:
+                self._simulate()
+                self._reset_state()
+                with wp.ScopedCapture() as capture:
+                    self._simulate()
+                self.graph = capture.graph
+                wp.synchronize_device(self.model.device)
+                try:
+                    wp.capture_launch(self.graph)
+                    wp.synchronize_device(self.model.device)
+                    self._graph_needs_reset = True
+                    print("   CUDA graph captured and launch verified", flush=True)
+                except RuntimeError as e:
+                    if "Graph creation error" in str(e) or "invalid argument" in str(e).lower():
+                        wp.synchronize_device(self.model.device)
+                        self.graph = None
+                        self._reset_state()
+                        print(f"   CUDA graph launch not supported ({e}). Running without graph.", flush=True)
+                    else:
+                        raise
+            except Exception as e:
+                self.graph = None
+                self._reset_state()
+                print(f"   CUDA graph capture skipped ({e}). Running without graph.", flush=True)
+        elif self.plate_amplitude != 0.0:
+            print("   Graph capture skipped (dynamic plate motion)", flush=True)
+        else:
+            print("   Running on CPU; graph capture skipped", flush=True)
+        
         print(f"\n✓ Setup complete!")
         print(f"\n  The soft sphere should settle on top of the rigid box.")
         print(f"  Watch for stable contact without penetration.")
     
-    def step(self):
-        """Step simulation forward."""
-        # Clear forces
+    def _reset_state(self):
+        """Reset to initial state (after warmup or capture)."""
+        wp.copy(self.state_0.particle_q, self.model.particle_q)
+        wp.copy(self.state_0.particle_qd, self.model.particle_qd)
+        wp.copy(self.state_0.body_q, self.model.body_q)
+        wp.copy(self.state_0.body_qd, self.model.body_qd)
+        wp.copy(self.state_0.joint_q, self.model.joint_q)
+        wp.copy(self.state_0.joint_qd, self.model.joint_qd)
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+        self.state_1.assign(self.state_0)
+        self.sim_time = 0.0
+
+    def _do_substep(self):
+        """One substep: collide, soft step, xpbd step, combine, (plate update), swap."""
         self.state_0.clear_forces()
-        
-        # Collision detection
         contacts = self.model.collide(self.state_0)
-        
-        # Step 1: SolverSoft integrates particles (with internal forces)
         self.soft_solver.step(
             self.state_0, self.state_soft, self.control, contacts, self.sim_dt
         )
-        
-        # Step 2: XPBD integrates rigid bodies
         self.xpbd_solver.step(
             self.state_0, self.state_rigid, self.control, contacts, self.sim_dt
         )
-        
-        # Combine results: particles from SolverSoft, bodies from XPBD
         wp.copy(self.state_1.particle_q, self.state_soft.particle_q)
         wp.copy(self.state_1.particle_qd, self.state_soft.particle_qd)
         wp.copy(self.state_1.body_q, self.state_rigid.body_q)
         wp.copy(self.state_1.body_qd, self.state_rigid.body_qd)
         wp.copy(self.state_1.joint_q, self.state_rigid.joint_q)
         wp.copy(self.state_1.joint_qd, self.state_rigid.joint_qd)
-        
-        # Update plate position: sinusoidal motion up and down (after solver step)
         if self.plate_body_id is not None:
-            # Calculate target Z position: sinusoidal motion around base position
-            # Ensure plate never goes below ground (bottom of plate >= 0.0)
-            plate_half_height = 0.05  # Half of plate height (0.1m / 2)
-            min_center_z = plate_half_height  # Minimum center Z to keep bottom of plate at ground level
+            plate_half_height = 0.05
+            min_center_z = plate_half_height
             target_z_unclamped = self.plate_base_z + self.plate_amplitude * np.sin(2.0 * np.pi * self.plate_frequency * self.sim_time)
-            target_z = max(min_center_z, target_z_unclamped)  # Clamp to stay above ground
-            
-            # Calculate velocity (set to 0 if clamped to avoid sudden stops)
-            if target_z_unclamped >= min_center_z:
-                target_velocity_z = 2.0 * np.pi * self.plate_frequency * self.plate_amplitude * np.cos(2.0 * np.pi * self.plate_frequency * self.sim_time)
-            else:
-                target_velocity_z = 0.0  # Stop when hitting ground
-            
-            # Use kernel to update plate position and velocity
+            target_z = max(min_center_z, target_z_unclamped)
+            target_velocity_z = (
+                2.0 * np.pi * self.plate_frequency * self.plate_amplitude * np.cos(2.0 * np.pi * self.plate_frequency * self.sim_time)
+                if target_z_unclamped >= min_center_z else 0.0
+            )
             wp.launch(
                 self.update_plate_position_kernel,
                 dim=1,
@@ -317,11 +345,39 @@ class SoftOnBoxExample:
                 ],
                 device=self.model.device,
             )
-        
-        # Swap states
         self.state_0, self.state_1 = self.state_1, self.state_0
-        
         self.sim_time += self.sim_dt
+
+    def _simulate(self):
+        """One frame of simulation (substep loop)."""
+        for _ in range(self.substeps):
+            self._do_substep()
+
+    def step(self):
+        """Step simulation forward (one frame = substeps substeps, or one graph launch)."""
+        if self.graph is not None:
+            if self._graph_needs_reset:
+                self.sim_time = 0.0
+                self._graph_needs_reset = False
+            try:
+                wp.capture_launch(self.graph)
+            except RuntimeError as e:
+                if "Graph creation error" in str(e) or "invalid argument" in str(e).lower():
+                    print(f"   [fallback] Graph launch failed ({e}), continuing without graph.", flush=True)
+                    self.graph = None
+                    wp.synchronize_device(self.model.device)
+                    self._reset_state()
+                    for _ in range(self.substeps):
+                        self._do_substep()
+                    return
+                raise
+            self.sim_time += self.frame_dt
+            if self.substeps % 2 == 1:
+                self.state_0, self.state_1 = self.state_1, self.state_0
+            wp.synchronize_device(self.model.device)
+        else:
+            for _ in range(self.substeps):
+                self._do_substep()
     
     def render(self):
         """Render the simulation."""
@@ -333,17 +389,15 @@ class SoftOnBoxExample:
                 self.viewer.log_contacts(contacts, self.state_0)
             self.viewer.end_frame()
     
-    def run(self, num_frames: int = 2000):
+    def run(self, num_frames: int = 4000):
         """Run simulation loop."""
         print(f"\n--- Starting Simulation ---")
         print(f"  The soft sphere should settle on top of the rigid box\n")
         
+        if self.graph is not None:
+            wp.synchronize_device(self.model.device)
         for frame in range(num_frames):
-            # Step simulation (multiple substeps per frame)
-            for _ in range(self.substeps):
-                self.step()
-            
-            # Render
+            self.step()
             self.render()
             
             if frame % 100 == 0:
@@ -366,7 +420,7 @@ def main():
         help="Use force-based contacts (reactive)",
     )
     parser.add_argument("--headless", action="store_true", help="Run without viewer")
-    parser.add_argument("--num-frames", type=int, default=2000, help="Number of frames to simulate")
+    parser.add_argument("--num-frames", type=int, default=4000, help="Number of frames to simulate")
     parser.add_argument("--device", type=str, default=None, help="Compute device")
     args = parser.parse_args()
     
