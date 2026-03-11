@@ -941,6 +941,20 @@ def eval_gravity(
 
 
 @wp.kernel
+def eval_gravity_from_array(
+    gravity: wp.array(dtype=wp.vec3),
+    mass: float,
+    particle_flags: wp.array(dtype=wp.int32),
+    forces: wp.array(dtype=wp.vec3),
+):
+    """Apply gravity force to active particles; reads gravity from device array (no host sync, graph-capture safe)."""
+    tid = wp.tid()
+    if (particle_flags[tid] & PARTICLE_FLAG_ACTIVE) != 0:
+        g = gravity[0]
+        forces[tid] = wp.vec3(g[0] * mass, g[1] * mass, g[2] * mass)
+
+
+@wp.kernel
 def update_barycentric_constraints_batch(
     constraint_indices: wp.array(dtype=wp.int32),
     target_positions: wp.array(dtype=wp.vec3),

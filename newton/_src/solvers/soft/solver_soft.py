@@ -31,6 +31,7 @@ from .kernels import (
     eval_bending,
     eval_triangles_contact,
     eval_gravity,
+    eval_gravity_from_array,
     eval_soft_contacts,
     eval_particle_ground_contacts,
     solve_soft_contacts_constraint,
@@ -410,15 +411,11 @@ class SolverSoft(SolverBase):
         """Particle–ground contact forces.
 
         If ground_plane=(nx,ny,nz,d) was passed at construction, applies force-based
-        ground contact and Coulomb friction: normal resists penetration (no jump up),
-        tangential force |f_t| <= mu * N_eff with N_eff = min(|f_n|, m*g) so sliding is possible.
+        ground contact and Coulomb friction. Otherwise returns zero (ground via
+        collision pipeline: use_constraint_contacts=True and model.collide(state)).
         """
         if self._ground_plane is None:
             return wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
-        g = self._get_gravity_vec3(model)
-        gravity_mag = float((g[0] ** 2 + g[1] ** 2 + g[2] ** 2) ** 0.5)
-        if gravity_mag < 1e-9:
-            gravity_mag = 9.81
         forces = wp.zeros(
             model.particle_count, dtype=wp.vec3, device=model.device
         )
@@ -429,14 +426,12 @@ class SolverSoft(SolverBase):
                 state.particle_q,
                 state.particle_qd,
                 model.particle_radius,
-                model.particle_inv_mass,
                 model.particle_flags,
                 self._ground_ke,
                 self._ground_kd,
                 self._ground_kf,
                 self._ground_mu,
                 self._ground_plane,
-                gravity_mag,
             ],
             outputs=[forces],
             device=model.device,
@@ -450,15 +445,10 @@ class SolverSoft(SolverBase):
         if contacts is None or not hasattr(contacts, 'soft_contact_count'):
             return forces
         
-        # Get contact count (convert to Python int)
-        contact_count = int(contacts.soft_contact_count.numpy()[0])
-        if contact_count == 0:
-            return forces
-        
-        # Launch kernel to compute contact forces
+        # Launch with soft_contact_max; kernel uses soft_contact_count[0] and returns early for tid >= count (no host sync, graph-capture safe).
         wp.launch(
             kernel=eval_soft_contacts,
-            dim=contact_count,
+            dim=contacts.soft_contact_max,
             inputs=[
                 state.particle_q,
                 state.particle_qd,
@@ -498,16 +488,14 @@ class SolverSoft(SolverBase):
         return wp.array([g], dtype=wp.vec3, device=model.device)
 
     def eval_gravity_forces(self, model: Model):
-        """Evaluate gravity forces for all particles."""
+        """Evaluate gravity forces for all particles. Uses device array for gravity (no host sync, graph-capture safe)."""
         forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
         if model.particle_count:
-            # Get gravity as vec3, scale by mass
-            g = self._get_gravity_vec3(model)
-            gravity_force_wp = wp.vec3(g[0] * self.mass, g[1] * self.mass, g[2] * self.mass)
+            gravity_arr = self._get_gravity_array(model)
             wp.launch(
-                kernel=eval_gravity,
+                kernel=eval_gravity_from_array,
                 dim=model.particle_count,
-                inputs=[gravity_force_wp, model.particle_flags],
+                inputs=[gravity_arr, self.mass, model.particle_flags],
                 outputs=[forces],
                 device=model.device,
             )
@@ -729,10 +717,7 @@ class SolverSoft(SolverBase):
         if not hasattr(contacts, 'soft_contact_count'):
             return
         
-        contact_count = int(contacts.soft_contact_count.numpy()[0])
-        if contact_count == 0:
-            return
-        
+        # Kernel uses soft_contact_count[0] internally; launch with soft_contact_max so no host sync (graph-capture safe).
         particle_friction = getattr(model, "particle_friction", None)
         if particle_friction is None or not hasattr(particle_friction, "shape") or particle_friction.shape[0] != model.particle_count:
             particle_friction = wp.full(
