@@ -16,10 +16,7 @@
 # ==================================================================================
 # sim utils
 # ==================================================================================
-from ._src.sim import (
-    color_graph,
-    plot_graph,
-)
+from ._src.sim.graph_coloring import color_graph, plot_graph
 
 __all__ = [
     "color_graph",
@@ -29,7 +26,9 @@ __all__ = [
 # ==================================================================================
 # mesh utils
 # ==================================================================================
+from ._src.geometry.utils import remesh_mesh
 from ._src.utils.mesh import (
+    MeshAdjacency,
     create_box_mesh,
     create_capsule_mesh,
     create_cone_mesh,
@@ -39,9 +38,11 @@ from ._src.utils.mesh import (
     create_sphere_mesh,
     load_tetrahedral_mesh,
     save_tetrahedral_mesh,
+    solidify_mesh,
 )
 
 __all__ += [
+    "MeshAdjacency",
     "create_box_mesh",
     "create_capsule_mesh",
     "create_cone_mesh",
@@ -51,72 +52,44 @@ __all__ += [
     "create_sphere_mesh",
     "load_tetrahedral_mesh",
     "save_tetrahedral_mesh",
+    "solidify_mesh",
 ]
 
 # ==================================================================================
-# spatial math
-# TODO: move these to Warp?
+# render utils
 # ==================================================================================
-from ._src.core.spatial import (  # noqa: E402
-    quat_between_axes,
-    quat_decompose,
-    quat_from_euler,
-    quat_to_euler,
-    quat_to_rpy,
-    quat_twist,
-    quat_twist_angle,
-    transform_twist,
-    transform_wrench,
-    velocity_at_point,
+from ._src.utils.render import (  # noqa: E402
+    bourke_color_map,
 )
 
 __all__ += [
-    "quat_between_axes",
-    "quat_decompose",
-    "quat_from_euler",
-    "quat_to_euler",
-    "quat_to_rpy",
-    "quat_twist",
-    "quat_twist_angle",
-    "transform_twist",
-    "transform_wrench",
-    "velocity_at_point",
+    "bourke_color_map",
 ]
 
 # ==================================================================================
-# math utils
-# TODO: move math utils to Warp?
+# cable utils
 # ==================================================================================
-from ._src.utils import (  # noqa: E402
-    boltzmann,
-    compute_world_offsets,
-    leaky_max,
-    leaky_min,
-    smooth_max,
-    smooth_min,
-    vec_abs,
-    vec_allclose,
-    vec_inside_limits,
-    vec_leaky_max,
-    vec_leaky_min,
-    vec_max,
-    vec_min,
+from ._src.utils.cable import (  # noqa: E402
+    create_cable_stiffness_from_elastic_moduli,
+    create_parallel_transport_cable_quaternions,
+    create_straight_cable_points,
+    create_straight_cable_points_and_quaternions,
 )
 
 __all__ += [
-    "boltzmann",
+    "create_cable_stiffness_from_elastic_moduli",
+    "create_parallel_transport_cable_quaternions",
+    "create_straight_cable_points",
+    "create_straight_cable_points_and_quaternions",
+]
+
+# ==================================================================================
+# world utils
+# ==================================================================================
+from ._src.utils import compute_world_offsets  # noqa: E402
+
+__all__ += [
     "compute_world_offsets",
-    "leaky_max",
-    "leaky_min",
-    "smooth_max",
-    "smooth_min",
-    "vec_abs",
-    "vec_allclose",
-    "vec_inside_limits",
-    "vec_leaky_max",
-    "vec_leaky_min",
-    "vec_max",
-    "vec_min",
 ]
 
 # ==================================================================================
@@ -126,16 +99,6 @@ from ._src.utils.download_assets import download_asset  # noqa: E402
 
 __all__ += [
     "download_asset",
-]
-
-# ==================================================================================
-# recorders
-# ==================================================================================
-from ._src.utils.recorder import RecorderBasic, RecorderModelAndState  # noqa: E402
-
-__all__ += [
-    "RecorderBasic",
-    "RecorderModelAndState",
 ]
 
 # ==================================================================================
@@ -154,8 +117,19 @@ __all__ += [
 # import utils
 # ==================================================================================
 
-from ._src.utils.import_utils import parse_warp_value_from_string  # noqa: E402
+from ._src.utils.import_utils import string_to_warp  # noqa: E402
 
 __all__ += [
-    "parse_warp_value_from_string",
+    "string_to_warp",
+]
+
+# ==================================================================================
+# texture utils
+# ==================================================================================
+
+from ._src.utils.texture import load_texture, normalize_texture  # noqa: E402
+
+__all__ += [
+    "load_texture",
+    "normalize_texture",
 ]

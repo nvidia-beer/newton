@@ -1011,6 +1011,7 @@ def main():
     parser.add_argument("--csv_log_interval", type=int, default=None, metavar="N", help="Override: log CSV every N frames (from JSON if not set).")
     parser.add_argument("--gait_baseline", type=float, default=None, metavar="F", help="Override: baseline pressure; higher = more lift / smaller joint angle (from JSON if not set).")
     parser.add_argument("--gait_amplitude", type=float, default=None, metavar="F", help="Override: gait pressure amplitude; use with gait_baseline to tune lift (from JSON if not set).")
+    parser.add_argument("--viewer", type=str, default="rtx", choices=["gl", "rtx", "rerun", "null"], help="Viewer type (default: rtx)")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
@@ -1058,18 +1059,32 @@ def main():
 
     wp.init()
     with wp.ScopedDevice(args.device):
-        if args.headless:
+        if args.headless or args.viewer == "null":
             viewer = None
-        else:
+        elif args.viewer == "rtx":
+            try:
+                viewer = newton.viewer.ViewerRTX(headless=False, width=1920, height=1080)
+            except Exception as e:
+                print(f"RTX viewer failed: {e}, falling back to GL")
+                try:
+                    viewer = newton.viewer.ViewerGL(width=1920, height=1080)
+                except Exception as e2:
+                    print(f"GL viewer failed: {e2}")
+                    viewer = None
+        elif args.viewer == "gl":
             try:
                 viewer = newton.viewer.ViewerGL(width=1920, height=1080)
             except Exception as e:
                 print(f"OpenGL viewer failed: {e}")
-                try:
-                    viewer = newton.viewer.ViewerRerun(keep_historical_data=True)
-                except Exception as e2:
-                    print(f"Rerun viewer failed: {e2}")
-                    viewer = None
+                viewer = None
+        elif args.viewer == "rerun":
+            try:
+                viewer = newton.viewer.ViewerRerun(keep_historical_data=True)
+            except Exception as e:
+                print(f"Rerun viewer failed: {e}")
+                viewer = None
+        else:
+            viewer = None
         nch = loaded["num_chambers_x"] * loaded["num_chambers_y"] * loaded["num_chambers_z"]
         # Paper (Gamus et al.) three-link model: joints at 1/(2+β) and (1+β)/(2+β) along crawl axis.
         paper_beta = loaded.get("paper_beta", 2.0)

@@ -124,12 +124,16 @@ class Example:
             device=self.model.device
         )
         
-        # Create solver with implicit integration
+        # Create solver with implicit integration (constraint contacts + enough iterations for stability)
         self.solver = SolverSoft(
             model=self.model,
             dt=self.sim_dt,
             mass=mass,
-            solver_type="bicgstab"
+            solver_type="bicgstab",
+            use_constraint_contacts=True,
+            linear_solver_maxiter=100,
+            contact_max_velocity=15.0,
+            contact_max_correction=0.015,
         )
         
         # Create states
@@ -265,8 +269,11 @@ class Example:
             # Track ball position (Z is up)
             positions = self.state_0.particle_q.numpy()
             center = positions.mean(axis=0)
-            height = center[2]
-            
+            height = float(center[2])
+            if not np.isfinite(height):
+                print(f"\n   Simulation diverged (NaN/Inf at frame {frame}). Try --substeps 12 or lower stiffness (--k_mu / --k_lambda).", flush=True)
+                break
+
             # Detect bounces
             velocities = self.state_0.particle_qd.numpy()
             avg_vel_z = velocities.mean(axis=0)[2]
@@ -319,6 +326,9 @@ def main():
                         help='Number of frames (default: 1800)')
     parser.add_argument('--device', type=str, default=None,
                         help='Compute device')
+    parser.add_argument('--viewer', type=str, default='rtx',
+                        choices=['gl', 'rtx', 'rerun', 'usd', 'null'],
+                        help='Viewer type (default: rtx)')
     parser.add_argument('--headless', action='store_true',
                         help='Run without visualization')
     
@@ -327,24 +337,36 @@ def main():
     wp.init()
     
     with wp.ScopedDevice(args.device):
-        # Create viewer - use OpenGL viewer without explicit size (use defaults like other examples)
-        if args.headless:
+        # Create viewer
+        if args.headless or args.viewer == 'null':
             viewer = None
+        elif args.viewer == 'rtx':
+            try:
+                viewer = newton.viewer.ViewerRTX(headless=False, width=1920, height=1080)
+            except Exception as e:
+                print(f"Could not create RTX viewer: {e}, falling back to GL")
+                try:
+                    viewer = newton.viewer.ViewerGL(width=1920, height=1080)
+                except Exception as e2:
+                    print(f"Could not create GL viewer: {e2}")
+                    viewer = None
+        elif args.viewer == 'rerun':
+            try:
+                viewer = newton.viewer.ViewerRerun(keep_historical_data=True)
+            except Exception as e:
+                print(f"Could not create Rerun viewer: {e}")
+                viewer = None
+        elif args.viewer == 'usd':
+            viewer = None  # USD requires output path; run headless
         else:
             try:
-                # Use ViewerGL with default size (matches other examples)
-                viewer = newton.viewer.ViewerGL(
-                    width=1920,
-                    height=1080,
-                )
+                viewer = newton.viewer.ViewerGL(width=1920, height=1080)
             except Exception as e:
                 print(f"Could not create OpenGL viewer: {e}")
                 try:
-                    # Fall back to Rerun
                     viewer = newton.viewer.ViewerRerun(keep_historical_data=True)
                 except Exception as e2:
                     print(f"Could not create Rerun viewer: {e2}")
-                    print("Running headless...")
                     viewer = None
         
         example = Example(

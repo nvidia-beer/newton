@@ -529,5 +529,3 @@ def apply_crawl_kinematic_from_buf(
         particle_q[tid] = wp.vec3(q[0], q[1] + body_disp, q[2])
     else:
         particle_q[tid] = wp.vec3(q[0] + body_disp, q[1], q[2])
-
-

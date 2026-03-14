@@ -639,6 +639,7 @@ def main():
     parser.add_argument("--xpbd_iterations", type=int, default=10)
     parser.add_argument("--num_frames", type=int, default=1800)
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--viewer", type=str, default="rtx", choices=["gl", "rtx", "rerun", "null"], help="Viewer type (default: rtx)")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--no-debug-track", action="store_true", help="Disable position tracking (on by default)")
 
@@ -646,18 +647,31 @@ def main():
 
     wp.init()
     with wp.ScopedDevice(args.device):
-        if args.headless:
+        if args.headless or args.viewer == "null":
             viewer = None
-        else:
+        elif args.viewer == "rtx":
+            try:
+                viewer = newton.viewer.ViewerRTX(headless=False, width=1920, height=1080)
+            except Exception as e:
+                print(f"RTX viewer failed: {e}, falling back to GL")
+                try:
+                    viewer = newton.viewer.ViewerGL(width=1920, height=1080)
+                except Exception:
+                    viewer = None
+        elif args.viewer == "gl":
             try:
                 viewer = newton.viewer.ViewerGL(width=1920, height=1080)
             except Exception as e:
                 print(f"Could not create OpenGL viewer: {e}")
-                try:
-                    viewer = newton.viewer.ViewerRerun(keep_historical_data=True)
-                except Exception as e2:
-                    print(f"Could not create Rerun viewer: {e2}")
-                    viewer = None
+                viewer = None
+        elif args.viewer == "rerun":
+            try:
+                viewer = newton.viewer.ViewerRerun(keep_historical_data=True)
+            except Exception as e:
+                print(f"Could not create Rerun viewer: {e}")
+                viewer = None
+        else:
+            viewer = None
 
         example = Example(
             viewer=viewer,

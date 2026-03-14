@@ -1,3 +1,6 @@
+.. SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+.. SPDX-License-Identifier: CC-BY-4.0
+
 .. _Articulations:
 
 Articulations
@@ -108,6 +111,138 @@ Since :meth:`~newton.ModelBuilder.add_body` automatically adds a free joint, the
 
 This scene can now be simulated by both maximal-coordinate and generalized-coordinate solvers.
 
+Kinematic links and bodies
+--------------------------
+
+Newton distinguishes three motion modes for rigid bodies:
+
+**Static**
+  Does not move. Typical examples are world-attached shapes or links attached to world with a fixed joint.
+
+**Kinematic**
+  Moves only from user-prescribed state updates. It can have joint DOFs (free, revolute, etc.), but external forces do not accelerate it.
+
+**Dynamic**
+  Moves from forces, constraints, and contacts during solver integration.
+
+Kinematic bodies are created through the ``is_kinematic=True`` flag on :meth:`~newton.ModelBuilder.add_link`
+or :meth:`~newton.ModelBuilder.add_body`. Only root links (joint parent ``-1``) may be kinematic.
+Setting a non-root link to kinematic raises a :class:`ValueError` during articulation construction.
+
+Common combinations
+^^^^^^^^^^^^^^^^^^^
+
+The following patterns are valid and commonly used:
+
+1. **Kinematic free-base body**: ``add_body(is_kinematic=True)`` (free joint root).
+2. **Kinematic articulated root**: root link is kinematic and attached to world with a non-fixed joint
+   (for example revolute), with dynamic descendants.
+3. **Static fixed-root body**: root link is kinematic and attached to world with a fixed joint.
+   This has zero joint DOFs and behaves as static.
+
+.. code-block:: python
+
+   builder = newton.ModelBuilder()
+
+   # 1) Kinematic free-base body (add_body creates free joint + articulation)
+   kinematic_free = builder.add_body(is_kinematic=True, mass=1.0)
+
+   # 2) Kinematic revolute root with a dynamic child
+   root = builder.add_link(is_kinematic=True, mass=1.0)
+   child = builder.add_link(mass=1.0)
+   j_root = builder.add_joint_revolute(parent=-1, child=root, axis=newton.Axis.Z)
+   j_child = builder.add_joint_revolute(parent=root, child=child, axis=newton.Axis.Z)
+   builder.add_articulation([j_root, j_child])
+
+   # 3) Static fixed-root body (zero joint DOFs)
+   static_root = builder.add_link(is_kinematic=True, mass=1.0)
+   j_static = builder.add_joint_fixed(parent=-1, child=static_root)
+   builder.add_articulation([j_static])
+
+.. list-table:: Static vs kinematic vs dynamic bodies/links
+   :header-rows: 1
+   :widths: 22 26 26 26
+
+   * - Property
+     - Static
+     - Kinematic
+     - Dynamic
+   * - Typical definition
+     - World-attached shape, or root link fixed to world
+     - ``is_kinematic=True`` on a root link/body with free/revolute/etc. joint
+     - Default link/body (no kinematic flag)
+   * - Joint DOFs
+     - 0 for fixed-root links
+     - Joint-dependent (free/revolute/D6/etc.)
+     - Joint-dependent
+   * - Position/velocity state
+     - Constant (not integrated)
+     - User-prescribed ``q``/``qd`` (or ``body_q``/``body_qd`` depending on solver coordinates)
+     - Integrated by solver from dynamics
+   * - Response to applied force/torque
+     - No acceleration
+     - No acceleration (force-immune for own motion)
+     - Accelerates according to dynamics
+   * - Collision/contact participation
+     - Yes (acts as obstacle/support)
+     - Yes (can push dynamic bodies while following prescribed motion)
+     - Yes
+   * - Mass/inertia
+     - Not used for motion when fixed
+     - Preserved for body properties and future dynamic switching
+     - Fully used by dynamics
+   * - Mass matrix / constraint role
+     - No active DOFs when fixed to world
+     - Solver-dependent infinite-mass approximation along kinematic DOFs
+     - Standard articulated mass matrix
+   * - Typical applications
+     - Environment geometry, fixtures
+     - Conveyors, robot bases on trajectories, scripted mechanism roots
+     - Physically simulated robots and objects
+
+Velocity consistency for prescribed motion
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For prescribed motion, it is up to the user to keep position and velocity updates consistent across time.
+In particular, ``qd`` should be consistent with the finite-differenced motion implied by ``q``.
+For scalar coordinates, this is the familiar ``q_next = q + qd * dt`` relation; quaternion-based coordinates
+(for example FREE/BALL) require manifold-consistent quaternion integration instead of direct addition.
+
+When writing kinematic state values:
+
+- For generalized-coordinate workflows, write :attr:`newton.State.joint_q` and :attr:`newton.State.joint_qd`,
+  then call :func:`newton.eval_fk` so maximal coordinates (for collisions and body-space consumers) are current.
+- For maximal-coordinate workflows, write :attr:`newton.State.body_q` and :attr:`newton.State.body_qd` directly.
+
+Rigid-body solver behavior
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The rigid-body solvers (:class:`~newton.solvers.SolverMuJoCo`,
+:class:`~newton.solvers.SolverFeatherstone`, :class:`~newton.solvers.SolverXPBD`,
+:class:`~newton.solvers.SolverSemiImplicit`) support the same user-facing
+kinematic authoring model:
+
+- Kinematic links keep their declared joint type (free/revolute/etc.).
+- A kinematic root attached to world by a fixed joint remains fixed (zero DOFs).
+- Kinematic links participate in collisions/contacts and can impart motion to dynamic bodies.
+- Applied forces do not drive kinematic motion; motion is user-prescribed.
+
+Implementation details differ by coordinate formulation:
+
+- Generalized-coordinate solvers (:class:`~newton.solvers.SolverMuJoCo`,
+  :class:`~newton.solvers.SolverFeatherstone`) treat kinematic motion through prescribed joint state.
+- Maximal-coordinate solvers (:class:`~newton.solvers.SolverXPBD`,
+  :class:`~newton.solvers.SolverSemiImplicit`) use prescribed body transforms/twists.
+- Contact handling is not identical across all four solvers. :class:`~newton.solvers.SolverXPBD`,
+  :class:`~newton.solvers.SolverMuJoCo`, and :class:`~newton.solvers.SolverFeatherstone`
+  treat kinematic bodies like infinite-mass colliders for contact response, while
+  :class:`~newton.solvers.SolverSemiImplicit` currently preserves prescribed state but
+  does not zero inverse mass/inertia inside its contact solver. Contacts against
+  kinematic bodies can therefore be softer under SemiImplicit.
+
+In :class:`~newton.solvers.SolverMuJoCo`, kinematic DOFs are regularized with a
+large internal armature value.
+
 .. _Joint types:
 
 Joint types
@@ -158,6 +293,11 @@ Joint types
      - up to 6
      - up to 6
      - up to 6
+   * - ``JointType.CABLE``
+     - Cable joint with 1 linear (stretch/shear) and 1 angular (bend/twist) degree of freedom
+     - 2
+     - 2
+     - 2
 
 D6 joints are the most general joint type in Newton and can be used to represent any combination of translational and rotational degrees of freedom.
 Prismatic, revolute, planar, and universal joints can be seen as special cases of the D6 joint.
@@ -197,6 +337,154 @@ The velocity dofs for each joint can be queried as follows:
     f0 = Control.joint_f[qd_start]
     f1 = Control.joint_f[qd_start + 1]
     ...
+
+Common articulation workflows
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+ArticulationView: selection interface for RL and batched control
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+:class:`newton.selection.ArticulationView` is the high-level interface for selecting a subset
+of articulations and accessing their joints/links/DoFs with stable tensor shapes. This is
+especially useful in RL pipelines where the same observation/action logic is applied to many
+parallel environments.
+
+Construct a view by matching articulation keys with a pattern and optional filters:
+
+.. code-block:: python
+
+    import newton
+
+    # select all articulations whose key starts with "robot"
+    view = newton.selection.ArticulationView(model, pattern="robot*")
+
+    # select only scalar-joint articulations (exclude quaternion-root joint types)
+    scalar_view = newton.selection.ArticulationView(
+        model,
+        pattern="robot*",
+        include_joint_types=[newton.JointType.PRISMATIC, newton.JointType.REVOLUTE],
+        exclude_joint_types=[newton.JointType.FREE, newton.JointType.BALL],
+    )
+
+Use views to read/write batched state slices (joint positions/velocities, root transforms,
+link transforms) without manual index bookkeeping.
+
+Center ``joint_q`` at joint limits with Warp kernels
+""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+Joint limits are stored in DoF order (``joint_qd`` layout), while ``joint_q`` stores generalized
+joint coordinates (which may include quaternion coordinates for free/ball joints).
+
+A robust pattern is:
+
+1. Loop over joints.
+2. Use ``Model.joint_qd_start`` to find each joint's DoF span.
+3. Use ``Model.joint_q_start`` to find where that joint starts in ``State.joint_q``.
+4. Center only scalar coordinates (for example, revolute/prismatic axes) and skip quaternion joints.
+
+.. code-block:: python
+
+    import warp as wp
+    import newton
+
+
+    @wp.kernel
+    def center_joint_q_from_limits(
+        joint_q_start: wp.array(dtype=wp.int32),
+        joint_qd_start: wp.array(dtype=wp.int32),
+        joint_type: wp.array(dtype=wp.int32),
+        joint_limit_lower: wp.array(dtype=float),
+        joint_limit_upper: wp.array(dtype=float),
+        joint_q: wp.array(dtype=float),
+    ):
+        joint_id = wp.tid()
+
+        # DoF span for this joint in qd-order arrays (limits/axes/forces)
+        qd_begin = joint_qd_start[joint_id]
+        qd_end = joint_qd_start[joint_id + 1]
+
+        # Start index for this joint in generalized coordinates q
+        q_begin = joint_q_start[joint_id]
+
+        # Skip free/ball joints because their q entries include quaternion coordinates.
+        jt = joint_type[joint_id]
+        if (
+            jt == int(newton.JointType.FREE)
+            or jt == int(newton.JointType.BALL)
+            or jt == int(newton.JointType.DISTANCE)
+        ):
+            return
+
+        # For scalar joints, q coordinates align with this joint's DoF count.
+        for local_dof in range(qd_end - qd_begin):
+            qd_idx = qd_begin + local_dof
+            q_idx = q_begin + local_dof
+
+            lower = joint_limit_lower[qd_idx]
+            upper = joint_limit_upper[qd_idx]
+            if wp.isfinite(lower) and wp.isfinite(upper):
+                joint_q[q_idx] = 0.5 * (lower + upper)
+
+
+    # Launch over all joints in the model
+    wp.launch(
+        kernel=center_joint_q_from_limits,
+        dim=model.joint_count,
+        inputs=[
+            model.joint_q_start,
+            model.joint_qd_start,
+            model.joint_type,
+            model.joint_limit_lower,
+            model.joint_limit_upper,
+            state.joint_q,
+        ],
+    )
+
+    # Recompute transforms after editing generalized coordinates
+    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+Move articulations in world space
+"""""""""""""""""""""""""""""""""
+
+Use :meth:`newton.selection.ArticulationView.set_root_transforms` to move selected articulations:
+
+.. code-block:: python
+
+    view = newton.selection.ArticulationView(model, pattern="robot*")
+    root_tf = view.get_root_transforms(state).numpy()
+
+    # shift +0.2 m along world x for all selected articulations
+    root_tf[..., 0] += 0.2
+    view.set_root_transforms(state, root_tf)
+
+    # recompute link transforms from generalized coordinates
+    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+For floating-base articulations, this updates the root free-joint coordinates in ``joint_q``.
+For fixed-base articulations, ``set_root_transforms()`` moves the articulation by writing
+``Model.joint_X_p`` (there is no free-joint root state to edit).
+
+Use ``ArticulationView`` to inspect and modify selected articulations
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+``ArticulationView`` provides stable, per-articulation access to links, joints, DoFs, and attributes:
+
+.. code-block:: python
+
+    view = newton.selection.ArticulationView(model, pattern="robot*")
+
+    # inspect
+    q = view.get_dof_positions(state)         # shape [world_count, articulation_count, dof_count]
+    qd = view.get_dof_velocities(state)       # shape [world_count, articulation_count, dof_count]
+    link_q = view.get_link_transforms(state)  # shape [world_count, articulation_count, link_count]
+
+    # edit selected articulation values in-place
+    q_np = q.numpy()
+    q_np[..., 0] = 0.0
+    view.set_dof_positions(state, q_np)
+
+    # if model attributes are edited through the view, notify the solver afterwards
+    # solver.notify_model_changed()
 
 Axis-related quantities
 ^^^^^^^^^^^^^^^^^^^^^^^
@@ -271,3 +559,30 @@ Given the parent body's world transform :math:`x_{wp}` and the joint transform :
 
 .. autofunction:: newton.eval_ik
    :noindex:
+
+
+.. _Orphan joints:
+
+Orphan joints
+-------------
+
+An **orphan joint** is a joint that is not part of any articulation. This situation can arise when:
+
+* The USD asset does not define a ``PhysicsArticulationRootAPI`` on any prim, so no articulations are discovered during parsing.
+* A joint connects two bodies that are not under any ``PhysicsArticulationRootAPI`` prim, even though other articulations exist in the scene.
+
+When orphan joints are detected during USD parsing (:meth:`~newton.ModelBuilder.add_usd`), Newton issues a warning with the affected joint paths.
+
+**Validation and finalization**
+
+By default, :meth:`~newton.ModelBuilder.finalize` validates that every joint belongs to an articulation and raises a :class:`ValueError` if orphan joints are found.
+To proceed with orphan joints, skip this validation:
+
+.. code-block:: python
+
+   model = builder.finalize(skip_validation_joints=True)
+
+**Solver compatibility**
+
+Only maximal-coordinate solvers (:class:`~newton.solvers.SolverXPBD`, :class:`~newton.solvers.SolverSemiImplicit`) support orphan joints.
+Generalized-coordinate solvers (:class:`~newton.solvers.SolverFeatherstone`, :class:`~newton.solvers.SolverMuJoCo`) require every joint to belong to an articulation.

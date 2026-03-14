@@ -528,6 +528,7 @@ def main():
     parser.add_argument("--chamber_stiffness_scale", type=str, default=None)
     parser.add_argument("--chamber_inflation_disabled", type=str, default=None)
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--viewer", type=str, default="rtx", choices=["gl", "rtx", "rerun", "null"], help="Viewer type (default: rtx)")
     parser.add_argument("--headless", action="store_true")
     args = parser.parse_args()
 
@@ -539,18 +540,31 @@ def main():
 
     wp.init()
     with wp.ScopedDevice(args.device):
-        if args.headless:
+        if args.headless or args.viewer == "null":
             viewer = None
-        else:
+        elif args.viewer == "rtx":
+            try:
+                viewer = newton.viewer.ViewerRTX(headless=False, width=1920, height=1080)
+            except Exception as e:
+                print(f"RTX viewer failed: {e}, falling back to GL")
+                try:
+                    viewer = newton.viewer.ViewerGL(width=1920, height=1080)
+                except Exception:
+                    viewer = None
+        elif args.viewer == "gl":
             try:
                 viewer = newton.viewer.ViewerGL(width=1920, height=1080)
             except Exception as e:
                 print(f"OpenGL viewer failed: {e}")
-                try:
-                    viewer = newton.viewer.ViewerRerun(keep_historical_data=True)
-                except Exception as e2:
-                    print(f"Rerun viewer failed: {e2}")
-                    viewer = None
+                viewer = None
+        elif args.viewer == "rerun":
+            try:
+                viewer = newton.viewer.ViewerRerun(keep_historical_data=True)
+            except Exception as e:
+                print(f"Rerun viewer failed: {e}")
+                viewer = None
+        else:
+            viewer = None
         example = Example(
             viewer=viewer,
             length=args.length,

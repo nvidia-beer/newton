@@ -419,6 +419,7 @@ def main():
         action="store_true",
         help="Use force-based contacts (reactive)",
     )
+    parser.add_argument("--viewer", type=str, default="rtx", choices=["gl", "rtx", "rerun", "null"], help="Viewer type (default: rtx)")
     parser.add_argument("--headless", action="store_true", help="Run without viewer")
     parser.add_argument("--num-frames", type=int, default=4000, help="Number of frames to simulate")
     parser.add_argument("--device", type=str, default=None, help="Compute device")
@@ -430,51 +431,52 @@ def main():
     wp.init()
     
     with wp.ScopedDevice(args.device):
-        # Create viewer - use OpenGL viewer without explicit size (use defaults like other examples)
-        if args.headless:
+        # Create viewer
+        if args.headless or args.viewer == "null":
             viewer = None
             print("Running in headless mode (no GUI)")
         else:
             import os
             display = os.environ.get("DISPLAY")
             print(f"DISPLAY={display}")
-            
-            try:
-                # Use ViewerGL with default size (matches other examples)
-                viewer = newton.viewer.ViewerGL(
-                    width=1920,
-                    height=1080,
-                )
-                print("✓ ViewerGL created successfully")
-                
-                # Try to ensure window is visible and process initial events
-                if hasattr(viewer, 'renderer') and hasattr(viewer.renderer, 'window'):
-                    window = viewer.renderer.window
-                    print(f"  Window created: {window.width}x{window.height}, visible={window.visible}")
-                    
-                    # Process events to make window appear
-                    if hasattr(viewer.renderer, 'update'):
-                        viewer.renderer.update()
-                    
-                    if hasattr(window, 'set_visible'):
-                        window.set_visible(True)
-                    if hasattr(window, 'activate'):
-                        window.activate()
-                    if hasattr(window, 'switch_to'):
-                        window.switch_to()
-                    
-                    print(f"✓ Window should be visible now")
-            except Exception as e:
-                print(f"✗ Could not create OpenGL viewer: {e}")
-                import traceback
-                traceback.print_exc()
+            viewer = None
+            if args.viewer == "rtx":
                 try:
-                    # Fall back to Rerun
+                    viewer = newton.viewer.ViewerRTX(headless=False, width=1920, height=1080)
+                    print("✓ ViewerRTX created successfully")
+                except Exception as e:
+                    print(f"RTX viewer failed: {e}, falling back to GL")
+                    viewer = None
+            if viewer is None and args.viewer in ("gl", "rtx"):
+                try:
+                    viewer = newton.viewer.ViewerGL(width=1920, height=1080)
+                    print("✓ ViewerGL created successfully")
+                    if hasattr(viewer, 'renderer') and hasattr(viewer.renderer, 'window'):
+                        window = viewer.renderer.window
+                        if hasattr(viewer.renderer, 'update'):
+                            viewer.renderer.update()
+                        if hasattr(window, 'set_visible'):
+                            window.set_visible(True)
+                        if hasattr(window, 'activate'):
+                            window.activate()
+                        if hasattr(window, 'switch_to'):
+                            window.switch_to()
+                except Exception as e:
+                    print(f"✗ Could not create OpenGL viewer: {e}")
+                    viewer = None
+                    if args.viewer == "rtx":
+                        try:
+                            viewer = newton.viewer.ViewerRerun(keep_historical_data=True)
+                            print("✓ ViewerRerun fallback created")
+                        except Exception as e2:
+                            print(f"✗ Could not create Rerun viewer: {e2}")
+                            viewer = None
+            if viewer is None and args.viewer == "rerun":
+                try:
                     viewer = newton.viewer.ViewerRerun(keep_historical_data=True)
-                    print("✓ ViewerRerun created successfully (check browser at http://localhost:9090)")
-                except Exception as e2:
-                    print(f"✗ Could not create Rerun viewer: {e2}")
-                    print("Running headless...")
+                    print("✓ ViewerRerun created successfully")
+                except Exception as e:
+                    print(f"✗ Could not create Rerun viewer: {e}")
                     viewer = None
         
         # Create example

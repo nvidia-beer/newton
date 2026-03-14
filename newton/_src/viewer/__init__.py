@@ -43,11 +43,22 @@ from .viewer_gl import ViewerGL
 from .viewer_null import ViewerNull
 from .viewer_rerun import ViewerRerun
 from .viewer_usd import ViewerUSD
+from .viewer_viser import ViewerViser
 
 __all__ = [
     "ViewerFile",
     "ViewerGL",
     "ViewerNull",
+    "ViewerRTX",
     "ViewerRerun",
     "ViewerUSD",
+    "ViewerViser",
 ]
+
+
+def __getattr__(name: str):
+    """Lazy-import ViewerRTX so ovrtx/usd are only required when RTX viewer is used."""
+    if name == "ViewerRTX":
+        from .viewer_rtx import ViewerRTX
+        return ViewerRTX
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

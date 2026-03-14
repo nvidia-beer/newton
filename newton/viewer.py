@@ -13,13 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Import all viewer classes (they handle missing dependencies at instantiation time)
-from ._src.viewer import ViewerFile, ViewerGL, ViewerNull, ViewerRerun, ViewerUSD
+# Import all viewer classes except ViewerRTX (lazy-loaded so ovrtx is only required when using RTX)
+from ._src.viewer import ViewerFile, ViewerGL, ViewerNull, ViewerRerun, ViewerUSD, ViewerViser
 
 __all__ = [
     "ViewerFile",
     "ViewerGL",
     "ViewerNull",
+    "ViewerRTX",
     "ViewerRerun",
     "ViewerUSD",
+    "ViewerViser",
 ]
+
+
+def __getattr__(name: str):
+    """Lazy-import ViewerRTX so ovrtx/usd are only required when RTX viewer is used."""
+    if name == "ViewerRTX":
+        from ._src.viewer import ViewerRTX
+        return ViewerRTX
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

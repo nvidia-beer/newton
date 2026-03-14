@@ -443,6 +443,9 @@ def main():
                         help='Number of frames (default: 600)')
     parser.add_argument('--device', type=str, default=None,
                         help='Compute device')
+    parser.add_argument('--viewer', type=str, default='rtx',
+                        choices=['gl', 'rtx', 'rerun', 'null'],
+                        help='Viewer type (default: rtx)')
     parser.add_argument('--headless', action='store_true',
                         help='Run without visualization')
     
@@ -452,24 +455,31 @@ def main():
     
     with wp.ScopedDevice(args.device):
         # Create viewer
-        if args.headless:
+        if args.headless or args.viewer == 'null':
             viewer = None
-        else:
+        elif args.viewer == 'rtx':
             try:
-                # Try OpenGL viewer first
-                viewer = newton.viewer.ViewerGL(
-                    width=1920,
-                    height=1080,
-                )
+                viewer = newton.viewer.ViewerRTX(headless=False, width=1920, height=1080)
+            except Exception as e:
+                print(f"RTX viewer failed: {e}, falling back to GL")
+                try:
+                    viewer = newton.viewer.ViewerGL(width=1920, height=1080)
+                except Exception:
+                    viewer = None
+        elif args.viewer == 'gl':
+            try:
+                viewer = newton.viewer.ViewerGL(width=1920, height=1080)
             except Exception as e:
                 print(f"Could not create OpenGL viewer: {e}")
-                try:
-                    # Fall back to Rerun
-                    viewer = newton.viewer.ViewerRerun(keep_historical_data=True)
-                except Exception as e2:
-                    print(f"Could not create Rerun viewer: {e2}")
-                    print("Running headless...")
-                    viewer = None
+                viewer = None
+        elif args.viewer == 'rerun':
+            try:
+                viewer = newton.viewer.ViewerRerun(keep_historical_data=True)
+            except Exception as e:
+                print(f"Could not create Rerun viewer: {e}")
+                viewer = None
+        else:
+            viewer = None
         
         example = Example(
             viewer=viewer,

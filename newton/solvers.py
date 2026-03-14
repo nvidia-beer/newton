@@ -96,7 +96,7 @@ Supported Features
      - ❌
    * - :class:`~newton.solvers.SolverVBD`
      - Implicit
-     - ❌
+     - ✅
      - ❌
      - ✅
      - ✅
@@ -133,7 +133,11 @@ from ._src.solvers import (
     create_tetra_sphere,
     create_tetra_cylinder,
     create_tetra_box,
+    style3d,
 )
+
+# solver flags
+from ._src.solvers.flags import SolverNotifyFlags
 
 __all__ = [
     "SolverBase",
@@ -144,6 +148,7 @@ __all__ = [
     "SolverImplicitMPM",
     "SolverInflatable",
     "SolverMuJoCo",
+    "SolverNotifyFlags",
     "SolverSemiImplicit",
     "SolverSoft",
     "SolverStyle3D",
@@ -157,6 +162,7 @@ __all__ = [
     "create_tetra_sphere",
     "create_tetra_cylinder",
     "create_tetra_box",
+    "style3d",
 ]
 
 # solver flags

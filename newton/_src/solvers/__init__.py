@@ -30,7 +30,7 @@ from .mujoco import SolverMuJoCo
 from .semi_implicit import SolverSemiImplicit
 from .soft import SolverSoft
 from .solver import SolverBase
-from .style3d import SolverStyle3D
+from .style3d.solver_style3d import SolverStyle3D
 from .vbd import SolverVBD
 from .xpbd import SolverXPBD
 

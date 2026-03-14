@@ -100,6 +100,7 @@ class Example(InchwormCrawlingExample):
         surface_tris_flat = surface_tris.ravel().astype(np.int32)
 
         sand_builder = newton.ModelBuilder()
+        SolverImplicitMPM.register_custom_attributes(sand_builder)
         voxel_size = 0.045
         # Sand only to the right (Y+) of the inchworm so there is no initial collision
         bed_lo = np.array([-SAND_X_EXTENT, SAND_Y_MIN, 0.0])
@@ -110,7 +111,7 @@ class Example(InchwormCrawlingExample):
         self.sand_model.particle_ke = 1.0e15
         self.sand_state_0 = self.sand_model.state()
 
-        mpm_options = SolverImplicitMPM.Options()
+        mpm_options = SolverImplicitMPM.Config()
         mpm_options.voxel_size = voxel_size
         mpm_options.tolerance = 1.0e-6
         mpm_options.grid_type = "fixed"
@@ -120,7 +121,7 @@ class Example(InchwormCrawlingExample):
         mpm_options.max_iterations = 50
         mpm_options.critical_fraction = 0.0
 
-        self.mpm_model = SolverImplicitMPM.Model(self.sand_model, mpm_options)
+        self.mpm_solver = SolverImplicitMPM(self.sand_model, mpm_options)
         sand_device = self.sand_model.device
         # Ground mesh large enough to cover sand region (y up to SAND_Y_MAX = 2)
         ground_verts, ground_indices = newton.utils.create_plane_mesh(4.0, 4.0)
@@ -137,7 +138,7 @@ class Example(InchwormCrawlingExample):
         )
         self._update_worm_collider_mesh()
         worm_mesh = wp.Mesh(self._worm_mesh_points, self._worm_mesh_indices)
-        self.mpm_model.setup_collider(
+        self.mpm_solver.setup_collider(
             collider_meshes=[self._ground_mesh, worm_mesh],
             collider_body_ids=[None, None],
             collider_friction=[GROUND_SAND_FRICTION, WORM_SAND_FRICTION],
@@ -145,8 +146,6 @@ class Example(InchwormCrawlingExample):
             collider_projection_threshold=[None, WORM_COLLIDER_PROJECTION_THRESHOLD],
             model=self.sand_model,
         )
-        self.mpm_solver = SolverImplicitMPM(self.mpm_model, mpm_options)
-        self.mpm_solver.enrich_state(self.sand_state_0)
 
         max_collider_nodes = 1 << 18
         self._collider_impulses = wp.zeros(max_collider_nodes, dtype=wp.vec3, device=self.model.device)
@@ -182,7 +181,7 @@ class Example(InchwormCrawlingExample):
         self._collider_impulses.zero_()
         self._collider_impulse_pos.zero_()
         self._collider_ids.fill_(-1)
-        imp, pos, cid = self.mpm_solver.collect_collider_impulses(self.sand_state_0)
+        imp, pos, cid = self.mpm_solver._collect_collider_impulses(self.sand_state_0)
         imp_np = np.asarray(imp.numpy())
         pos_np = np.asarray(pos.numpy())
         cid_np = np.asarray(cid.numpy())
@@ -277,7 +276,7 @@ class Example(InchwormCrawlingExample):
             if self.sand_enabled:
                 self._update_worm_collider_mesh()
                 worm_mesh = wp.Mesh(self._worm_mesh_points, self._worm_mesh_indices)
-                self.mpm_model.setup_collider(
+                self.mpm_solver.setup_collider(
                     collider_meshes=[self._ground_mesh, worm_mesh],
                     collider_body_ids=[None, None],
                     collider_friction=[GROUND_SAND_FRICTION, WORM_SAND_FRICTION],
@@ -293,7 +292,7 @@ class Example(InchwormCrawlingExample):
                     dt=self.sim_dt,
                 )
                 for _ in range(PROJECT_OUTSIDE_ITERATIONS):
-                    self.mpm_solver.project_outside(
+                    self.mpm_solver._project_outside(
                         self.sand_state_0, self.sand_state_0, self.sim_dt
                     )
                 self._collect_collider_impulses()
@@ -306,18 +305,22 @@ class Example(InchwormCrawlingExample):
             self._step_count += 1
 
     def render(self):
+        # Log sand points before super().render() so the RTX viewer registers "/sand" during
+        # BUILD phase (it only adds point clouds to _mesh_prim_paths when log_points is called
+        # before the first end_frame()). After BUILD, calling log_points each frame updates positions.
+        if self.viewer and self.sand_enabled:
+            self.viewer.log_points(
+                "/sand",
+                points=self.sand_state_0.particle_q,
+                radii=self.sand_model.particle_radius,
+                colors=self.particle_render_colors,
+                hidden=not self.viewer.show_particles,
+            )
         super().render()
         if not self.viewer or not self.sand_enabled:
             return
-        self.viewer.log_points(
-            "/sand",
-            points=self.sand_state_0.particle_q,
-            radii=self.sand_model.particle_radius,
-            colors=self.particle_render_colors,
-            hidden=not self.viewer.show_particles,
-        )
         if self.show_impulses:
-            imp, pos, _ = self.mpm_solver.collect_collider_impulses(self.sand_state_0)
+            imp, pos, _ = self.mpm_solver._collect_collider_impulses(self.sand_state_0)
             self.viewer.log_lines(
                 "/impulses",
                 starts=pos,
@@ -345,6 +348,7 @@ def main():
     parser.add_argument("--csv_log_dir", type=str, default=None, metavar="DIR")
     parser.add_argument("--csv_log_interval", type=int, default=None, metavar="N")
     parser.add_argument("--no-sand", action="store_true", dest="no_sand", help="Disable sand (same as inchworm_crawling).")
+    parser.add_argument("--viewer", type=str, default="rtx", choices=["gl", "rtx", "rerun", "null"], help="Viewer type (default: rtx)")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
@@ -383,18 +387,32 @@ def main():
 
     wp.init()
     with wp.ScopedDevice(args.device):
-        if args.headless:
+        if args.headless or args.viewer == "null":
             viewer = None
-        else:
+        elif args.viewer == "rtx":
+            try:
+                viewer = newton.viewer.ViewerRTX(headless=False, width=1920, height=1080)
+            except Exception as e:
+                print(f"RTX viewer failed: {e}, falling back to GL")
+                try:
+                    viewer = newton.viewer.ViewerGL(width=1920, height=1080)
+                except Exception as e2:
+                    print(f"GL viewer failed: {e2}")
+                    viewer = None
+        elif args.viewer == "gl":
             try:
                 viewer = newton.viewer.ViewerGL(width=1920, height=1080)
             except Exception as e:
                 print(f"OpenGL viewer failed: {e}")
-                try:
-                    viewer = newton.viewer.ViewerRerun(keep_historical_data=True)
-                except Exception as e2:
-                    print(f"Rerun viewer failed: {e2}")
-                    viewer = None
+                viewer = None
+        elif args.viewer == "rerun":
+            try:
+                viewer = newton.viewer.ViewerRerun(keep_historical_data=True)
+            except Exception as e:
+                print(f"Rerun viewer failed: {e}")
+                viewer = None
+        else:
+            viewer = None
         nch = loaded["num_chambers_x"] * loaded["num_chambers_y"] * loaded["num_chambers_z"]
         # Paper (Gamus et al.) three-link model: joints at 1/(2+β) and (1+β)/(2+β) along crawl axis.
         paper_beta = loaded.get("paper_beta", 2.0)

@@ -16,11 +16,14 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import numpy as np
 import warp as wp
 
-from ..core.types import override
+import newton
+
+from ..core.types import nparray, override
 
 try:
     from pxr import Gf, Sdf, Usd, UsdGeom, Vt
@@ -82,16 +85,23 @@ class ViewerUSD(ViewerBase):
     and visualization of simulation data.
     """
 
-    def __init__(self, output_path, fps=60, up_axis="Z", num_frames=100, scaling=1.0):
+    def __init__(
+        self,
+        output_path: str,
+        fps: int = 60,
+        up_axis: str = "Z",
+        num_frames: int | None = 100,
+        scaling: float = 1.0,
+    ):
         """
         Initialize the USD viewer backend for Newton physics simulations.
 
         Args:
-            output_path (str): Path to the output USD file.
-            fps (int, optional): Frames per second for time sampling. Default is 60.
-            up_axis (str, optional): USD up axis, either 'Y' or 'Z'. Default is 'Z'.
-            num_frames (int, optional): Maximum number of frames to record. Default is 100. If None, recording is unlimited.
-            scaling (float, optional): Uniform scaling applied to the scene root. Default is 1.0.
+            output_path: Path to the output USD file.
+            fps: Frames per second for time sampling. Default is 60.
+            up_axis: USD up axis, either 'Y' or 'Z'. Default is 'Z'.
+            num_frames: Maximum number of frames to record. Default is 100. If None, recording is unlimited.
+            scaling: Uniform scaling applied to the scene root. Default is 1.0.
 
         Raises:
             ImportError: If the usd-core package is not installed.
@@ -101,13 +111,20 @@ class ViewerUSD(ViewerBase):
 
         super().__init__()
 
-        self.output_path = output_path
+        self.output_path = os.path.abspath(output_path)
         self.fps = fps
         self.up_axis = up_axis
         self.num_frames = num_frames
 
-        # Create USD stage
-        self.stage = Usd.Stage.CreateNew(output_path)
+        # Create USD stage. If this output path is already registered in the
+        # current process, reuse and clear the existing layer instead of
+        # calling CreateNew() again (which raises for duplicate identifiers).
+        existing_layer = Sdf.Layer.Find(self.output_path)
+        if existing_layer is not None:
+            existing_layer.Clear()
+            self.stage = Usd.Stage.Open(existing_layer)
+        else:
+            self.stage = Usd.Stage.CreateNew(self.output_path)
         self.stage.SetTimeCodesPerSecond(fps)  # number of timeCodes per second for data storage
         self.stage.SetFramesPerSecond(fps)  # display frame rate (timeline FPS in DCC tools)
         self.stage.SetStartTimeCode(0)
@@ -134,6 +151,7 @@ class ViewerUSD(ViewerBase):
         self._meshes = {}  # mesh_name -> prototype_path
         self._instancers = {}  # instancer_name -> UsdGeomPointInstancer
         self._points = {}  # point_name -> UsdGeomPoints
+        self._texture_materials: dict[str, Any] = {}  # mesh_name -> UsdShade.Material
 
         # Track current frame
         self._frame_index = 0
@@ -142,12 +160,12 @@ class ViewerUSD(ViewerBase):
         self.set_model(None)
 
     @override
-    def begin_frame(self, time):
+    def begin_frame(self, time: float):
         """
         Begin a new frame at the given simulation time.
 
-        Parameters:
-            time (float): The simulation time for the new frame.
+        Args:
+            time: The simulation time for the new frame.
         """
         super().begin_frame(time)
         self._frame_index = int(time * self.fps)
@@ -201,28 +219,27 @@ class ViewerUSD(ViewerBase):
     @override
     def log_mesh(
         self,
-        name,
-        points: wp.array,
-        indices: wp.array,
-        normals: wp.array | None = None,
-        uvs: wp.array | None = None,
-        hidden=False,
-        backface_culling=True,
+        name: str,
+        points: wp.array(dtype=wp.vec3),
+        indices: wp.array(dtype=wp.int32) | wp.array(dtype=wp.uint32),
+        normals: wp.array(dtype=wp.vec3) | None = None,
+        uvs: wp.array(dtype=wp.vec2) | None = None,
+        texture: np.ndarray | str | None = None,
+        hidden: bool = False,
+        backface_culling: bool = True,
     ):
         """
         Create a USD mesh prototype from vertex and index data.
 
-        Parameters:
-            name (str): Mesh name or Sdf.Path string.
-            points (wp.array): Vertex positions as a warp array of wp.vec3.
-            indices (wp.array): Triangle indices as a warp array of wp.uint32.
-            normals (wp.array, optional): Vertex normals as a warp array of wp.vec3.
-            uvs (wp.array, optional): UV coordinates as a warp array of wp.vec2.
-            hidden (bool, optional): If True, mesh will be hidden. Default is False.
-            backface_culling (bool, optional): If True, enable backface culling. Default is True.
-
-        Returns:
-            str: The mesh prototype path.
+        Args:
+            name: Mesh name or Sdf.Path string.
+            points: Vertex positions as a warp array of wp.vec3.
+            indices: Triangle indices as a warp array of wp.uint32.
+            normals: Vertex normals as a warp array of wp.vec3.
+            uvs: UV coordinates as a warp array of wp.vec2.
+            texture: Optional texture path/URL or image array.
+            hidden: If True, mesh will be hidden.
+            backface_culling: If True, enable backface culling.
         """
 
         # Convert warp arrays to numpy
@@ -251,24 +268,90 @@ class ViewerUSD(ViewerBase):
             mesh_prim.GetNormalsAttr().Set(normals_np, self._frame_index)
             mesh_prim.SetNormalsInterpolation(UsdGeom.Tokens.vertex)
 
-        # Set UVs if provided (simplified for now)
+        # Set UVs if provided
         if uvs is not None:
-            # TODO: Implement UV support for USD meshes
-            pass
+            uvs_np = uvs.numpy().astype(np.float32) if isinstance(uvs, wp.array) else np.asarray(uvs, dtype=np.float32)
+            pv_api = UsdGeom.PrimvarsAPI(mesh_prim)
+            st_pv = pv_api.CreatePrimvar("st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.vertex)
+            st_pv.Set(uvs_np)
+
+        # Create and bind a textured material when a texture is provided
+        if texture is not None and name not in self._texture_materials:
+            self._create_texture_material(name, mesh_prim, texture)
 
         # how to hide the prototype mesh but not the instances in USD?
         mesh_prim.GetVisibilityAttr().Set("inherited" if not hidden else "invisible", self._frame_index)
 
+    def _create_texture_material(self, mesh_name: str, mesh_prim, texture):
+        """Create a UsdPreviewSurface material with a diffuse texture and bind it to *mesh_prim*."""
+        from pxr import Sdf as _Sdf
+        from pxr import UsdShade
+
+        from ..utils.texture import load_texture  # noqa: PLC0415
+
+        # Resolve texture to a file path on disk
+        if isinstance(texture, str):
+            tex_path = os.path.abspath(texture)
+        else:
+            tex_array = load_texture(texture)
+            if tex_array is None:
+                return
+            tex_dir = os.path.dirname(self.output_path)
+            safe_name = mesh_name.replace("/", "_").replace("\\", "_")
+            tex_path = os.path.join(tex_dir, f"_tex_{safe_name}.png")
+            from PIL import Image
+
+            Image.fromarray(tex_array).save(tex_path)
+
+        safe = mesh_name.replace("/", "_").lstrip("_")
+        mat_path = f"/root/Materials/mat_{safe}"
+        self._ensure_scopes_for_path(self.stage, mat_path)
+
+        material = UsdShade.Material.Define(self.stage, mat_path)
+        surface = UsdShade.Shader.Define(self.stage, f"{mat_path}/PreviewSurface")
+        surface.CreateIdAttr("UsdPreviewSurface")
+        diff_input = surface.CreateInput("diffuseColor", _Sdf.ValueTypeNames.Color3f)
+        surface.CreateInput("roughness", _Sdf.ValueTypeNames.Float).Set(0.5)
+        material.CreateSurfaceOutput().ConnectToSource(surface.ConnectableAPI(), "surface")
+
+        tex_reader = UsdShade.Shader.Define(self.stage, f"{mat_path}/DiffuseTexture")
+        tex_reader.CreateIdAttr("UsdUVTexture")
+        tex_reader.CreateInput("file", _Sdf.ValueTypeNames.Asset).Set(tex_path)
+        tex_reader.CreateInput("sourceColorSpace", _Sdf.ValueTypeNames.Token).Set("auto")
+        tex_reader.CreateInput("wrapS", _Sdf.ValueTypeNames.Token).Set("repeat")
+        tex_reader.CreateInput("wrapT", _Sdf.ValueTypeNames.Token).Set("repeat")
+        tex_reader.CreateOutput("rgb", _Sdf.ValueTypeNames.Float3)
+        diff_input.ConnectToSource(tex_reader.ConnectableAPI(), "rgb")
+
+        st_reader = UsdShade.Shader.Define(self.stage, f"{mat_path}/PrimvarSt")
+        st_reader.CreateIdAttr("UsdPrimvarReader_float2")
+        st_reader.CreateInput("varname", _Sdf.ValueTypeNames.Token).Set("st")
+        st_reader.CreateOutput("result", _Sdf.ValueTypeNames.Float2)
+        tex_reader.CreateInput("st", _Sdf.ValueTypeNames.Float2).ConnectToSource(st_reader.ConnectableAPI(), "result")
+
+        UsdShade.MaterialBindingAPI.Apply(mesh_prim.GetPrim())
+        UsdShade.MaterialBindingAPI(mesh_prim.GetPrim()).Bind(material)
+        self._texture_materials[mesh_name] = material
+
     # log a set of instances as individual mesh prims, slower but makes it easier
     # to do post-editing of instance materials etc. default for Newton shapes
     @override
-    def log_instances(self, name, mesh, xforms, scales, colors, materials, hidden=False):
+    def log_instances(
+        self,
+        name: str,
+        mesh: str,
+        xforms: wp.array(dtype=wp.transform) | None,
+        scales: wp.array(dtype=wp.vec3) | None,
+        colors: wp.array(dtype=wp.vec3) | None,
+        materials: wp.array(dtype=wp.vec4) | None,
+        hidden: bool = False,
+    ):
         """
         Log a batch of mesh instances for rendering.
 
         Args:
-            name (str): Unique name for the instancer.
-            mesh (str): Name of the base mesh.
+            name: Unique name for the instancer.
+            mesh: Name of the base mesh.
             xforms: Array of transforms.
             scales: Array of scales.
             colors: Array of colors.
@@ -282,15 +365,17 @@ class ViewerUSD(ViewerBase):
 
         self._ensure_scopes_for_path(self.stage, self._get_path(name) + "/scope")
 
-        if xforms:
+        if xforms is not None:
             xforms = xforms.numpy()
+        else:
+            xforms = np.empty((0, 7), dtype=np.float32)
 
-        if scales:
+        if scales is not None:
             scales = scales.numpy()
         else:
             scales = np.ones((len(xforms), 3), dtype=np.float32)
 
-        if colors:
+        if colors is not None:
             colors = colors.numpy()
 
         for i in range(len(xforms)):
@@ -317,17 +402,32 @@ class ViewerUSD(ViewerBase):
                 displayColor.Set(colors[i], self._frame_index)
 
     # log a set of instances as a point instancer, faster but less flexible
-    def log_instances_point_instancer(self, name, mesh, xforms, scales, colors, materials):
+    def log_instances_point_instancer(
+        self,
+        name: str,
+        mesh: str,
+        xforms: wp.array(dtype=wp.transform) | None,
+        scales: wp.array(dtype=wp.vec3) | nparray | None,
+        colors: (
+            wp.array(dtype=wp.vec3)
+            | wp.array(dtype=wp.float32)
+            | tuple[float, float, float]
+            | list[float]
+            | nparray
+            | None
+        ),
+        materials: wp.array(dtype=wp.vec4) | None,
+    ):
         """
         Create or update a PointInstancer for mesh instances.
 
-        Parameters:
-            name (str): Instancer name or Sdf.Path string.
-            mesh (str): Mesh prototype name (must be previously logged).
-            xforms (wp.array): Instance transforms as a warp array of wp.transform.
-            scales (wp.array): Instance scales as a warp array of wp.vec3.
-            colors (wp.array): Instance colors as a warp array of wp.vec3.
-            materials (wp.array): Instance materials as a warp array of wp.vec4.
+        Args:
+            name: Instancer name or Sdf.Path string.
+            mesh: Mesh prototype name (must be previously logged).
+            xforms: Instance transforms as a warp array of wp.transform.
+            scales: Instance scales as a warp array of wp.vec3.
+            colors: Instance colors as a warp array of wp.vec3.
+            materials: Instance materials as a warp array of wp.vec4.
 
         Raises:
             RuntimeError: If the mesh prototype is not found.
@@ -405,15 +505,26 @@ class ViewerUSD(ViewerBase):
 
     # Abstract methods that need basic implementations
     @override
-    def log_lines(self, name, starts, ends, colors, width: float = 0.01, hidden=False):
+    def log_lines(
+        self,
+        name: str,
+        starts: wp.array(dtype=wp.vec3) | None,
+        ends: wp.array(dtype=wp.vec3) | None,
+        colors: (
+            wp.array(dtype=wp.vec3) | wp.array(dtype=wp.float32) | tuple[float, float, float] | list[float] | None
+        ),
+        width: float = 0.01,
+        hidden: bool = False,
+    ):
         """Debug helper to add a line list as a set of capsules
 
         Args:
+            name: Unique name for the line batch.
             starts: The vertices of the lines (wp.array)
             ends: The vertices of the lines (wp.array)
             colors: The colors of the lines (wp.array)
-            width: The width of the lines (float)
-            hidden: Whether the lines are hidden (bool)
+            width: The width of the lines.
+            hidden: Whether the lines are hidden.
         """
 
         if name not in self._instancers:
@@ -479,18 +590,42 @@ class ViewerUSD(ViewerBase):
         instancer.GetVisibilityAttr().Set("inherited" if not hidden else "invisible", self._frame_index)
 
     @override
-    def log_points(self, name, points, radii, colors, hidden=False):
+    def log_points(
+        self,
+        name: str,
+        points: wp.array(dtype=wp.vec3) | None,
+        radii: wp.array(dtype=wp.float32) | float | None = None,
+        colors: (
+            wp.array(dtype=wp.vec3) | wp.array(dtype=wp.float32) | tuple[float, float, float] | list[float] | None
+        ) = None,
+        hidden: bool = False,
+    ):
+        """Log points as a USD `Points` primitive.
+
+        Args:
+            name: Unique name for the point primitive.
+            points: Point positions.
+            radii: Point radii or a single shared radius.
+            colors: Optional per-point colors or a shared RGB triplet.
+            hidden: Whether the point primitive is hidden.
+
+        Returns:
+            Sdf.Path of the created/updated points primitive.
+        """
+        if points is None:
+            return
+
+        num_points = len(points)
+
+        if radii is None:
+            radii = 0.1
+
         if np.isscalar(radii):
             radius_interp = "constant"
         else:
             radius_interp = "vertex"
 
-        if colors is None:
-            color_interp = "constant"
-        elif len(colors) == 3 and all(np.isscalar(x) for x in colors):
-            color_interp = "constant"
-        else:
-            color_interp = "vertex"
+        colors, color_interp = self._normalize_point_colors(colors, num_points)
 
         path = self._get_path(name)
         instancer = UsdGeom.Points.Get(self.stage, path)
@@ -514,31 +649,43 @@ class ViewerUSD(ViewerBase):
         instancer.GetWidthsAttr().Set(widths, self._frame_index)
 
         if colors is not None:
-            if isinstance(colors, wp.array):
-                colors = colors.numpy()
-            elif isinstance(colors, list | tuple) and len(colors) == 3:
-                colors = (colors,)
-
             instancer.GetDisplayColorAttr().Set(colors, self._frame_index)
 
         instancer.GetVisibilityAttr().Set("inherited" if not hidden else "invisible", self._frame_index)
         return instancer.GetPath()
 
     @override
-    def log_array(self, name, array):
+    def log_array(self, name: str, array: wp.array(dtype=Any) | nparray):
         """
         Log array data (not implemented for USD backend).
 
         This method is a placeholder and does not log array data in the USD backend.
+
+        Args:
+            name: Unique path/name for the array signal.
+            array: Array data to visualize.
         """
         pass
 
     @override
-    def log_scalar(self, name, value):
+    def log_scalar(self, name: str, value: int | float | bool | np.number):
         """
         Log scalar value (not implemented for USD backend).
 
         This method is a placeholder and does not log scalar values in the USD backend.
+
+        Args:
+            name: Unique path/name for the scalar signal.
+            value: Scalar value to visualize.
+        """
+        pass
+
+    @override
+    def apply_forces(self, state: newton.State):
+        """USD backend does not apply interactive forces.
+
+        Args:
+            state: Current simulation state.
         """
         pass
 
@@ -548,7 +695,7 @@ class ViewerUSD(ViewerBase):
 
         Parameters:
             colors: Input colors in various formats (wp.array, list/tuple, np.ndarray)
-            num_items (int): Number of items that need colors
+            num_items: Number of items that need colors
 
         Returns:
             np.ndarray: Colors as numpy array with shape (num_items, 3)
@@ -570,6 +717,40 @@ class ViewerUSD(ViewerBase):
             return np.array(colors)
 
     @staticmethod
+    def _is_single_rgb_triplet(colors) -> bool:
+        """Returns True when colors represent one RGB triplet."""
+        if isinstance(colors, np.ndarray):
+            return colors.ndim == 1 and colors.shape[0] == 3
+
+        if isinstance(colors, list | tuple):
+            return len(colors) == 3 and all(np.isscalar(x) for x in colors)
+
+        return False
+
+    def _normalize_point_colors(self, colors, num_points):
+        """Normalize point colors and return (values, interpolation token)."""
+        if colors is None:
+            return None, "constant"
+
+        if isinstance(colors, wp.array):
+            colors = colors.numpy()
+
+        if self._is_single_rgb_triplet(colors):
+            colors_arr = np.asarray(colors, dtype=np.float32)
+            return colors_arr.reshape(1, 3), "constant"
+
+        if isinstance(colors, np.ndarray):
+            return colors, "vertex"
+
+        if isinstance(colors, list | tuple):
+            # Keep list/tuple inputs as-is for existing valid per-point color inputs.
+            if len(colors) == num_points:
+                return colors, "vertex"
+            return np.asarray(colors), "vertex"
+
+        return np.asarray(colors), "vertex"
+
+    @staticmethod
     def _ensure_scopes_for_path(stage: Usd.Stage, prim_path_str: str):
         """
         Ensure that all parent prims in the hierarchy exist as 'Scope' prims.
@@ -579,8 +760,8 @@ class ViewerUSD(ViewerBase):
         useful for ensuring a valid hierarchy before defining a prim.
 
         Parameters:
-            stage (Usd.Stage): The USD stage to operate on.
-            prim_path_str (str): The Sdf.Path string for the target prim.
+            stage: The USD stage to operate on.
+            prim_path_str: The Sdf.Path string for the target prim.
         """
         # Convert the string to an Sdf.Path object for robust manipulation
         prim_path = Sdf.Path(prim_path_str)

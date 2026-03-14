@@ -360,6 +360,7 @@ def main():
     parser.add_argument("--num-frames", type=int, default=1800)
     parser.add_argument("--use-mujoco-cpu", action="store_true",
                         help="Use MuJoCo CPU backend (MuJoCo only)")
+    parser.add_argument("--viewer", type=str, default="rtx", choices=["gl", "rtx", "rerun", "null"], help="Viewer type (default: rtx)")
     parser.add_argument("--headless", action="store_true")
     args = parser.parse_args()
     
@@ -367,13 +368,28 @@ def main():
     wp.init()
     
     # Create viewer
-    if args.headless:
+    if args.headless or args.viewer == "null":
         viewer = None
+    elif args.viewer == "rtx":
+        try:
+            viewer = newton.viewer.ViewerRTX(headless=False, width=1920, height=1080)
+        except Exception:
+            try:
+                viewer = newton.viewer.ViewerGL(width=1920, height=1080)
+            except Exception:
+                viewer = None
+    elif args.viewer == "gl":
+        try:
+            viewer = newton.viewer.ViewerGL(width=1920, height=1080)
+        except Exception:
+            viewer = None
+    elif args.viewer == "rerun":
+        try:
+            viewer = newton.viewer.ViewerRerun(keep_historical_data=True)
+        except Exception:
+            viewer = None
     else:
-        viewer = newton.viewer.ViewerGL(
-            width=1920,
-            height=1080,
-        )
+        viewer = None
     
     # Create and run example
     try:

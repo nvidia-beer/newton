@@ -19,7 +19,7 @@
 # Shows how to set up a simulation of a humanoid articulation
 # from MJCF using newton.ModelBuilder.add_mjcf().
 #
-# Command: python -m newton.examples robot_humanoid --num-worlds 16
+# Command: python -m newton.examples robot_humanoid --world-count 16
 #
 ###########################################################################
 
@@ -27,22 +27,22 @@ import warp as wp
 
 import newton
 import newton.examples
+from newton import JointTargetMode
 
 
 class Example:
-    def __init__(self, viewer, num_worlds=4, args=None):
+    def __init__(self, viewer, args):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.sim_substeps = 10
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        self.num_worlds = num_worlds
+        self.world_count = args.world_count
 
         self.viewer = viewer
 
         humanoid = newton.ModelBuilder()
-        newton.solvers.SolverMuJoCo.register_custom_attributes(humanoid)
         humanoid.default_joint_cfg = newton.ModelBuilder.JointDofConfig(limit_ke=1.0e3, limit_kd=1.0e1, friction=1e-5)
         humanoid.default_shape_cfg.ke = 5.0e4
         humanoid.default_shape_cfg.kd = 5.0e2
@@ -61,18 +61,19 @@ class Example:
         for i in range(len(humanoid.joint_target_ke)):
             humanoid.joint_target_ke[i] = 150
             humanoid.joint_target_kd[i] = 5
+            humanoid.joint_target_mode[i] = int(JointTargetMode.POSITION)
 
         builder = newton.ModelBuilder()
-        builder.replicate(humanoid, self.num_worlds)
+        builder.replicate(humanoid, self.world_count)
 
         builder.add_ground_plane()
 
         self.model = builder.finalize()
-        use_mujoco_contacts = args.use_mujoco_contacts if args is not None else False
+        use_mujoco_contacts = getattr(args, "use_mujoco_contacts", False)
         self.solver = newton.solvers.SolverMuJoCo(
             self.model,
             njmax=100,
-            nconmax=50,
+            nconmax=65,
             use_mujoco_contacts=use_mujoco_contacts,
         )
 
@@ -83,9 +84,11 @@ class Example:
         # Evaluate forward kinematics for collision detection
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
-        # Create collision pipeline from command-line args (default: CollisionPipelineUnified with EXPLICIT)
-        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, args)
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.use_mujoco_contacts = use_mujoco_contacts
+        if use_mujoco_contacts:
+            self.contacts = newton.Contacts(self.solver.get_max_contact_count(), 0)
+        else:
+            self.contacts = self.model.contacts()
 
         self.viewer.set_model(self.model)
 
@@ -99,7 +102,8 @@ class Example:
             self.graph = capture.graph
 
     def simulate(self):
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        if not self.use_mujoco_contacts:
+            self.model.collide(self.state_0, self.contacts)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
 
@@ -110,6 +114,9 @@ class Example:
 
             # swap states
             self.state_0, self.state_1 = self.state_1, self.state_0
+
+        if self.use_mujoco_contacts:
+            self.solver.update_contacts(self.contacts, self.state_0)
 
     def step(self):
         if self.graph:
@@ -142,13 +149,19 @@ class Example:
             lambda q, qd: max(abs(qd)) < threshold,
         )
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        newton.examples.add_world_count_arg(parser)
+        newton.examples.add_mujoco_contacts_arg(parser)
+        parser.set_defaults(world_count=4)
+        return parser
+
 
 if __name__ == "__main__":
-    parser = newton.examples.create_parser()
-    parser.add_argument("--num-worlds", type=int, default=4, help="Total number of simulated worlds.")
-
+    parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
 
-    example = Example(viewer, args.num_worlds, args)
+    example = Example(viewer, args)
 
     newton.examples.run(example, args)

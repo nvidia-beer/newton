@@ -21,7 +21,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglx-dev \
     libegl-dev \
+    libegl1 \
     libgles-dev \
+    # Vulkan (OVRTX / ViewerRTX needs Vulkan 1.1)
+    vulkan-tools \
     # X11 packages for windowing
     libxrender1 \
     libxext6 \
@@ -32,6 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxi-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# --- UV and project deps (Vulkan/RTX viewer uses ovrtx from rtx extra) ---
 # Copy UV binary from official UV image (much more reliable!)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uvx /usr/local/bin/uvx
@@ -43,17 +47,18 @@ COPY pyproject.toml uv.lock ./
 COPY README.md README.md
 COPY newton/_version.py newton/_version.py
 
-# Install dependencies (without project source)
+# Install Python deps (includes rtx extra → ovrtx for Vulkan/ViewerRTX)
 # Note: Not using --frozen to allow platform-specific dependency resolution
 # On ARM64, warp-lang will be installed from GitHub releases
-RUN uv sync --no-install-workspace --extra dev
+RUN uv sync --no-install-workspace --extra dev --extra rtx
 
 # Copy source code
 COPY . ./
 
-# Install workspace packages
-RUN uv sync --extra dev
+# Install workspace packages (Newton + viewer; use --viewer rtx for Vulkan)
+RUN uv sync --extra dev --extra rtx
 
 ENV PATH="/workspace/newton/.venv/bin:$PATH"
 
+# Container runs with Vulkan when host uses nvidia runtime + ICD mount (see run-examples.sh)
 CMD ["/bin/bash"]

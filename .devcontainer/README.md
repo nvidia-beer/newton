@@ -58,3 +58,15 @@ This directory contains Docker configurations for running Newton standalone (wit
 The run script automatically detects NVIDIA GPUs:
 - ✓ GPU detected → Enables GPU acceleration
 - ⚠ No GPU → Falls back to CPU mode (slower but functional)
+
+### Vulkan / RTX viewer
+
+To use the RTX viewer (`--viewer rtx`) inside Docker you need:
+
+1. **NVIDIA Container Toolkit** (v1.14.4+ recommended for Vulkan ICD injection)
+2. **Docker configured to use the nvidia runtime** – the run script passes `--runtime=nvidia`; ensure the runtime is available (e.g. install `nvidia-container-toolkit` and optionally set `"default-runtime": "nvidia"` in `/etc/docker/daemon.json`)
+3. **Vulkan and EGL libs in the image** – the Dockerfiles install `vulkan-tools` and `libegl1` (x86) / `libegl1` (arm64) for the NVIDIA Vulkan ICD
+
+If Vulkan fails in the container with `ERROR_INCOMPATIBLE_DRIVER`, check that the toolkit injects driver libs (toolkit version and runtime) and that the host has Vulkan working (`vulkaninfo` on the host).
+
+**Full write-up:** See [vulkan.md](vulkan.md) for how Vulkan was fixed (host setup, script and Dockerfile changes, and verification).

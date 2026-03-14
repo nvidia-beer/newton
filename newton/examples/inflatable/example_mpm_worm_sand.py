@@ -87,6 +87,7 @@ class Example(WormExample):
 
         # Sand model (MPM)
         sand_builder = newton.ModelBuilder()
+        SolverImplicitMPM.register_custom_attributes(sand_builder)
         voxel_size = 0.045
         self._emit_sand(sand_builder, voxel_size)
         self.sand_model = sand_builder.finalize()
@@ -94,7 +95,7 @@ class Example(WormExample):
         self.sand_model.particle_ke = 1.0e15
         self.sand_state_0 = self.sand_model.state()
 
-        mpm_options = SolverImplicitMPM.Options()
+        mpm_options = SolverImplicitMPM.Config()
         mpm_options.voxel_size = voxel_size
         mpm_options.tolerance = 1.0e-6
         mpm_options.grid_type = "fixed"
@@ -104,7 +105,7 @@ class Example(WormExample):
         mpm_options.max_iterations = 50
         mpm_options.critical_fraction = 0.0
 
-        self.mpm_model = SolverImplicitMPM.Model(self.sand_model, mpm_options)
+        self.mpm_solver = SolverImplicitMPM(self.sand_model, mpm_options)
         # Collider meshes must live on the sand (MPM) device so collision kernels can access them.
         sand_device = self.sand_model.device
         ground_verts, ground_indices = newton.utils.create_plane_mesh(2.0, 2.0)
@@ -121,7 +122,7 @@ class Example(WormExample):
         )
         self._update_worm_collider_mesh()
         worm_mesh = wp.Mesh(self._worm_mesh_points, self._worm_mesh_indices)
-        self.mpm_model.setup_collider(
+        self.mpm_solver.setup_collider(
             collider_meshes=[self._ground_mesh, worm_mesh],
             collider_body_ids=[None, None],
             collider_friction=[0.5, 0.5],
@@ -129,8 +130,6 @@ class Example(WormExample):
             collider_projection_threshold=[None, WORM_COLLIDER_PROJECTION_THRESHOLD],
             model=self.sand_model,
         )
-        self.mpm_solver = SolverImplicitMPM(self.mpm_model, mpm_options)
-        self.mpm_solver.enrich_state(self.sand_state_0)
 
         max_collider_nodes = 1 << 18
         self._collider_impulses = wp.zeros(max_collider_nodes, dtype=wp.vec3, device=self.model.device)
@@ -169,7 +168,7 @@ class Example(WormExample):
         self._collider_impulses.zero_()
         self._collider_impulse_pos.zero_()
         self._collider_ids.fill_(-1)
-        imp, pos, cid = self.mpm_solver.collect_collider_impulses(self.sand_state_0)
+        imp, pos, cid = self.mpm_solver._collect_collider_impulses(self.sand_state_0)
         # Only use entries that hit the worm (cid == WORM_COLLIDER_ID), like inflatable_box_sand
         imp_np = np.asarray(imp.numpy())
         pos_np = np.asarray(pos.numpy())
@@ -302,7 +301,7 @@ class Example(WormExample):
                 # Update collider from current deformed shape (tetras change each frame) and step sand
                 self._update_worm_collider_mesh()
                 worm_mesh = wp.Mesh(self._worm_mesh_points, self._worm_mesh_indices)
-                self.mpm_model.setup_collider(
+                self.mpm_solver.setup_collider(
                     collider_meshes=[self._ground_mesh, worm_mesh],
                     collider_body_ids=[None, None],
                     collider_friction=[0.5, 0.5],
@@ -319,7 +318,7 @@ class Example(WormExample):
                 )
                 # Push sand particles outside the deformable so none remain inside
                 for _ in range(PROJECT_OUTSIDE_ITERATIONS):
-                    self.mpm_solver.project_outside(
+                    self.mpm_solver._project_outside(
                         self.sand_state_0, self.sand_state_0, self.sim_dt
                     )
                 self._collect_collider_impulses()
@@ -346,7 +345,7 @@ class Example(WormExample):
             hidden=not self.viewer.show_particles,
         )
         if self.show_impulses:
-            imp, pos, _ = self.mpm_solver.collect_collider_impulses(self.sand_state_0)
+            imp, pos, _ = self.mpm_solver._collect_collider_impulses(self.sand_state_0)
             self.viewer.log_lines(
                 "/impulses",
                 starts=pos,

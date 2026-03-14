@@ -10,7 +10,7 @@ import warp as wp
 from ...geometry.kernels import (
     compute_edge_aabbs,
     compute_tri_aabbs,
-    edge_colliding_edges_detection_kernel,
+    edge_colliding_edges_detection_no_filtering_kernel,
     init_triangle_collision_data_kernel,
     triangle_triangle_collision_detection_kernel,
     vertex_triangle_collision_detection_kernel,
@@ -405,7 +405,7 @@ class TriMeshCollisionDetector:
     def edge_edge_collision_detection(self, query_radius):
         self.edge_colliding_edges.fill_(-1)
         wp.launch(
-            kernel=edge_colliding_edges_detection_kernel,
+            kernel=edge_colliding_edges_detection_no_filtering_kernel,
             inputs=[
                 query_radius,
                 self.bvh_edges.id,

@@ -4,13 +4,15 @@ FROM ghcr.io/astral-sh/uv:python3.11-bookworm
 
 WORKDIR /workspace/newton
 
-# Install git, build tools, and OpenGL libraries for viewer
+# Install git, build tools, OpenGL/EGL, Vulkan and X11 for viewer (OVRTX / ViewerRTX needs Vulkan 1.1)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     build-essential \
     python3.11-dev \
     libgl1-mesa-glx \
     libglu1-mesa \
+    libegl1 \
+    vulkan-tools \
     libxrender1 \
     libxext6 \
     libx11-6 \
@@ -27,14 +29,14 @@ COPY pyproject.toml uv.lock ./
 COPY README.md README.md
 COPY newton/_version.py newton/_version.py
 
-# Install dependencies (without project source)
-RUN uv sync --frozen --no-install-workspace --extra dev
+# Install dependencies (without project source). Include rtx for ViewerRTX (ovrtx).
+RUN uv sync --frozen --no-install-workspace --extra dev --extra rtx
 
 # Copy source code
 COPY . ./
 
 # Install workspace packages
-RUN uv sync --frozen --extra dev
+RUN uv sync --frozen --extra dev --extra rtx
 
 ENV PATH="/workspace/newton/.venv/bin:$PATH"
 

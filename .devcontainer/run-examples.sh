@@ -11,8 +11,48 @@
 #   ./run-examples.sh rigid_soft_interaction --solver mujoco --use-mujoco-cpu
 #   ./run-examples.sh soft_on_box                      # With constraint-based contacts
 #   ./run-examples.sh soft_on_box --no-constraint-contacts  # With force-based contacts
+#   ./run-examples.sh --gl 1                               # Run example 1 with OpenGL viewer (CLI)
+#   ./run-examples.sh 15 --rtx                             # Run example 15 with RTX viewer (CLI)
 
 set -e
+
+# Parse viewer from CLI (--gl, --rtx, or --viewer gl|rtx) and remove from arguments
+VIEWER_ARG=""
+VIEWER_SET_FROM_CLI=0
+FILTERED=()
+ARGS=("$@")
+i=0
+while [ $i -lt ${#ARGS[@]} ]; do
+    arg="${ARGS[$i]}"
+    case "$arg" in
+        --gl)
+            VIEWER_ARG="--viewer gl"
+            VIEWER_SET_FROM_CLI=1
+            ;;
+        --rtx)
+            VIEWER_ARG="--viewer rtx"
+            VIEWER_SET_FROM_CLI=1
+            ;;
+        --viewer)
+            if [ $((i+1)) -lt ${#ARGS[@]} ]; then
+                next="${ARGS[$((i+1))]}"
+                case "$next" in
+                    gl) VIEWER_ARG="--viewer gl"; VIEWER_SET_FROM_CLI=1 ;;
+                    rtx) VIEWER_ARG="--viewer rtx"; VIEWER_SET_FROM_CLI=1 ;;
+                    *) FILTERED+=("--viewer"); FILTERED+=("$next") ;;
+                esac
+                i=$((i+2))
+                continue
+            fi
+            FILTERED+=("$arg")
+            ;;
+        *)
+            FILTERED+=("$arg")
+            ;;
+    esac
+    i=$((i+1))
+done
+set -- "${FILTERED[@]}"
 
 # Define available examples
 declare -a EXAMPLES=(
@@ -65,13 +105,15 @@ declare -A EXAMPLE_SOLVER_OPTIONS=(
     ["inflatable_rigid_sphere"]="xpbd mujoco"
 )
 
-# If no argument provided, show menu
+# Track interactive mode (no args = menu was shown)
 if [ $# -eq 0 ]; then
+    INTERACTIVE=1
     echo "═══════════════════════════════════════════════════════════════"
     echo "              Newton Examples - Select a Simulation"
     echo "═══════════════════════════════════════════════════════════════"
     echo ""
-    for i in "${!EXAMPLES[@]}"; do
+    num_examples=${#EXAMPLES[@]}
+    for (( i = 0; i < num_examples; i++ )); do
         example="${EXAMPLES[$i]}"
         desc="${EXAMPLE_DESCRIPTIONS[$example]}"
         printf "  %d) %-30s - %s\n" $((i+1)) "$example" "$desc"
@@ -90,6 +132,7 @@ if [ $# -eq 0 ]; then
     
     EXAMPLE="${EXAMPLES[$((choice-1))]}"
 else
+    INTERACTIVE=0
     # Check if first argument is a number
     if [[ "$1" =~ ^[0-9]+$ ]]; then
         if [ "$1" -lt 1 ] || [ "$1" -gt "${#EXAMPLES[@]}" ]; then
@@ -141,6 +184,38 @@ if [[ -n "${EXAMPLE_SOLVER_OPTIONS[$EXAMPLE]}" ]] && [[ ! "$*" =~ --solver ]]; t
     esac
     echo ""
 fi
+
+# Viewer: from CLI (--gl/--rtx/--viewer), or interactive menu, or default RTX
+if [ "$VIEWER_SET_FROM_CLI" -eq 1 ]; then
+    : # VIEWER_ARG already set from CLI
+elif [ "${INTERACTIVE:-0}" -eq 1 ]; then
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "              Select Viewer"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo ""
+    echo "  1) OpenGL  - Faster first frame, no ray tracing"
+    echo "  2) RTX     - Ray-traced (slower first frame, best quality)"
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════"
+    read -p "Select viewer (1-2, or press Enter for RTX): " viewer_choice
+    echo ""
+    case "$viewer_choice" in
+        1)
+            VIEWER_ARG="--viewer gl"
+            echo "Selected: OpenGL viewer"
+            ;;
+        2|"")
+            VIEWER_ARG="--viewer rtx"
+            echo "Selected: RTX viewer"
+            ;;
+        *)
+            echo "Invalid choice, using RTX viewer"
+            VIEWER_ARG="--viewer rtx"
+            ;;
+    esac
+    echo ""
+fi
+[ -n "$VIEWER_ARG" ] || VIEWER_ARG="--viewer rtx"
 
 # Interactive parameter selection for bouncing_box
 BOX_ARGS=""
@@ -670,8 +745,8 @@ case "$EXAMPLE" in
             ;;
     esac
 
-# Merge defaults with user overrides (user args go last, so they override)
-EXTRA_ARGS="$DEFAULT_ARGS ${CRAWL_EXTRA:-} $*"
+# Viewer from selection or default (RTX); user args go last so they can override
+EXTRA_ARGS="$VIEWER_ARG $DEFAULT_ARGS ${CRAWL_EXTRA:-} $*"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NEWTON_DIR="$(dirname "$SCRIPT_DIR")"
@@ -689,9 +764,31 @@ fi
 
 # Check if GPU is available
 GPU_ARGS=""
+VULKAN_ICD_ARGS=()
+RTX_CACHE_ARGS=()
 if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
     echo "✓ NVIDIA GPU detected - enabling GPU acceleration"
-    GPU_ARGS="--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all -e NVIDIA_VISIBLE_DEVICES=all -e __GLX_VENDOR_LIBRARY_NAME=nvidia"
+    # Use nvidia runtime so the toolkit injects Vulkan/GLX driver libs (required for ViewerRTX / OVRTX).
+    # Requires NVIDIA Container Toolkit (v1.14.4+ recommended for Vulkan ICD). Ensure Docker uses the
+    # nvidia runtime: e.g. /etc/docker/daemon.json "default-runtime": "nvidia" or pass --runtime=nvidia.
+    GPU_ARGS="--runtime=nvidia --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all -e NVIDIA_VISIBLE_DEVICES=all -e __GLX_VENDOR_LIBRARY_NAME=nvidia"
+    # Mount host Vulkan ICD so the loader finds the NVIDIA driver (needed for ViewerRTX / OVRTX).
+    # Use VK_ICD_FILENAMES so only the NVIDIA ICD is used (avoids "Multiple ICDs" omni.rtx error).
+    if [ -d /usr/share/vulkan/icd.d ]; then
+        if [ -f /usr/share/vulkan/icd.d/nvidia_icd.json ]; then
+            VULKAN_ICD_ARGS=(-v "/usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro" -e "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json")
+        else
+            VULKAN_ICD_ARGS=(-v "/usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro")
+        fi
+    fi
+    # Persistent NVIDIA driver shader cache so the same scene can load faster on repeat runs.
+    RTX_CACHE_HOST="${NEWTON_DIR}/.cache/rtx-shader-cache"
+    RTX_CACHE_CONTAINER="/workspace/.cache/rtx-shader-cache"
+    mkdir -p "$RTX_CACHE_HOST"
+    RTX_CACHE_ARGS=(
+        -v "$RTX_CACHE_HOST:$RTX_CACHE_CONTAINER:rw"
+        -e "__GL_SHADER_DISK_CACHE_PATH=$RTX_CACHE_CONTAINER"
+    )
 else
     echo "⚠ No NVIDIA GPU detected - running in CPU mode"
     echo "  (Performance will be slower, but examples will still work)"
@@ -741,6 +838,8 @@ docker run --rm -it \
     -e NEWTON_DISABLE_CUDA_INTEROP=1 \
     -e PYTHONPATH=/workspace \
     "${DOCKER_X11_ARGS[@]}" \
+    "${VULKAN_ICD_ARGS[@]}" \
+    "${RTX_CACHE_ARGS[@]}" \
     -v "$NEWTON_DIR/newton:/workspace/newton/newton" \
     -v "$NEWTON_DIR/newton/examples/crawlable/inchworm:/workspace/inchworm" \
     newton:latest \
