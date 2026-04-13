@@ -62,9 +62,6 @@ class Example:
         gravity: float = 9.81,
         max_pressure: float = 5.0,
         substeps: int = 5,
-        anisotropy_x: float = 1.0,
-        anisotropy_y: float = 1.0,
-        anisotropy_z: float = 1.0,
         chamber_stiffness_scale: list[float] | None = None,
         chamber_inflation_disabled: list[int] | None = None,  # default [0, 2] = bottom two in 2x2 grid
     ):
@@ -94,9 +91,6 @@ class Example:
         self.initial_height = initial_height
         self.mass = mass
         self.max_pressure = max_pressure
-        self.anisotropy_x = float(anisotropy_x)
-        self.anisotropy_y = float(anisotropy_y)
-        self.anisotropy_z = float(anisotropy_z)
         self.viewer = viewer
 
         # 3D tetrahedral box: length (X), width (Y), height (Z); Z = chamber axis
@@ -365,9 +359,6 @@ class Example:
             self.sim_time += self.sim_dt
 
     def _apply_pressure(self):
-        self.solver.anisotropy_x = self.anisotropy_x
-        self.solver.anisotropy_y = self.anisotropy_y
-        self.solver.anisotropy_z = self.anisotropy_z
         pressures = list(self.chamber_pressures)
         for c in self.chamber_inflation_disabled:
             if 0 <= c < len(pressures):
@@ -520,9 +511,6 @@ def main():
     parser.add_argument("--spring_kd", type=float, default=1.0)
     parser.add_argument("--gravity", type=float, default=9.81)
     parser.add_argument("--max_pressure", type=float, default=5.0)
-    parser.add_argument("--anisotropy_x", type=float, default=1.0)
-    parser.add_argument("--anisotropy_y", type=float, default=1.0)
-    parser.add_argument("--anisotropy_z", type=float, default=1.0)
     parser.add_argument("--substeps", type=int, default=5)
     parser.add_argument("--num_frames", type=int, default=7200)
     parser.add_argument("--chamber_stiffness_scale", type=str, default=None)
@@ -586,9 +574,6 @@ def main():
             gravity=args.gravity,
             max_pressure=args.max_pressure,
             substeps=args.substeps,
-            anisotropy_x=args.anisotropy_x,
-            anisotropy_y=args.anisotropy_y,
-            anisotropy_z=args.anisotropy_z,
             chamber_stiffness_scale=chamber_stiffness_scale,
             chamber_inflation_disabled=chamber_inflation_disabled,
         )

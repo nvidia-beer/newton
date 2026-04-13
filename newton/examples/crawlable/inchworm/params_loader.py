@@ -38,9 +38,6 @@ INCHWORM_PARAM_KEYS = [
     "gravity",
     "max_pressure",
     "substeps",
-    "anisotropy_x",
-    "anisotropy_y",
-    "anisotropy_z",
     "torque_stiffness",
     "torque_damping",
     "chamber_stiffness_scale",
@@ -59,14 +56,14 @@ INCHWORM_PARAM_KEYS = [
     "gait_pressure_max",
     "settle_seconds",
     "start_at_ground_level",
-    "use_crawlable_stick_slip",
-    "stick_slip_scale",
-    "stick_slip_amplitude",
-    "crawl_direction",
+    "startup_ramp_s",
+    "gait_amplitude_rise_s",
     "num_frames",
     "validate_contact",
     "stop_on_lost_contact",
     "csv_log_interval",
+    "csv_log",
+    "csv_log_dir",
 ]
 
 

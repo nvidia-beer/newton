@@ -171,9 +171,6 @@ class Example:
         gravity: float = 9.81,
         max_pressure: float = 5.0,
         substeps: int = 5,
-        anisotropy_x: float = 1.5,
-        anisotropy_y: float = 1.0,
-        anisotropy_z: float = 1.15,
         torque_stiffness: float = 100.0,
         torque_damping: float = 20,
         chamber_stiffness_scale: list[float] | None = None,
@@ -223,9 +220,6 @@ class Example:
         density = total_mass / mesh_volume if mesh_volume > 0 else 1000.0
         self._density = density
         self.max_pressure = max_pressure
-        self.anisotropy_x = float(anisotropy_x)
-        self.anisotropy_y = float(anisotropy_y)
-        self.anisotropy_z = float(anisotropy_z)
         self.viewer = viewer
         self.stiff_axes = ("x",)
         self.torque_display_axis = "all"
@@ -473,9 +467,6 @@ class Example:
         self._print_help()
 
     def _apply_pressure(self):
-        self.solver.anisotropy_x = self.anisotropy_x
-        self.solver.anisotropy_y = self.anisotropy_y
-        self.solver.anisotropy_z = self.anisotropy_z
         pressures = list(self.chamber_pressures)
         for c in self.chamber_inflation_disabled:
             if 0 <= c < len(pressures):
@@ -765,9 +756,6 @@ def main():
     parser.add_argument("--spring_kd", type=float, default=1.0)
     parser.add_argument("--gravity", type=float, default=9.81)
     parser.add_argument("--max_pressure", type=float, default=5.0)
-    parser.add_argument("--anisotropy_x", type=float, default=1.5, help="Expand along beam for bend")
-    parser.add_argument("--anisotropy_y", type=float, default=1.0)
-    parser.add_argument("--anisotropy_z", type=float, default=1.15)
     parser.add_argument("--torque_stiffness", type=float, default=250000.0, help="X-axis spine (paper: stiff)")
     parser.add_argument("--torque_damping", type=float, default=18.0)
     parser.add_argument(
@@ -878,9 +866,6 @@ def main():
             gravity=args.gravity,
             max_pressure=args.max_pressure,
             substeps=args.substeps,
-            anisotropy_x=args.anisotropy_x,
-            anisotropy_y=args.anisotropy_y,
-            anisotropy_z=args.anisotropy_z,
             torque_stiffness=args.torque_stiffness,
             torque_damping=args.torque_damping,
             chamber_stiffness_scale=chamber_stiffness_scale,

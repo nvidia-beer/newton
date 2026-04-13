@@ -114,7 +114,6 @@ Supported Features
 from ._src.solvers import (
     SolverBase,
     SolverBend,
-    SolverCrawlable,
     SolverDeformable,
     SolverFeatherstone,
     SolverImplicitMPM,
@@ -142,7 +141,6 @@ from ._src.solvers.flags import SolverNotifyFlags
 __all__ = [
     "SolverBase",
     "SolverBend",
-    "SolverCrawlable",
     "SolverDeformable",
     "SolverFeatherstone",
     "SolverImplicitMPM",

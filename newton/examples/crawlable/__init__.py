@@ -13,4 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Crawlable soft body examples (SolverCrawlable, inchworm crawling)."""
+"""Inchworm crawling examples: ``SolverInflatable`` + ``gait_traveling_wave`` (Soft-style open-loop gait)."""

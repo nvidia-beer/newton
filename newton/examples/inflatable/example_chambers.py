@@ -14,7 +14,7 @@
 # limitations under the License.
 
 """
-Chambers Example - 3D N-chamber inflatable with anisotropic inflation.
+Chambers Example - 3D N-chamber inflatable with isotropic inflation per chamber.
 
 Same chamber layout as worm: 3D grid by num_chambers_x, num_chambers_y, num_chambers_z.
 Chamber index = ix*(ny*nz) + iy*nz + iz (row-major in X, Y, Z).
@@ -42,7 +42,7 @@ from newton.solvers import SolverInflatable, TetraBox
 
 class Example:
     """
-    3D N-chamber inflatable box with anisotropic inflation.
+    3D N-chamber inflatable box with isotropic inflation per chamber.
     Chambers as 3D grid: num_chambers_x × num_chambers_y × num_chambers_z.
     """
 
@@ -69,9 +69,6 @@ class Example:
         gravity: float = 9.81,
         max_pressure: float = 5.0,
         substeps: int = 5,
-        anisotropy_x: float = 1.0,
-        anisotropy_y: float = 1.0,
-        anisotropy_z: float = 1.0,
     ):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -90,9 +87,6 @@ class Example:
         self.pos = pos if pos is not None else (0.0, 0.0, initial_height)
         self.mass = mass
         self.max_pressure = max_pressure
-        self.anisotropy_x = float(anisotropy_x)
-        self.anisotropy_y = float(anisotropy_y)
-        self.anisotropy_z = float(anisotropy_z)
         self.viewer = viewer
 
         # 3D tetrahedral box: length (X), width (Y), height (Z); Z = chamber axis
@@ -308,16 +302,13 @@ class Example:
             self.sim_time += self.sim_dt
 
     def _apply_pressure(self):
-        self.solver.anisotropy_x = self.anisotropy_x
-        self.solver.anisotropy_y = self.anisotropy_y
-        self.solver.anisotropy_z = self.anisotropy_z
         self.solver.set_chamber_pressures(self.chamber_pressures)
 
     def _print_help(self):
-        print(f"\n📦 3D Chambers (anisotropic inflation) ready!", flush=True)
+        print(f"\n📦 3D Chambers ready!", flush=True)
         print(
             f"   3D box: length={self.length:.2f} width={self.width:.2f} height={self.height:.2f}m, "
-            f"chambers={self.num_chambers_x}x{self.num_chambers_y}x{self.num_chambers_z}={self.total_chambers}, anisotropy=({self.anisotropy_x},{self.anisotropy_y},{self.anisotropy_z})",
+            f"chambers={self.num_chambers_x}x{self.num_chambers_y}x{self.num_chambers_z}={self.total_chambers}",
             flush=True,
         )
         print(f"   [I] / [=]  - Inflate", flush=True)
@@ -461,7 +452,7 @@ class Example:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Chambers: N-chamber anisotropic inflatable box"
+        description="Chambers: N-chamber inflatable box"
     )
     parser.add_argument("--length", type=float, default=0.35, help="Box length (X axis, m)")
     parser.add_argument("--width", type=float, default=0.35, help="Box width (Y axis, m)")
@@ -482,18 +473,6 @@ def main():
     parser.add_argument("--spring_kd", type=float, default=1.0)
     parser.add_argument("--gravity", type=float, default=9.81)
     parser.add_argument("--max_pressure", type=float, default=5.0)
-    parser.add_argument(
-        "--anisotropy_x", type=float, default=1.0,
-        help="Anisotropy along X (1.0 = isotropic)",
-    )
-    parser.add_argument(
-        "--anisotropy_y", type=float, default=1.0,
-        help="Anisotropy along Y (1.0 = isotropic)",
-    )
-    parser.add_argument(
-        "--anisotropy_z", type=float, default=1.0,
-        help="Anisotropy along Z (e.g. 1.4 = elongate more vertically)",
-    )
     parser.add_argument("--substeps", type=int, default=5)
     parser.add_argument("--num_frames", type=int, default=7200, help="Simulation frames (default 7200 = 2 min at 60 fps)")
     parser.add_argument("--device", type=str, default=None)
@@ -550,9 +529,6 @@ def main():
             gravity=args.gravity,
             max_pressure=args.max_pressure,
             substeps=args.substeps,
-            anisotropy_x=args.anisotropy_x,
-            anisotropy_y=args.anisotropy_y,
-            anisotropy_z=args.anisotropy_z,
         )
         example.run(num_frames=args.num_frames)
 

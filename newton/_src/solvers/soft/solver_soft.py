@@ -15,6 +15,7 @@
 
 """Soft body solver with implicit integration using sparse matrix solvers."""
 
+import numpy as np
 import warp as wp
 from warp.optim.linear import cg, preconditioner, bicgstab, gmres, cr
 from warp.sparse import bsr_zeros, bsr_set_from_triplets
@@ -48,6 +49,16 @@ from newton._src.sim import Contacts, Control, Model, State
 from newton._src.solvers.solver import SolverBase
 
 PARTICLE_FLAG_ACTIVE = int(ParticleFlags.ACTIVE)
+
+
+def _gravity_magnitude_world0(model: Model) -> float:
+    """‖g‖ for world 0; used to cap effective normal in Coulomb friction on the analytic ground plane."""
+    if model.gravity is None:
+        return 9.81
+    g = np.asarray(model.gravity.numpy(), dtype=np.float64).ravel()
+    if g.size < 3:
+        return 9.81
+    return float(np.linalg.norm(g[:3]))
 
 
 class SolverSoft(SolverBase):
@@ -426,12 +437,14 @@ class SolverSoft(SolverBase):
                 state.particle_q,
                 state.particle_qd,
                 model.particle_radius,
+                model.particle_inv_mass,
                 model.particle_flags,
                 self._ground_ke,
                 self._ground_kd,
                 self._ground_kf,
                 self._ground_mu,
                 self._ground_plane,
+                _gravity_magnitude_world0(model),
             ],
             outputs=[forces],
             device=model.device,

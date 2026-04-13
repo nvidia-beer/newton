@@ -17,15 +17,14 @@ Kernels:
 - **Springs:** `scale_spring_rest_lengths_kernel`: `rest_length_out = original_rest_length * scale`.
 - **Tet poses:** `scale_tet_poses_kernel`: each 3×3 rest pose (e.g. \(\mathbf{D}_m^{-1}\)) is scaled by `inv_scale = 1/scale` so the rest shape is larger when \(p>1\).
 
-## Anisotropic Expansion
+## Per-Chamber Isotropic Expansion
 
-- **Global anisotropy:** `anisotropy_x`, `anisotropy_y`, `anisotropy_z`. Effective scale per axis is \(s\cdot a_x\), \(s\cdot a_y\), \(s\cdot a_z\). Used in `scale_tet_poses_anisotropic_kernel` (per-column scaling of the rest pose). Springs can stay isotropic (single \(s\)) while tets expand more along one axis (e.g. Z for “lift”).
-- **Per-chamber anisotropic:** `scale_tet_poses_per_chamber_anisotropic_kernel`: each tet has a chamber index from `tet_chamber_mask`; its rest pose is scaled by that chamber’s pressure and global anisotropy. Mask \(-1\) means “no inflation” (stiff region).
+- **Per-chamber tet poses:** `scale_tet_poses_per_chamber_kernel`: each tet has a chamber index from `tet_chamber_mask`; its rest pose is scaled isotropically by that chamber’s pressure \(s_c = p_c^{1/3}\). Mask \(-1\) means “no inflation” (stiff region).
 
 ## Chambers
 
 - **Chamber layout:** the mesh is divided into logical chambers (e.g. 2×1×2 along X, Y, Z). Each tetrahedron and each spring is assigned to a chamber via `tet_chamber_mask` and `spring_chamber_mask` (integer indices; \(-1\) = non-inflatable).
-- **Per-chamber pressure:** `set_chamber_mask(tet_chamber_mask, spring_chamber_mask, num_chambers)` then `set_chamber_pressures([p0, p1, ...])`. Each chamber \(c\) has pressure \(p_c\); springs/tets in chamber \(c\) use \(s_c = p_c^{1/3}\) (and anisotropy if applicable).
+- **Per-chamber pressure:** `set_chamber_mask(tet_chamber_mask, spring_chamber_mask, num_chambers)` then `set_chamber_pressures([p0, p1, ...])`. Each chamber \(c\) has pressure \(p_c\); springs/tets in chamber \(c\) use \(s_c = p_c^{1/3}\) (isotropic).
 - **Inchworm:** chambers 1 and 3 (left and right top segments) are inflated; chambers 0 and 2 can be disabled (`chamber_inflation_disabled`) so the “backbone” stays stiffer. Names in example: `inflatable_chambers`, `chamber_pressures`, `tet_chamber_mask`, `spring_chamber_mask`.
 
 ## Volume and Ratio
@@ -43,9 +42,8 @@ Kernels:
 
 ## Naming in Code
 
-- `set_pressure`, `set_chamber_pressures`, `set_chamber_mask`, `set_pressure_anisotropic`
+- `set_pressure`, `set_chamber_pressures`, `set_chamber_mask`
 - `original_tet_poses`, `original_spring_rest_length`, `tet_chamber_mask`, `spring_chamber_mask`, `_chamber_pressures_array`
-- `anisotropy_x`, `anisotropy_y`, `anisotropy_z`
-- `scale_tet_poses_kernel`, `scale_tet_poses_per_chamber_anisotropic_kernel`, `scale_spring_rest_lengths_per_chamber_kernel`
+- `scale_tet_poses_kernel`, `scale_tet_poses_per_chamber_kernel`, `scale_spring_rest_lengths_per_chamber_kernel`
 - `eval_springs_linear_and_torque`, `torque_stiffness`, `torque_damping`, `spring_rest_direction`
 - `compute_volume`, `get_volume_ratio`, `get_initial_volume`

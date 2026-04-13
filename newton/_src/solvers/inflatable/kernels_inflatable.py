@@ -18,9 +18,8 @@ Warp kernels for inflatable soft body simulation.
 
 Rest-configuration scaling for inflation:
 - **Isotropic**: scale_spring_rest_lengths_kernel, scale_tet_poses_kernel (single scale).
-- **Anisotropic**: scale_tet_poses_anisotropic_kernel (per-axis scale; single pressure).
-- **Per-chamber**: scale_tet_poses_per_chamber_anisotropic_kernel, scale_spring_rest_lengths_per_chamber_kernel
-  (each tet/spring uses its chamber's pressure and optional anisotropy).
+- **Per-chamber**: scale_tet_poses_per_chamber_kernel, scale_spring_rest_lengths_per_chamber_kernel
+  (each tet/spring uses its chamber's pressure; isotropic scaling per region).
 - **Volume**: compute_volume_kernel for current volume from tetrahedra.
 """
 
@@ -87,53 +86,17 @@ def scale_tet_poses_kernel(
 
 
 @wp.kernel
-def scale_tet_poses_anisotropic_kernel(
-    original_poses: wp.array(dtype=wp.mat33),
-    inv_scale_x: wp.float32,
-    inv_scale_y: wp.float32,
-    inv_scale_z: wp.float32,
-    scaled_poses: wp.array(dtype=wp.mat33),
-):
-    """
-    Scale tetrahedra rest poses (Dm_inv) anisotropically per axis.
-    
-    Column 0 of Dm_inv is scaled by inv_scale_x, column 1 by inv_scale_y, column 2 by inv_scale_z.
-    This produces different expansion along X, Y, Z (e.g. elongate more in Z for chamber inflation).
-    
-    Parameters
-    ----------
-    original_poses : array
-        Original (unscaled) rest poses (Dm_inv matrices)
-    inv_scale_x, inv_scale_y, inv_scale_z : float
-        Inverse linear scale per axis (1/scale for each direction)
-    scaled_poses : array (output)
-        Scaled rest poses
-    """
-    tid = wp.tid()
-    orig = original_poses[tid]
-    # Scale column 0 by inv_scale_x, column 1 by inv_scale_y, column 2 by inv_scale_z
-    scaled_poses[tid] = wp.mat33(
-        orig[0, 0] * inv_scale_x, orig[0, 1] * inv_scale_y, orig[0, 2] * inv_scale_z,
-        orig[1, 0] * inv_scale_x, orig[1, 1] * inv_scale_y, orig[1, 2] * inv_scale_z,
-        orig[2, 0] * inv_scale_x, orig[2, 1] * inv_scale_y, orig[2, 2] * inv_scale_z,
-    )
-
-
-@wp.kernel
-def scale_tet_poses_per_chamber_anisotropic_kernel(
+def scale_tet_poses_per_chamber_kernel(
     original_poses: wp.array(dtype=wp.mat33),
     tet_chamber_mask: wp.array(dtype=wp.int32),
     chamber_pressures: wp.array(dtype=wp.float32),
     num_chambers: int,
-    anisotropy_x: wp.float32,
-    anisotropy_y: wp.float32,
-    anisotropy_z: wp.float32,
     scaled_poses: wp.array(dtype=wp.mat33),
 ):
     """
-    Scale tetrahedra rest poses per chamber with anisotropy.
-    Each tet is assigned to a chamber; its rest pose is scaled by that chamber's
-    pressure and global anisotropy. Mask -1 = no inflation (stiff base).
+    Scale tetrahedra rest poses per chamber (isotropic).
+    Each tet is assigned to a chamber; its rest pose is scaled by that chamber's pressure.
+    Mask -1 = no inflation (stiff base).
     """
     tid = wp.tid()
     c = tet_chamber_mask[tid]
@@ -145,13 +108,11 @@ def scale_tet_poses_per_chamber_anisotropic_kernel(
     pressure = chamber_pressures[c]
     pressure = wp.max(1.0e-6, wp.min(pressure, 100.0))
     linear_scale = wp.cbrt(pressure)
-    inv_scale_x = 1.0 / (linear_scale * anisotropy_x)
-    inv_scale_y = 1.0 / (linear_scale * anisotropy_y)
-    inv_scale_z = 1.0 / (linear_scale * anisotropy_z)
+    inv_scale = 1.0 / linear_scale
     scaled_poses[tid] = wp.mat33(
-        orig[0, 0] * inv_scale_x, orig[0, 1] * inv_scale_y, orig[0, 2] * inv_scale_z,
-        orig[1, 0] * inv_scale_x, orig[1, 1] * inv_scale_y, orig[1, 2] * inv_scale_z,
-        orig[2, 0] * inv_scale_x, orig[2, 1] * inv_scale_y, orig[2, 2] * inv_scale_z,
+        orig[0, 0] * inv_scale, orig[0, 1] * inv_scale, orig[0, 2] * inv_scale,
+        orig[1, 0] * inv_scale, orig[1, 1] * inv_scale, orig[1, 2] * inv_scale,
+        orig[2, 0] * inv_scale, orig[2, 1] * inv_scale, orig[2, 2] * inv_scale,
     )
 
 

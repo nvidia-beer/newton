@@ -128,7 +128,7 @@ The paper uses a **harmonic gait** for the reference joint angles. The general f
 
 Typical choice: \(\gamma = \pi/2\), phase \(\psi \approx \pi/2\) for robustness.
 
-In the simulation, bending is achieved by **chamber pressures** (inflation), not by the paper's joint torques; the resulting \(\phi_1,\phi_2\) are fed into the same \(\Delta\), \(d\), \(x_c\), and stick–slip rule above.
+In Newton, bending is achieved by **chamber pressures** (inflation), not by the paper’s joint torques. Ground contact uses **Coulomb friction** (`SolverSoft` / `SolverInflatable`; see `07_mathematical_summary.md` §8). Angles \(\phi_1,\phi_2\) for **metrics** come from grouped vertex positions (`inchworm/paper.py`).
 
 ## 2.7 Simulation Solutions
 

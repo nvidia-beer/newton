@@ -1,6 +1,6 @@
 # Solver Layers: Mathematical View
 
-The simulation is built as **four layers** (Section 3 gives the continuum model they extend). Each layer adds a well-defined set of terms to the dynamical system. This section states, in mathematical terms only, what each layer contributes. That is the “solver implementation”: which equations go in at each stage.
+The simulation is built as **three core solver layers** used by the inchworm example (Section 3 gives the continuum model they extend). The paper’s kinematic notation and slip relations are summarized in **§7** of `07_mathematical_summary.md` alongside the force-based ground model in **§8**.
 
 **Convention.** The body has particle positions \(\mathbf{q}\) and velocities \(\mathbf{v}\). Each timestep the linear system \(A\,\Delta\mathbf{v} = \mathbf{f}\) is solved for \(\Delta\mathbf{v}\), then \(\mathbf{v}\) and \(\mathbf{q}\) are updated.
 
@@ -27,7 +27,7 @@ For the soft-body system, \(A = M - hD - h^2 K\) is usually **symmetric** (mass,
 
 **Role:** Time evolution of a soft body in contact with the ground. (Physics in Section 3.1–3.2.)
 
-**Adds to the system:** \(M\), \(D\), \(K\) (mass, damping from springs/material, stiffness from FEM and springs); \(\mathbf{f}\) from elasticity, springs \(k_e(\ell-\ell_0)\hat{\mathbf{d}} + k_d\dot{\ell}\hat{\mathbf{d}}\), gravity, and ground contact (normal + Coulomb). Update \(\mathbf{v}^{n+1} = \mathbf{v}^n + \Delta\mathbf{v}\), \(\mathbf{q}^{n+1} = \mathbf{q}^n + h\,\mathbf{v}^{n+1}\). This layer does not use the paper’s stick–slip rule.
+**Adds to the system:** \(M\), \(D\), \(K\) (mass, damping from springs/material, stiffness from FEM and springs); \(\mathbf{f}\) from elasticity, springs \(k_e(\ell-\ell_0)\hat{\mathbf{d}} + k_d\dot{\ell}\hat{\mathbf{d}}\), gravity, and ground contact (normal + Coulomb friction, with tangential magnitude bounded relative to effective normal).
 
 ---
 
@@ -41,17 +41,9 @@ For the soft-body system, \(A = M - hD - h^2 K\) is usually **symmetric** (mass,
 
 ## Layer 3: Inflatable (actuation and spine stiffness)
 
-**Role:** Drive shape change by “inflation” (rest-configuration scaling) and resist bending with a spine torque. (Physics in Section 3.3–3.4.)
+**Role:** Drive shape change by “inflation” (rest-configuration scaling) and resist bending with spine torque springs. (Physics in Section 3.3–3.4.)
 
-**Adds to the system:** Rest scaling \(s = p^{1/3}\) (and per-chamber \(s_c\)) and anisotropy change the effective rest state of Layer 1; spine torque \(\tau = -(k_\tau\alpha + k_d\omega)L\) (angle \(\alpha = \arccos(\mathbf{d}\cdot\mathbf{d}_0)\)) adds terms to \(\mathbf{f}\) and, when linearised, to \(K\) and \(D\).
-
----
-
-## Layer 4: Crawlable (paper stick–slip and kinematic update)
-
-**Role:** Replace Layer 1 ground friction with the paper’s stick–slip rule and apply kinematic displacement \(\pm\Delta d\) after each step. (Geometry and rule in Section 2; coupling in Section 3.6.)
-
-**Changes to the system:** From mesh, effective \(\phi_1,\phi_2\) and then \(d\), \(x_c\), \(\Delta\) are computed; slip leg is chosen by sign of \(\Delta\). Tangential force: \(\mu f_n\) in slip direction on slipping group (capped per particle), Coulomb on sticking group. After the step, all particles are displaced by \(\pm\Delta d\) along the crawl axis. Normal forces unchanged; mass, elasticity, inflation, self-contact unchanged.
+**Adds to the system:** Per-chamber **isotropic** rest scaling \(s_c = p_c^{1/3}\); spine torque \(\tau = -(k_\tau\alpha + k_d\omega)L\) (angle \(\alpha = \arccos(\mathbf{d}\cdot\mathbf{d}_0)\)) adds terms to \(\mathbf{f}\) and, when linearised, to \(K\) and \(D\).
 
 ---
 
@@ -64,6 +56,5 @@ What each layer adds to the system matrix \(A\) (mass, damping, stiffness) and t
 | **Soft**       | \(M\), \(D\), \(K\) from mass, damping, FEM, springs | Elasticity, springs, gravity, ground contact (normal + Coulomb) |
 | **Deformable** | Optional diagonal stiffness \(h^2 k_{\mathrm{eff}}\mathbf{I}\) for vertices in contact | Repulsion forces (vertex–triangle, edge–edge) |
 | **Inflatable** | Spine torque linearisation in \(K\), \(D\); rest scaling changes existing FEM/spring \(K\) | Spine torque force; rest scaling changes existing forces |
-| **Crawlable**   | — | Ground tangential force from paper rule (slip/stick by \(\Delta\)); post-step kinematic \(\pm\Delta d\) |
 
-The inchworm example uses all four layers. To extend the model (e.g. more chambers, more contact groups, 3D), the same mathematical structure is kept; additional geometry and indexing (e.g. more contact groups, chamber assignments) are added, and the solver layers stay the same.
+The inchworm example uses **Soft → Deformable → Inflatable**. To extend the model (e.g. more chambers), add geometry and indexing; the same three-layer structure applies.

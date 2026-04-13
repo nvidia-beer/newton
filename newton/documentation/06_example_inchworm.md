@@ -1,10 +1,10 @@
 # Inchworm Crawling
 
-This section describes the inchworm crawling example: a soft body with two bending segments and two inflatable chambers that crawls using the paper’s stick–slip rule. The implementation lives in `newton/examples/crawlable/` (script, params, and paper metrics in the `inchworm/` subfolder).
+This section describes the inchworm crawling example: a soft body with multiple inflatable chambers driven by a **traveling-wave gait**, simulated with **`SolverInflatable`** and **Coulomb ground contact**. Code and parameters live under `newton/examples/crawlable/` (metrics and JSON in the `inchworm/` subfolder).
 
 ## What the example does
 
-The robot is a **soft box** (tetrahedral mesh) with **four chambers** along the body. Two chambers (left and right on top) are used for actuation; inflating them bends the body. A **phase-shifted harmonic gait** drives the two chamber pressures so the body arches and relaxes in sequence. With **stick–slip** enabled, the simulation applies the paper’s friction and kinematic step: at each step one “foot” (one set of bottom vertices) slips while the other sticks, and the body advances by a computed displacement. The result is directed crawling along the crawl axis (Y in the example).
+The robot is a **soft box** (tetrahedral mesh from `TetraBox`) with a chamber grid along the body. Selected chambers are actuated by time-varying **volume-ratio pressures** (`set_chamber_pressures`); inactive chambers can stay near rest stiffness (`chamber_inflation_disabled`, `chamber_stiffness_scale`). **`gait_traveling_wave.py`** orchestrates a phase-shifted pattern so the body arches and relaxes in sequence. Directed motion comes from **friction with the ground plane** and the gait-driven deformation.
 
 ## Simulation and key parameters
 
@@ -25,21 +25,21 @@ The figures below show the inchworm in the 3D simulation and how **joints** (φ�
   Springs along the long axis resist bending. Their stiffness (and damping) controls how strongly the body returns to straight; higher values make the gait stiffer and more responsive.
 
 - **Inflation — active chambers and max pressure**  
-  A per-chamber flag selects which chambers are driven by the gait (typically the two top ones). A global max pressure caps inflation so the mesh does not over-inflate.
+  Per-chamber flags and stiffness scales select which regions are driven by the gait. A global `max_pressure` caps inflation.
 
-- **Slip and grip — gait amplitude and baseline**  
-  Amplitude is the pressure swing in each active chamber (larger ⇒ more bend and step size). Baseline is the mean pressure (higher ⇒ body lifts more and grip can improve). Together they set arching and foot pressure during the stick–slip cycle.
+- **Gait — amplitude and baseline**  
+  Amplitude is the pressure swing in actuated chambers (larger ⇒ more bend). Baseline is the mean pressure (higher ⇒ more lift). Together they set arching during the gait cycle.
 
 ## Geometry and chambers
 
-The mesh is a subdivided box. Chambers are laid out along the box (e.g. 2 along the width × 1 × 2 in height). Each tetrahedron and each spring is assigned to a chamber by position. The two “top” chambers (left and right) are the actuated ones; the others form the backbone and are not driven. Inflating a top chamber bends the body downward on that side.
+The mesh is a subdivided box. Chambers are laid out along the box (e.g. multiple slices along Y and Z). Each tetrahedron and spring is assigned to a chamber by position. Inflating opposing sides bends the body.
 
 ## Gait and contact
 
-After a short settle phase (fixed pressure, no motion), the gait runs: left and right chamber pressures follow a phase-shifted sine so the body alternates which side is arched. The solver uses the paper’s contact rule: normal forces from equilibrium, slippage criterion to choose which foot slips, and a kinematic step that advances the body. Bottom vertices are treated as “in contact” when their height is at or below a small threshold; that set is used for validation and for the stick–slip groups. Optional CSV logging records paper-aligned metrics (contact positions, joint positions, etc.) for analysis.
+After a short settle phase, the traveling-wave gait updates chamber pressures each frame or substep. **`SolverInflatable`** integrates the soft body with implicit steps; ground interaction uses the **soft solver’s particle–plane contact** (normal penalty + Coulomb friction, with friction magnitude capped relative to effective normal / weight—see `SolverSoft`). Bottom vertices are classified for **validation** and **paper-style metrics** (`get_paper_metrics`, joint groups) when \(z\) is below a threshold. Optional CSV logging records Y–Z metrics for analysis.
 
 ## Running the example
 
-From the repo, run the example via the devcontainer script (e.g. `run-examples.sh inchworm_crawling [--crawlable]`) or from inside the container with the project’s Python module. Parameters are read from a JSON file (e.g. `inchworm/inchworm_params.json`); paths and options are documented in the script.
+From the repo, run via the devcontainer script (e.g. `run-examples.sh inchworm_crawling`) or `python -m newton.examples inchworm_crawling`. Parameters are read from JSON (e.g. `inchworm/inchworm_params.json`).
 
-For the full code and parameter tables and the implementation map (paper equations and crawlable solver → code), see **Appendix B**.
+For code and parameter tables, see **Appendix B**.

@@ -1,6 +1,6 @@
 # From Paper to Simulation
 
-The paper’s model (Section 2) is quasistatic and kinematic: at each step it solves equilibrium and applies a kinematic displacement \(\pm\Delta d\). To simulate a deformable body (a soft tetrahedral mesh), the model adds time evolution, elasticity, and a coupling of the paper’s stick–slip rule to the continuum. This section describes those extensions in mathematical form.
+The paper’s model (Section 2) is quasistatic and kinematic: at each step it solves equilibrium and applies a kinematic displacement \(\pm\Delta d\). To simulate a deformable body (a soft tetrahedral mesh), Newton adds time evolution, elasticity, and **Coulomb ground friction** (`SolverSoft`). The paper’s slip-force and geometry notation is collected in **§7** of `07_mathematical_summary.md`. This section describes the **continuum** extensions (FEM, inflation, chambers, spine torque, self-contact) in mathematical form.
 
 ## 3.1 Time Stepping and Implicit Integration
 
@@ -38,9 +38,7 @@ The paper actuates via torques \(\tau_i = k(\phi_i^{\mathrm{ref}} - \pi)\). In a
 
 - **Tetrahedra:** rest pose (e.g. \(\mathbf{D}_m^{-1}\)) is scaled by \(1/s\) so the rest shape is larger when \(p > 1\).
 
-**Chambers:** the body can be divided into regions (chambers) with different “pressures” \(p_c\). Each tetrahedron and spring is assigned to a chamber; its rest state is scaled by \(s_c = p_c^{1/3}\) (and optionally by anisotropy factors \(a_x, a_y, a_z\) per axis). So the left and right segments of the inchworm can have different \(p\), producing bending. This replaces the paper’s torque actuation with a continuum equivalent.
-
-**Anisotropy:** scaling can differ along axes (e.g. \(s\,a_z\) along the vertical) so that inflation elongates the body more in one direction; useful for bending or “lift.”
+**Chambers:** the body can be divided into regions (chambers) with different “pressures” \(p_c\). Each tetrahedron and spring is assigned to a chamber; its rest state is scaled **isotropically** by \(s_c = p_c^{1/3}\). So the left and right segments of the inchworm can have different \(p\), producing bending. This replaces the paper’s torque actuation with a continuum equivalent.
 
 ## 3.4 Spine Torque (Bend Stiffness)
 
@@ -58,31 +56,27 @@ This torque is converted to forces at the two endpoints. This gives a **spine st
 
 When the body bends, different parts can come into contact. **Self-collision** is added: repulsion between surface vertex–triangle and edge–edge pairs when distance is below a radius \(r\). The force magnitude is a \(C^2\)-style function of distance (e.g. linear in penetration for very close, \(\propto 1/d\) in an intermediate range, zero beyond \(r\)). A force cap avoids huge impulses. This is purely a continuum addition; the paper’s model has no self-contact.
 
-## 3.6 Ground Contact and the Paper’s Stick–Slip
+## 3.6 Ground Contact (current implementation)
 
-**Normal contact** with the ground is standard: penetration \(c \le 0\) (with particle radius), with normal force and reaction
+**Normal contact** with the ground uses a penalty: penetration \(c \le 0\) (with particle radius),
 
 \[
 f_n = k_e c + k_d \min(\dot{c},0), \qquad \mathbf{F}_n = -f_n\mathbf{n}.
 \]
 
-**Tangential (stick–slip):** the paper’s rule is used. From the current deformed shape "left" and "right" contact groups and the two "joint" lines are identified; the effective \(\phi_1\), \(\phi_2\) are computed from the positions of these four nodes in the plane. Then \(d\), \(x_c\), \(\Delta\) are computed and which foot slips is decided. On the slipping foot a tangential force of magnitude \(\mu f_n\) is applied in the slip direction (and capped per particle so the leg does not lift). On the sticking foot Coulomb friction is used (no slip). After the implicit step the **kinematic displacement** \(\pm\Delta d\) is applied along the crawl axis, as in the paper, so that the net motion is consistent with "slipping contact moves by \(\Delta d\)."
-
-So: the **dynamics** (FEM, springs, time stepping, inflation, self-contact) are the extension; the **contact law** (normal forces, \(\Delta\), slip force, kinematic \(\Delta d\)) are the paper’s model applied to the continuum.
+**Tangential:** **Coulomb friction** with \(|\mathbf{F}_t| \le \mu f_{n,\mathrm{eff}}\), tangent opposing slip; \(f_{n,\mathrm{eff}}\) can be capped using particle mass and \(\|g\|\) so stiff normals do not yield unbounded friction (`eval_particle_ground_contacts`).
 
 ## 3.7 Coupling Summary
 
 1. **At each timestep:** update inflation (chamber pressures) from the gait; scale rest configurations.
 
-2. **Build** \(A\) and \(\mathbf{f}\) from mass, damping, elasticity (FEM + springs), spine torque, gravity, ground normal force, and paper stick–slip tangential force.
+2. **Build** \(A\) and \(\mathbf{f}\) from mass, damping, elasticity (FEM + springs), spine torque, gravity, and ground contact (normal + Coulomb).
 
 3. **Solve** \(A\,\Delta\mathbf{v} = \mathbf{f}\); then update \(\mathbf{q}\), \(\mathbf{v}\).
 
-4. **Apply** the kinematic displacement \(\pm\Delta d\) along the crawl axis from the paper rule.
+4. Apply self-contact corrections.
 
-5. Apply self-contact corrections.
-
-This gives a single, consistent formulation: the paper’s simple model is embedded in a dynamic, deformable simulation and can be generalised to more links, more chambers, or 3D by extending the same geometry and stick–slip logic. Section 4 details how these ingredients are organised as solver layers.
+Section 4 details how these ingredients map to **Soft → Deformable → Inflatable** solver layers.
 
 ## 3.8 Paper vs Implementation: Elasticity and Actuation
 
@@ -96,14 +90,13 @@ Elastic restoring \(-k(\phi_i - \pi)\) resists bending away from flat (\(\phi_i 
 
 **Implementation.**
 
-- **Elasticity.** The simulation does not use discrete joints. “Joints” are vertex groups used to measure \(\phi_1,\phi_2\) and for the stick–slip state machine. Bending resistance is implemented as **torque on lengthwise springs** (Section 3.4). Each such spring has a rest direction \(\mathbf{d}_0\) (flat). The angle is \(\theta = \arccos(\mathbf{d}\cdot\mathbf{d}_0)\) and the torque magnitude is \(\tau = -(k_\tau\theta + k_d\omega)L\). So elasticity is “resist deviation from flat,” analogous to the paper’s \(-k(\phi_i - \pi)\), but applied per lengthwise spring via \(k_\tau\) (`torque_stiffness`), not as a single \(k\) at a lumped joint.
+- **Elasticity.** The simulation does not use discrete joints. “Joints” are vertex groups used to measure \(\phi_1,\phi_2\) for **metrics** (and paper-style plots). Bending resistance is implemented as **torque on lengthwise springs** (Section 3.4). Each such spring has a rest direction \(\mathbf{d}_0\) (flat). The angle is \(\alpha = \arccos(\mathbf{d}\cdot\mathbf{d}_0)\) and the torque magnitude is \(\tau = -(k_\tau\alpha + k_d\omega)L\). So elasticity is “resist deviation from flat,” analogous to the paper’s \(-k(\phi_i - \pi)\), but applied per lengthwise spring via \(k_\tau\) (`torque_stiffness`), not as a single \(k\) at a lumped joint.
 
-- **Actuation.** The paper’s \(\tau_i = k(\phi_i^{\mathrm{ref}} - \pi)\) is **not** applied as explicit joint torques. Actuation is **chamber pressure**: left and right chambers get different pressures from the gait; inflation scales rest configurations so the mesh deforms. The resulting \(\phi_1,\phi_2\) are **computed from the deformed mesh** and used in the stick–slip state machine and paper geometry (\(d\), \(\Delta\)). Thus \(\phi_i^{\mathrm{ref}}\) appears in the gait and state machine, but the simulator does not apply a torque \(T_i = -k(\phi_i - \phi_i^{\mathrm{ref}})\); bending is driven by pressure, not by reference-angle torque.
+- **Actuation.** The paper’s \(\tau_i = k(\phi_i^{\mathrm{ref}} - \pi)\) is **not** applied as explicit joint torques. Actuation is **chamber pressure**: chambers get different pressures from the gait; inflation scales rest configurations so the mesh deforms. Angles \(\phi_1,\phi_2\) can be **computed from the deformed mesh** for analysis.
 
 | Aspect | Paper | Implementation |
 |--------|--------|----------------|
-| **Elasticity** | Torsion springs at joints: \(-k(\phi_i - \pi)\) | Torque on lengthwise springs: \(-(k_\tau\theta + k_d\omega)L\), rest direction \(\mathbf{d}_0\) (flat) |
-| **Actuation** | Joint torques \(\tau_i = k(\phi_i^{\mathrm{ref}} - \pi)\) → net \(T_i = -k(\phi_i - \phi_i^{\mathrm{ref}})\) | Chamber pressure (gait) → deformation → \(\phi_1,\phi_2\) from mesh |
-| **\(\phi_i^{\mathrm{ref}}\)** | In the dynamics (torque law) | In crawl state machine and paper geometry; not in joint torque law |
+| **Elasticity** | Torsion springs at joints: \(-k(\phi_i - \pi)\) | Torque on lengthwise springs: \(-(k_\tau\alpha + k_d\omega)L\), rest direction \(\mathbf{d}_0\) (flat) |
+| **Actuation** | Joint torques \(\tau_i = k(\phi_i^{\mathrm{ref}} - \pi)\) → net \(T_i = -k(\phi_i - \phi_i^{\mathrm{ref}})\) | Chamber pressure (gait) → deformation |
 
-So: elasticity is represented in spirit (torsion-like resistance to bending); actuation is a different mechanism (pressure-driven deformation) that produces similar crawling behaviour. A more detailed comparison is in `documentation/paper_vs_implementation_elasticity.md`.
+So: elasticity is represented in spirit (torsion-like resistance to bending); actuation is pressure-driven deformation. A more detailed comparison may appear in `paper_vs_implementation_elasticity.md` if present.

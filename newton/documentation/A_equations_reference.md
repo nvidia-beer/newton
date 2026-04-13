@@ -62,4 +62,4 @@ Quick lookup for all main equations: **Section A.1** = paper model (Gamus et al.
 |------|----------|
 | Spine (angle \(\alpha\), not paper’s \(\theta\)) | \(\alpha = \arccos(\mathbf{d}\cdot\mathbf{d}_0)\),  \(\tau = -(k_\tau\alpha + k_d\omega)L\);  forces at endpoints from \(\tau\,\mathbf{a}\times\mathbf{d}/L\) |
 | Ground normal | \(f_n = k_e c + k_d\min(\dot{c},0)\),  \(\mathbf{F}_n = -f_n\mathbf{n}\) |
-| Tangential (ground) | Paper stick–slip \(f_t = \mu f_{n,s}\operatorname{sign}(\dot{d})\) on slipping foot; else Coulomb \(|\mathbf{F}_t| \le \mu f_{n,\mathrm{eff}}\) |
+| Tangential (ground) | Coulomb \(|\mathbf{F}_t| \le \mu f_{n,\mathrm{eff}}\) (opposes slip); see `07_mathematical_summary.md` §8 |

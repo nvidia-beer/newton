@@ -92,7 +92,7 @@ declare -A EXAMPLE_DESCRIPTIONS=(
     ["disabled_chambers"]="Same as chambers (N-chamber inflatable); Press I/K inflate/deflate, C cycle chamber"
     ["worm"]="Worm with torque (bend about one axis); interactive: stiff_axes, torque, length/width/height, subdivisions; [I]/[K] [C]"
     ["inchworm"]="Inchworm (arXiv:1911.05227): left/right chambers, phase-shifted harmonic gait; --no_gait for manual [I]/[K] [C]"
-    ["inchworm_crawling"]="Inchworm crawling (SolverCrawlable): same as inchworm; menu asks Normal vs Debug (stick-slip)"
+    ["inchworm_crawling"]="Inchworm crawling (SolverInflatable + traveling-wave gait); params from JSON"
     ["inchworm_crawling_sand"]="Inchworm crawling on MPM sand (two-way coupling; --no-sand = same as inchworm_crawling)"
     ["mpm_worm_sand"]="Worm-shaped rigid body on MPM sand (two-way coupling; sand deforms, worm gets reaction forces)"
     ["rigid_carpet"]="DEBUG: Rigid plates on ground + glue (minimal, no soft body)"
@@ -399,25 +399,6 @@ if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "disabled_chambers" ]; } &&
         read -p "Subdivisions Z (default: 2): " subdivisions_z
         if [ -z "$subdivisions_z" ]; then subdivisions_z=2; fi
     fi
-    read -p "Anisotropy X (default: 1.0): " anisotropy_x
-    if [ -z "$anisotropy_x" ]; then
-        anisotropy_x=1.0
-    fi
-    if [ "$EXAMPLE" == "disabled_chambers" ]; then
-        read -p "Anisotropy Y for worm movements (default: 1.4): " anisotropy_y
-        if [ -z "$anisotropy_y" ]; then
-            anisotropy_y=1.4
-        fi
-    else
-        read -p "Anisotropy Y (default: 1.0): " anisotropy_y
-        if [ -z "$anisotropy_y" ]; then
-            anisotropy_y=1.0
-        fi
-    fi
-    read -p "Anisotropy Z (default: 1.0): " anisotropy_z
-    if [ -z "$anisotropy_z" ]; then
-        anisotropy_z=1.0
-    fi
     chamber_stiffness_scale_arg=""
     chamber_inflation_disabled_arg=""
     if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "disabled_chambers" ]; }; then
@@ -494,12 +475,12 @@ if { [ "$EXAMPLE" == "chambers" ] || [ "$EXAMPLE" == "disabled_chambers" ]; } &&
         fi
     fi
     echo ""
-    echo "Using: chambers X=$num_chambers_x Y=$num_chambers_y Z=$num_chambers_z length=$length width=$width height=$height subdivisions_x=$subdivisions_x subdivisions_y=$subdivisions_y subdivisions_z=$subdivisions_z anisotropy_x=$anisotropy_x anisotropy_y=$anisotropy_y anisotropy_z=$anisotropy_z"
+    echo "Using: chambers X=$num_chambers_x Y=$num_chambers_y Z=$num_chambers_z length=$length width=$width height=$height subdivisions_x=$subdivisions_x subdivisions_y=$subdivisions_y subdivisions_z=$subdivisions_z"
     if [ -n "$chamber_inflation_disabled_arg" ]; then
         echo "  inflatable chambers: disabled=${chamber_inflation_disabled_input:-0,2}"
     fi
     echo ""
-    CHAMBERS_ARGS="--num_chambers_x $num_chambers_x --num_chambers_y $num_chambers_y --num_chambers_z $num_chambers_z --length $length --width $width --height $height --subdivisions_x $subdivisions_x --subdivisions_y $subdivisions_y --subdivisions_z $subdivisions_z --anisotropy_x $anisotropy_x --anisotropy_y $anisotropy_y --anisotropy_z $anisotropy_z --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 14400"
+    CHAMBERS_ARGS="--num_chambers_x $num_chambers_x --num_chambers_y $num_chambers_y --num_chambers_z $num_chambers_z --length $length --width $width --height $height --subdivisions_x $subdivisions_x --subdivisions_y $subdivisions_y --subdivisions_z $subdivisions_z --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 14400"
     if [ "$EXAMPLE" == "disabled_chambers" ]; then
         if [ -n "$chamber_stiffness_scale_arg" ]; then
             CHAMBERS_ARGS="$CHAMBERS_ARGS $chamber_stiffness_scale_arg"
@@ -554,11 +535,10 @@ if [ "$EXAMPLE" == "worm" ] && [ -z "$*" ] && [ -t 0 ]; then
     worm_sub_z=${worm_sub_z:-4}
     echo "  → stiff_axes=$stiff_axes, ground_friction=$ground_friction, geometry ${worm_length}x${worm_width}x${worm_height}, sub ${worm_sub_x}x${worm_sub_y}x${worm_sub_z}"
     echo ""
-    TORQUE_WORM_ARGS="--stiff_axes $stiff_axes --torque_stiffness $torque_stiffness --torque_damping $torque_damping --ground_friction $ground_friction --chamber_inflation_disabled $chamber_disabled --length $worm_length --width $worm_width --height $worm_height --subdivisions_x $worm_sub_x --subdivisions_y $worm_sub_y --subdivisions_z $worm_sub_z --num_chambers_x 1 --num_chambers_y 2 --num_chambers_z 2 --initial_height 0.3 --mass 1.0 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --spring_ke 5e4 --spring_kd 1.0 --gravity 9.81 --max_pressure 5.0 --anisotropy_x 1.2 --anisotropy_y 1.4 --anisotropy_z 1.2 --substeps 5 --num_frames 14400"
+    TORQUE_WORM_ARGS="--stiff_axes $stiff_axes --torque_stiffness $torque_stiffness --torque_damping $torque_damping --ground_friction $ground_friction --chamber_inflation_disabled $chamber_disabled --length $worm_length --width $worm_width --height $worm_height --subdivisions_x $worm_sub_x --subdivisions_y $worm_sub_y --subdivisions_z $worm_sub_z --num_chambers_x 1 --num_chambers_y 2 --num_chambers_z 2 --initial_height 0.3 --mass 1.0 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --spring_ke 5e4 --spring_kd 1.0 --gravity 9.81 --max_pressure 5.0 --substeps 5 --num_frames 14400"
 fi
 
-# Inchworm crawling: use_crawlable_stick_slip comes from JSON (--params); no prompt so JSON wins.
-# To override from CLI, pass --normal or --stick-slip after the example name.
+# Inchworm crawling: gait/physics from JSON (--params).
 CRAWL_EXTRA=""
 
 # Inchworm crawling on sand: optional --no-sand (same as inchworm_crawling)
@@ -673,20 +653,20 @@ case "$EXAMPLE" in
             if [ -n "$TORQUE_WORM_ARGS" ]; then
                 DEFAULT_ARGS="$TORQUE_WORM_ARGS"
             else
-                DEFAULT_ARGS="--stiff_axes x --ground_friction 0.8 --length 1 --width 1.5 --height 0.1 --subdivisions_x 10 --subdivisions_y 15 --subdivisions_z 4 --num_chambers_x 1 --num_chambers_y 2 --num_chambers_z 2 --initial_height 0.3 --mass 1.0 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --spring_ke 5e4 --spring_kd 1.0 --gravity 9.81 --max_pressure 5.0 --anisotropy_x 1.2 --anisotropy_y 1.4 --anisotropy_z 1.2 --torque_stiffness 100 --torque_damping 2 --chamber_inflation_disabled 0,2 --substeps 5 --num_frames 14400"
+                DEFAULT_ARGS="--stiff_axes x --ground_friction 0.8 --length 1 --width 1.5 --height 0.1 --subdivisions_x 10 --subdivisions_y 15 --subdivisions_z 4 --num_chambers_x 1 --num_chambers_y 2 --num_chambers_z 2 --initial_height 0.3 --mass 1.0 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --spring_ke 5e4 --spring_kd 1.0 --gravity 9.81 --max_pressure 5.0 --torque_stiffness 100 --torque_damping 2 --chamber_inflation_disabled 0,2 --substeps 5 --num_frames 14400"
             fi
             ;;
         inchworm)
             # Inchworm: start on ground (no --initial_height: default 0 = bottom at z=0), then settle_seconds before gait.
             # --csv_log_dir so CSV lands in newton/inchworm/ when run via Docker.
-            DEFAULT_ARGS="--csv_log_dir /workspace/inchworm --csv_log_interval 10 --ground_friction 1.0 --length 1 --width 1.5 --height 0.1 --subdivisions_x 10 --subdivisions_y 15 --subdivisions_z 4 --num_chambers_x 1 --num_chambers_y 2 --num_chambers_z 2 --mass 1.0 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --spring_ke 5e4 --spring_kd 1.0 --gravity 9.81 --max_pressure 5.0 --anisotropy_x 1.2 --anisotropy_y 1.5 --anisotropy_z 1.4 --torque_stiffness 100 --torque_damping 2 --chamber_inflation_disabled 0,2 --substeps 5 --num_frames 14400"
+            DEFAULT_ARGS="--csv_log_dir /workspace/inchworm --csv_log_interval 10 --ground_friction 1.0 --length 1 --width 1.5 --height 0.1 --subdivisions_x 10 --subdivisions_y 15 --subdivisions_z 4 --num_chambers_x 1 --num_chambers_y 2 --num_chambers_z 2 --mass 1.0 --k_mu 1e5 --k_lambda 1e5 --k_damp 1.0 --spring_ke 5e4 --spring_kd 1.0 --gravity 9.81 --max_pressure 5.0 --torque_stiffness 100 --torque_damping 2 --chamber_inflation_disabled 0,2 --substeps 5 --num_frames 14400"
             ;;
         inchworm_crawling)
-            # Params from JSON (newton/inchworm/inchworm_params.json). CRAWL_EXTRA adds --normal or --stick-slip from menu.
+            # Params from JSON (newton/inchworm/inchworm_params.json).
             DEFAULT_ARGS="--params /workspace/inchworm/inchworm_params.json --csv_log_dir /workspace/inchworm --csv_log_interval 10"
             ;;
         inchworm_crawling_sand)
-            # Same params as inchworm_crawling; CRAWL_EXTRA = --normal/--stick-slip, CRAWL_SAND_EXTRA = optional --no-sand.
+            # Same params as inchworm_crawling; CRAWL_SAND_EXTRA = optional --no-sand.
             DEFAULT_ARGS="--params /workspace/inchworm/inchworm_params.json --csv_log_dir /workspace/inchworm --csv_log_interval 10 ${CRAWL_SAND_EXTRA:-}"
             ;;
         chambers)
@@ -694,7 +674,7 @@ case "$EXAMPLE" in
             if [ -n "$CHAMBERS_ARGS" ]; then
                 DEFAULT_ARGS="$CHAMBERS_ARGS"
             else
-                DEFAULT_ARGS="--length 1 --width 2 --height 0.06 --subdivisions_x 10 --subdivisions_y 30 --subdivisions_z 2 --num_chambers_y 2 --pos 0 0 0.3 --anisotropy_x 1.2 --anisotropy_z 1.2 --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 14400"
+                DEFAULT_ARGS="--length 1 --width 2 --height 0.06 --subdivisions_x 10 --subdivisions_y 30 --subdivisions_z 2 --num_chambers_y 2 --pos 0 0 0.3 --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 14400"
             fi
             ;;
         disabled_chambers)
@@ -702,7 +682,7 @@ case "$EXAMPLE" in
             if [ -n "$CHAMBERS_ARGS" ]; then
                 DEFAULT_ARGS="$CHAMBERS_ARGS"
             else
-                DEFAULT_ARGS="--length 1 --width 2 --height 0.1 --subdivisions_x 10 --subdivisions_y 30 --subdivisions_z 4 --num_chambers_y 2 --num_chambers_z 2 --pos 0 0 0.3 --chamber_inflation_disabled 0,2 --anisotropy_x 1.2 --anisotropy_z 1.2 --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 14400"
+                DEFAULT_ARGS="--length 1 --width 2 --height 0.1 --subdivisions_x 10 --subdivisions_y 30 --subdivisions_z 4 --num_chambers_y 2 --num_chambers_z 2 --pos 0 0 0.3 --chamber_inflation_disabled 0,2 --initial_height 0.3 --k_mu 1e5 --k_lambda 1e5 --max_pressure 5.0 --substeps 5 --num_frames 14400"
             fi
             ;;
         rigid_carpet)

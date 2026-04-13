@@ -52,8 +52,8 @@ Mass \(M\) is lumped (diagonal); \(D\) and \(K\) come from springs, tetrahedra, 
 - **Volume ratio:** \(p = V/V_0 \in [1, p_{\max}]\).
 - **Linear scale:** \(s = p^{1/3}\).
 - **Spring rest lengths:** \(\ell_0^{\mathrm{new}} = \ell_0^{\mathrm{orig}} \cdot s\).
-- **Tet rest pose:** \(\mathbf{D}_m^{-1}\big|_{\mathrm{new}} = \mathbf{D}_m^{-1}\big|_{\mathrm{orig}} / s\) (isotropic). Anisotropic: scale columns by \(1/(s\,a_x)\), \(1/(s\,a_y)\), \(1/(s\,a_z)\).
-- **Per-chamber:** tet/spring in chamber \(c\) uses \(s_c = p_c^{1/3}\) (and anisotropy if set).
+- **Tet rest pose:** \(\mathbf{D}_m^{-1}\big|_{\mathrm{new}} = \mathbf{D}_m^{-1}\big|_{\mathrm{orig}} / s\) (isotropic).
+- **Per-chamber:** tet/spring in chamber \(c\) uses \(s_c = p_c^{1/3}\) (isotropic per region).
 
 ---
 
@@ -68,39 +68,20 @@ Mass \(M\) is lumped (diagonal); \(D\) and \(K\) come from springs, tetrahedra, 
 
 ---
 
-## 7. Paper Stick-Slip (SolverCrawlable)
+## 7. Paper model: geometry and stick-slip (Gamus et al.)
 
-### Geometry (paper_model)
+The paper defines link geometry (\(l\), \(\theta\), contact distance \(d\), \(x_c\)), slippage \(\Delta = x_c - d/2\), normal forces \(f_{n1},f_{n2}\), slip force \(f_t = \mu f_{n,s}\operatorname{sign}(\dot{d})\), and (in the quasistatic paper) kinematic displacement \(\pm\Delta d\) after each step. **Method 1** and rectangular \(f_t(t)\) are discussed in **`method1_prescribed_angles.md`**.
+
+The **inchworm example** couples this geometry to a **dynamic** simulation: **`SolverInflatable`**, **Coulomb friction** for ground contact (**§8**), and **chamber pressures** from **`gait_traveling_wave.py`**. Metrics use grouped vertex positions (`inchworm/paper.py`).
+
+**Geometry (paper):**
 
 - **Link length:** \(l = L/(2+\beta)\).
-- **Central angle:** \(\tan\theta = \dfrac{\sin\phi_1 - \sin\phi_2}{\cos\phi_1 + \cos\phi_2 - \beta}\).
-- **Contact distance:** \(d = l\bigl(\beta\cos\theta - \cos(\phi_1-\theta) - \cos(\phi_2+\theta)\bigr)\).
-- **CoM from left contact:** \(x_c\) (see `compute_xc`).
-- **Slippage criterion:** \(\Delta = x_c - d/2\). \(\Delta > 0 \Rightarrow\) left slips; \(\Delta < 0 \Rightarrow\) right slips.
+- **Central angle:** \(\tan\theta = (\sin\phi_1 - \sin\phi_2)/(\cos\phi_1 + \cos\phi_2 - \beta)\).
+- **Contact distance:** \(d = l(\beta\cos\theta - \cos(\phi_1-\theta) - \cos(\phi_2+\theta))\).
+- **Slippage criterion:** \(\Delta = x_c - d/2\).
 
-### Normal forces
-
-- \(f_{n1} = (1 - x_c/d) M g\), \(f_{n2} = (x_c/d) M g\) (for \(d > 0\)).
-
-### Slip force
-
-- When foot slips: \(|f_t| = \mu f_n\) on that foot; direction = slip direction (sign of \(\dot{d}\) or from state machine). In the kernel, tangential force is distributed over the slipping group and capped per particle by \(\mu f_{n,\mathrm{eff}}\) so the leg does not lift.
-
-### Kinematic displacement
-
-- After implicit step: \(\Delta d = d_{\mathrm{new}} - d_{\mathrm{prev}}\).
-- If left slipped: displace all particles by \(-\Delta d \cdot \mathrm{sign}\) along crawl axis.
-- If right slipped: displace by \(+\Delta d \cdot \mathrm{sign}\).
-- This is the paper’s “update contact positions: slipping contact position changes by Δd”.
-
-### Gait (reference angles)
-
-- \(\phi_1^{\mathrm{ref}} = \gamma + A\sin(\omega t + \psi/2)\), \(\phi_2^{\mathrm{ref}} = \gamma + A\sin(\omega t - \psi/2)\).
-- Actuation torques in the paper: \(\tau_i = k(\phi_i^{\mathrm{ref}} - \pi)\). In the simulation, bending is driven by chamber pressure; the state machine uses current \(\phi_1,\phi_2\) from mesh positions, not the reference angles directly.
-
-### Method 1 without prescribed angles
-
-The paper’s **Method 1: Prescribed Joint Angles Only** assumes prescribed joint angles \(\varphi_i(t)\). In the simulation \(\phi_1,\phi_2\) are **inferred** from the current mesh (mean positions of contact and joint groups → `joint_angles_from_positions`), then the same Method 1 equations are applied: \(\Delta\) for which foot slips, paper Eq. (8) for \(\dot{d}\) when \(\dot{\phi}_i\) are available from the previous step (else \((d - d_{\mathrm{prev}})/\Delta t\)), and \(f_t = \mu f_{n,s}\,\mathrm{sign}(\dot{d})\). A **hysteresis band** \(|\dot{d}| < d\_{\mathrm{dot\_eps}}\) (e.g. \(10^{-5}\)) keeps the previous slip direction so \(f_t(t)\) stays flat and Fig. 6 is rect-shaped. See **method1_prescribed_angles.md** for the full explanation and **05_solver_crawlable.md** (§ “Method 1 (Prescribed Joint Angles)”) for solver details.
+**Gait (reference angles in paper):** \(\phi_i^{\mathrm{ref}} = \gamma + A\sin(\omega t \pm \psi/2)\). In Newton, bending is driven by **chamber pressures**, not explicit joint torques.
 
 ---
 
@@ -108,8 +89,7 @@ The paper’s **Method 1: Prescribed Joint Angles Only** assumes prescribed join
 
 - **Plane:** \(\mathbf{n}\cdot\mathbf{x} + d = 0\); penetration \(c = \mathbf{n}\cdot\mathbf{x} + d - r \le 0\) (r = particle radius).
 - **Normal:** \(f_n = k_e c + k_d \min(\dot{c},0)\); \(\mathbf{F}_n = -f_n \mathbf{n}\).
-- **Coulomb (sticking group or default):** \(|\mathbf{F}_t| \le \mu f_{n,\mathrm{eff}}\); tangent opposes slip direction.
-- **Crawl kernel:** slip group gets \(f_t\) in slip direction (paper); stick group gets Coulomb with optional zero component along crawl axis.
+- **Coulomb:** \(|\mathbf{F}_t| \le \mu f_{n,\mathrm{eff}}\); tangent opposes slip velocity. Effective normal for the friction cap can be limited using particle mass and \(\|g\|\) so stiff penalties do not produce unphysical tangential forces (`SolverSoft` / `eval_particle_ground_contacts`).
 
 ---
 
@@ -125,11 +105,8 @@ The paper’s **Method 1: Prescribed Joint Angles Only** assumes prescribed join
 | Tet rest pose | \(\mathbf{D}_m^{-1}\), `tet_poses` |
 | Pressure (volume ratio) | \(p\), `current_pressure`, `chamber_pressures` |
 | Chamber index | \(c\), `tet_chamber_mask`, `spring_chamber_mask` |
-| Joint angles | \(\phi_1,\phi_2\), `joint_angles_from_positions` |
-| Contact distance | \(d\), `compute_d`, `_crawl_d_prev` |
-| Slippage criterion | \(\Delta\), `compute_delta_direct` |
-| Slip tangential force | \(f_t\), `ft_magnitude` |
-| Kinematic displacement | \(\Delta d\), `apply_crawl_kinematic_displacement` |
+| Joint angles (metrics) | \(\phi_1,\phi_2\) from grouped vertex positions in `inchworm/paper.py` |
+| Contact distance (paper) | \(d\) — paper notation (`02_paper_model.md`) |
 | Torque stiffness / damping | \(k_\tau\), \(k_d\), `torque_stiffness`, `torque_damping` |
 
 This summary is intended to be a single reference for the mathematics behind the implementation and its correspondence to the paper.

@@ -42,8 +42,7 @@ from .kernels_bend import eval_springs_linear_and_torque
 from .kernels_inflatable import (
     scale_spring_rest_lengths_kernel,
     scale_tet_poses_kernel,
-    scale_tet_poses_anisotropic_kernel,
-    scale_tet_poses_per_chamber_anisotropic_kernel,
+    scale_tet_poses_per_chamber_kernel,
     scale_spring_rest_lengths_per_chamber_kernel,
     compute_volume_kernel,
 )
@@ -61,8 +60,7 @@ class SolverInflatable(SolverDeformable):
     
     Modes
     -----
-    - **Single pressure**: Call ``set_pressure(p)`` or ``set_pressure_anisotropic(p, ax, ay, az)``.
-      Same pressure and optional anisotropy for the whole body.
+    - **Single pressure**: Call ``set_pressure(p)`` for the whole body.
     - **Multi-chamber**: Call ``set_chamber_mask(tet_mask, spring_mask, num_chambers)`` once,
       then ``set_chamber_pressures([p0, p1, ...])`` to set per-chamber pressures. Use for
       bending actuators (e.g. two chambers side-by-side with different pressures).
@@ -146,10 +144,6 @@ class SolverInflatable(SolverDeformable):
         self.max_volume_ratio = max_volume_ratio
         self.current_pressure = 1.0  # Current pressure (rest config ratio)
         self.target_pressure = 1.0   # Target pressure for PID control
-        # Anisotropic expansion: scale per axis (1.0 = isotropic)
-        self.anisotropy_x = 1.0
-        self.anisotropy_y = 1.0
-        self.anisotropy_z = 1.0
         # Per-chamber: optional masks and pressures (chambers are spatially separate regions)
         self.tet_chamber_mask = None  # wp.array(dtype=int), length tet_count
         self.spring_chamber_mask = None  # wp.array(dtype=int), length spring_count
@@ -371,19 +365,16 @@ class SolverInflatable(SolverDeformable):
                     outputs=[model.spring_rest_length],
                     device=model.device,
                 )
-        # Update tet rest poses: per-chamber pressure + global anisotropy
+        # Update tet rest poses: per-chamber pressure (isotropic)
         if model.tet_count > 0 and self.original_tet_poses is not None:
             wp.launch(
-                kernel=scale_tet_poses_per_chamber_anisotropic_kernel,
+                kernel=scale_tet_poses_per_chamber_kernel,
                 dim=model.tet_count,
                 inputs=[
                     self.original_tet_poses,
                     self.tet_chamber_mask,
                     self._chamber_pressures_array,
                     self.num_chambers,
-                    self.anisotropy_x,
-                    self.anisotropy_y,
-                    self.anisotropy_z,
                 ],
                 outputs=[model.tet_poses],
                 device=model.device,
@@ -393,10 +384,6 @@ class SolverInflatable(SolverDeformable):
         """
         Set the inflation pressure (volume ratio target) for single-pressure mode.
         When tet_chamber_mask is set, use set_chamber_pressures([p0, p1, ...]) instead.
-        
-        Uses current anisotropy (set via set_pressure_anisotropic). If anisotropy
-        is (1,1,1), isotropic scaling is applied; otherwise tet poses are scaled
-        anisotropically and springs remain isotropic.
         
         Parameters
         ----------
@@ -434,65 +421,18 @@ class SolverInflatable(SolverDeformable):
                 device=model.device,
             )
         
-        # Scale tetrahedra rest poses (Dm_inv) - isotropic or anisotropic
+        # Scale tetrahedra rest poses (Dm_inv) - isotropic
         if model.tet_count > 0 and self.original_tet_poses is not None:
-            if (
-                abs(self.anisotropy_x - 1.0) < 1e-6
-                and abs(self.anisotropy_y - 1.0) < 1e-6
-                and abs(self.anisotropy_z - 1.0) < 1e-6
-            ):
-                wp.launch(
-                    kernel=scale_tet_poses_kernel,
-                    dim=model.tet_count,
-                    inputs=[
-                        self.original_tet_poses,
-                        linear_scale,
-                    ],
-                    outputs=[model.tet_poses],
-                    device=model.device,
-                )
-            else:
-                inv_scale_x = 1.0 / (linear_scale * self.anisotropy_x)
-                inv_scale_y = 1.0 / (linear_scale * self.anisotropy_y)
-                inv_scale_z = 1.0 / (linear_scale * self.anisotropy_z)
-                wp.launch(
-                    kernel=scale_tet_poses_anisotropic_kernel,
-                    dim=model.tet_count,
-                    inputs=[
-                        self.original_tet_poses,
-                        inv_scale_x,
-                        inv_scale_y,
-                        inv_scale_z,
-                    ],
-                    outputs=[model.tet_poses],
-                    device=model.device,
-                )
-    
-    def set_pressure_anisotropic(
-        self,
-        pressure: float,
-        anisotropy_x: float = 1.0,
-        anisotropy_y: float = 1.0,
-        anisotropy_z: float = 1.0,
-    ):
-        """
-        Set inflation pressure with anisotropic expansion.
-        
-        Rest pose scaling: effective scale per axis is cbrt(pressure) * anisotropy_*.
-        E.g. anisotropy_z > 1 elongates more along Z (vertical).
-        Springs are scaled isotropically by cbrt(pressure).
-        
-        Parameters
-        ----------
-        pressure : float
-            Target volume ratio (clamped to [1.0, max_volume_ratio])
-        anisotropy_x, anisotropy_y, anisotropy_z : float
-            Relative expansion per axis (1.0 = isotropic). E.g. (1, 1, 1.5) = more Z.
-        """
-        self.anisotropy_x = float(anisotropy_x)
-        self.anisotropy_y = float(anisotropy_y)
-        self.anisotropy_z = float(anisotropy_z)
-        self.set_pressure(pressure)
+            wp.launch(
+                kernel=scale_tet_poses_kernel,
+                dim=model.tet_count,
+                inputs=[
+                    self.original_tet_poses,
+                    linear_scale,
+                ],
+                outputs=[model.tet_poses],
+                device=model.device,
+            )
     
     def set_target_pressure(self, target: float):
         """
@@ -544,12 +484,20 @@ class SolverInflatable(SolverDeformable):
         """
         initial = self.get_initial_volume(state)
         current = self.compute_volume(state)
+        if not np.isfinite(current):
+            current_ratio = float("nan")
+        elif initial > 1.0e-12 and np.isfinite(initial):
+            current_ratio = float(current / initial)
+            if not np.isfinite(current_ratio):
+                current_ratio = float("nan")
+        else:
+            current_ratio = 1.0
         
         return {
             'initial_volume': initial,
             'current_volume': current,
             'max_volume': initial * self.max_volume_ratio,
-            'current_ratio': current / initial if initial > 0 else 1.0,
+            'current_ratio': current_ratio,
             'target_ratio': self.target_pressure,
             'max_ratio': self.max_volume_ratio,
             'pressure': self.current_pressure,
