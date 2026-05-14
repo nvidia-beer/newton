@@ -1,0 +1,80 @@
+{
+    "description": "SO-101 IK + chambered soft gripper as a KINEMATICS-ONLY proxy for rigid capsule colliders on the wrist cylinder. The FEM lives at world origin with hub particles anchored (inv_mass=0), runs with zero gravity and no contacts. Each substep its deformed finger keypoints are transformed by the cylinder-tip pose and used to drive kinematic capsule bodies in the MuJoCo scene — capsules collide with rigid_objects; the FEM never applies forces.",
+    "args": {
+        "viewer": "gl",
+        "num-frames": 14400,
+        "robot-asset": "/workspace/newton/newton/examples/inflatable/assets/so101/SO-ARM101-10x-stem.usd",
+        "asset": "/workspace/newton/newton/examples/inflatable/assets/gripper/gripper_4f.usda",
+        "substeps": 2,
+        "gravity": 9.81,
+        "mass": 1.5,
+        "k_mu": 30000.0,
+        "k_lambda": 30000.0,
+        "k_damp": 1.0,
+        "max-pressure": 5,
+        "torque-stiffness": 100.0,
+        "torque-damping": 1.0,
+        "spring-ke": 50000.0,
+        "spring-kd": 1.0,
+        "pressure-rate": 0.01,
+        "contact-iterations": 48,
+        "ground-ke": 6000000.0,
+        "ground-friction": 0.85,
+        "chamber-stiffness-scale": 2.0,
+        "structural-stiffness-scale": 40.0,
+        "junction-stiffness-scale": 100.0,
+        "margin-stiffness-scale": 1.0,
+        "capsule-friction-mu": 1.0,
+        "body-position": "[-3.0, 0.0, 1.0]",
+        "debug-mirror": true,
+        "debug-mirror-position": "[-3.0, 1.5, 1.0]",
+        "arm": true,
+        "soft": true,
+        "show-torque-springs": true,
+        "stability-check": true,
+        "debug-interval": 60,
+        "headless": false,
+        "joints": [
+            {"name": "Rotation",    "default":  0.0, "lower": -1.5, "upper": 1.5, "stiffness": 5.5e5, "damping": 7.0e3, "effort_limit": 3.0e5},
+            {"name": "Pitch",       "default": -1.5, "lower": -1.5, "upper": 1.5, "stiffness": 3.0e5, "damping": 8.0e3, "effort_limit": 3.0e5},
+            {"name": "Elbow",       "default":  1.5, "lower": -1.5, "upper": 1.5, "stiffness": 2.5e5, "damping": 7.0e3, "effort_limit": 3.0e5},
+            {"name": "Wrist_Pitch", "default": -1.5, "lower": -1.5, "upper": 1.5, "stiffness": 1.2e5, "damping": 5.0e3, "effort_limit": 3.0e5},
+            {"name": "Wrist_Roll",  "default":  0.0, "lower": -1.5, "upper": 1.5, "stiffness": 7.0e4, "damping": 5.0e3, "effort_limit": 3.0e5}
+        ],
+        "rigid-objects": [
+            {
+                "type": "sphere",
+                "radius": 0.45,
+                "position": [3.0, 3.0, 0.6],
+                "active": true,
+                "density": 500.0,
+                "friction": 1.0,
+                "color": [0.20, 0.40, 0.85]
+            },
+            {
+                "type": "box",
+                "active": true,
+                "half-extents": [0.3, 0.3, 0.3],
+                "position": [2.0, 2.0, 0.4],
+                "density": 500.0,
+                "friction": 1.0,
+                "color": [0.20, 0.40, 0.85]
+            },
+            {
+                "type": "sphere",
+                "active": true,
+                "radius": 0.3,
+                "position": [2.0, 0.0, 0.4],
+                "density": 500.0,
+                "friction": 1.0,
+                "color": [0.20, 0.40, 0.85]
+            }
+        ],
+        "mujoco-iterations": 100,
+        "mujoco-ls-iterations": 50,
+        "mujoco-solver": "newton",
+        "mujoco-integrator": "implicitfast",
+        "mujoco-cone": "elliptic",
+        "mujoco-impratio": 10
+    }
+}

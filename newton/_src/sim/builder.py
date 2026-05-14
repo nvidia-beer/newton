@@ -8466,6 +8466,22 @@ class ModelBuilder:
             p_custom = {k: arr[vi] for k, arr in particle_custom.items()} if particle_custom else None
             self.add_particle(p, vel, 0.0, particle_radius, custom_attributes=p_custom)
 
+        # Pre-pass: which tets have positive rest volume? Matches the test
+        # :meth:`add_tetrahedron` uses; springs must only reference edges
+        # from simulated (positive-volume) tets.
+        tet_valid = [False] * num_tets
+        for t in range(num_tets):
+            v0 = start_vertex + indices[t * 4 + 0]
+            v1 = start_vertex + indices[t * 4 + 1]
+            v2 = start_vertex + indices[t * 4 + 2]
+            v3 = start_vertex + indices[t * 4 + 3]
+            p0 = np.asarray(self.particle_q[v0])
+            p1 = np.asarray(self.particle_q[v1])
+            p2 = np.asarray(self.particle_q[v2])
+            p3 = np.asarray(self.particle_q[v3])
+            Dm = np.array((p1 - p0, p2 - p0, p3 - p0)).T
+            tet_valid[t] = float(np.linalg.det(Dm) / 6.0) > 0.0
+
         # add tetrahedra
         for t in range(num_tets):
             v0 = start_vertex + indices[t * 4 + 0]
@@ -8529,6 +8545,33 @@ class ModelBuilder:
                     # Add edges with specified stiffness/damping (for collision)
                     for o1, o2, v1, v2 in edge_indices:
                         self.add_edge(o1, o2, v1, v2, None, edge_ke, edge_kd)
+
+        # One spring per unique tet edge among valid (positive-volume)
+        # tets. ``spring_ke = k_mu * 0.5`` and ``spring_kd = k_damp * 0.5``
+        # match the reference ``SolverSoft`` stack's assumed system
+        # matrix contributions.
+        spring_ke_val = float(k_mu) * 0.5
+        spring_kd_val = float(k_damp) * 0.5
+        added: set[tuple[int, int]] = set()
+        for t in range(num_tets):
+            if not tet_valid[t]:
+                continue
+            base = t * 4
+            a = indices[base + 0]
+            b = indices[base + 1]
+            c = indices[base + 2]
+            d = indices[base + 3]
+            for i_local, j_local in ((a, b), (a, c), (a, d), (b, c), (b, d), (c, d)):
+                key = (min(i_local, j_local), max(i_local, j_local))
+                if key not in added:
+                    added.add(key)
+                    self.add_spring(
+                        start_vertex + key[0],
+                        start_vertex + key[1],
+                        spring_ke_val,
+                        spring_kd_val,
+                        0.0,
+                    )
 
     # incrementally updates rigid body mass with additional mass and inertia expressed at a local to the body
     def _update_body_mass(self, i: int, m: float, inertia: Mat33, p: Vec3, q: Quat):

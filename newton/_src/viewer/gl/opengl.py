@@ -229,7 +229,7 @@ class MeshGL:
         gl.glBindVertexArray(0)
 
         # Per-mesh albedo and material (applied in render()).
-        self.color = (0.7, 0.5, 0.3)
+        self.color = (0.7, 0.7, 0.7)
         self.material = (0.5, 0.0, 0.0, 0.0)
 
         # Create CUDA-GL interop buffer for efficient updates

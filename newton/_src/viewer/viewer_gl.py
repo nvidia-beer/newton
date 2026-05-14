@@ -988,6 +988,11 @@ class ViewerGL(ViewerBase):
             max_lines = max(num_lines, self.lines[name].max_lines * 2)
             self.lines[name] = LinesGL(max_lines, self.device, hidden=hidden)
 
+        # Reapply the hidden flag every frame so GUI toggles (e.g. the
+        # torque-spring / finger-spline overlay checkboxes) take effect on
+        # existing batches; the constructor is only hit on the first call
+        # for a given name.
+        self.lines[name].hidden = hidden
         self.lines[name].update(starts, ends, colors)
         self.lines[name].hidden = hidden
 
