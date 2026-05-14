@@ -3,7 +3,7 @@
     "args": {
         "viewer": "gl",
         "num-frames": 1800,
-        "shape": "box",
+        "shape": "baymax",
         "pressure-mode": false,
         "gravity": 9.81,
         "max-pressure": 5.0,

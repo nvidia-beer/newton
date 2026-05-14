@@ -894,10 +894,10 @@ class Example:
         # NOT overridden — they get the viewer's per-shape palette
         # slot (same per-id colouring as the inertia boxes), so each
         # finger segment is visually distinct.
-        if self._pending_rigid_object_colors:
-            self.viewer.update_shape_colors(
-                {int(sid): wp.vec3(*col) for sid, col in self._pending_rigid_object_colors.items()}
-            )
+        if self._pending_rigid_object_colors and self.model.shape_color is not None:
+            for sid, col in self._pending_rigid_object_colors.items():
+                sid_int = int(sid)
+                self.model.shape_color[sid_int : sid_int + 1].fill_(wp.vec3(*col))
 
         # Locate the wrist body for the per-substep cylinder-tip transform.
         # Arm-only; in mirror mode there's no wrist body.
