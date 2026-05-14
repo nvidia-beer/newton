@@ -67,26 +67,19 @@ same scaling restricted to masked tets / springs.
 Dirichlet pin (kinematic-glue hook)
 ===================================
 
-When :meth:`set_dirichlet_pin` is configured (driven by
-:class:`GlueAttachments`), each substep applies the pin in two
-phases (Sifakis SIGGRAPH 2012 §3 / Baraff–Witkin SIGGRAPH '98 §5):
+When :meth:`set_dirichlet_pin` is configured, each substep enforces
+``Δv[p] = target_dv[p]`` exactly via two phases (Sifakis SIGGRAPH 2012
+§3 / Baraff–Witkin SIGGRAPH '98 §5):
 
 1. :meth:`_apply_dirichlet_override` captures the constraint reaction
-   ``reaction[p] := f_total[p]/h − m·g − m·target_dv[p]/h`` (elastic +
-   contact forces, minus gravity, minus the inertial reaction needed to
-   accelerate the soft particle onto the kinematic target) and overwrites
-   the RHS at pinned rows: ``particle_f[p] := target_dv[p]``.
+   ``reaction[p] := f_total[p]/h − m·g − m·target_dv[p]/h`` and overwrites
+   ``particle_f[p] := target_dv[p]``. The inertial term is required for
+   momentum conservation when the reaction is forwarded to the rigid body
+   via ``state.body_f``.
 
 2. :meth:`_apply_dirichlet_filter` row/column-eliminates the pinned DOFs
-   in the assembled BSR matrix: ``A[p, p] := I``, ``A[p, c≠p] := 0``,
-   ``A[r≠p, p] := 0``, and Schur-condenses the prescribed motion into
-   the unpinned RHS via ``particle_f[r] -= A[r, p] · target_dv[p]``.
-
-The combined effect is ``Δv[p] = target_dv[p]`` exactly — a hard pin —
-with no leakage of rigid-body translation into the elastic neighbours
-through stiffness off-diagonals. The reaction is forwarded by the glue
-to the rigid body via ``state.body_f``; including the inertial term is
-required for momentum conservation at the interface.
+   in the BSR matrix and Schur-condenses the prescribed motion into the
+   unpinned RHS, closing the leak path through stiffness off-diagonals.
 
 File layout
 ===========
