@@ -7,7 +7,7 @@ import sys
 import warp as wp
 
 wp.config.enable_backward = False
-wp.config.quiet = True
+wp.config.log_level = wp.LOG_WARNING
 
 from asv_runner.benchmarks.mark import SkipNotImplemented, skip_benchmark_if
 
@@ -17,13 +17,6 @@ sys.path.append(parent_dir)
 from benchmark_mujoco import Example
 
 from newton.utils import EventTracer
-
-
-@wp.kernel
-def apply_random_control(state: wp.uint32, joint_target: wp.array[float]):
-    tid = wp.tid()
-
-    joint_target[tid] = wp.randf(state) * 2.0 - 1.0
 
 
 class _FastBenchmark:
@@ -62,14 +55,9 @@ class _FastBenchmark:
         if not cuda_graph_comp:
             raise SkipNotImplemented
         else:
-            state = wp.rand_init(self.example.seed)
+            self.example.init_waypoint_control()
             with wp.ScopedCapture() as capture:
-                wp.launch(
-                    apply_random_control,
-                    dim=(self.example.model.joint_dof_count,),
-                    inputs=[state],
-                    outputs=[self.example.control.joint_target_pos],
-                )
+                self.example.apply_waypoint_control()
                 self.example.simulate()
             self.graph = capture.graph
 

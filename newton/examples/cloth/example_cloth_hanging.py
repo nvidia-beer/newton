@@ -100,7 +100,7 @@ class Example:
             solver_params = {
                 "tri_ke": 1.0e3,
                 "tri_ka": 1.0e3,
-                "tri_kd": 1.0e-1,
+                "tri_kd": 1.0e2,
             }
 
         if self.solver_type == "style3d":
@@ -113,7 +113,7 @@ class Example:
 
         self.model = builder.finalize()
         self.model.soft_contact_ke = 1.0e2
-        self.model.soft_contact_kd = 1.0e0
+        self.model.soft_contact_kd = 1.0e2 if self.solver_type in ("style3d", "vbd") else 1.0e0
         self.model.soft_contact_mu = 1.0
 
         if self.solver_type == "semi_implicit":
@@ -148,12 +148,13 @@ class Example:
         self.capture()
 
     def capture(self):
-        if wp.get_device().is_cuda:
-            with wp.ScopedCapture() as capture:
-                self.simulate()
-            self.graph = capture.graph
-        else:
+        # SolverStyle3D makes host calls (PCG dot products, BVH refit) that CPU graph capture cannot record
+        if self.solver_type == "style3d" and wp.get_device().is_cpu:
             self.graph = None
+            return
+        with wp.ScopedCapture() as capture:
+            self.simulate()
+        self.graph = capture.graph
 
     def simulate(self):
         for _ in range(self.sim_substeps):

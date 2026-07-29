@@ -165,7 +165,7 @@ fi
 
 # A config may delegate to a different example module via the optional
 # top-level "example" field — lets multiple configs share one Python
-# example (e.g. baymax_demo.json → inflatable_demo with --shape baymax).
+# example (e.g. baymax_demo.json → inflatable with --shape baymax).
 INVOKE_EXAMPLE=$(python3 -c "import json; d=json.load(open('$CONFIG_DIR/$EXAMPLE.json')); print(d.get('example') or '$EXAMPLE')")
 
 echo "Running: $EXAMPLE (module: $INVOKE_EXAMPLE)"

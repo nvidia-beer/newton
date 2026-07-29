@@ -23,6 +23,7 @@ import newton.examples
 
 class Example:
     def __init__(self, viewer, args):
+        newton.use_coord_layout_targets = True
         # setup simulation parameters first
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
@@ -70,7 +71,7 @@ class Example:
 
         # set initial joint positions
         quadruped.joint_q[-12:] = [0.2, 0.4, -0.6, -0.2, -0.4, 0.6, -0.2, 0.4, -0.6, 0.2, -0.4, 0.6]
-        quadruped.joint_target_pos[-12:] = quadruped.joint_q[-12:]
+        quadruped.joint_target_q[-12:] = quadruped.joint_q[-12:]
 
         # use "scene" for the entire set of worlds
         scene = newton.ModelBuilder()
@@ -107,12 +108,9 @@ class Example:
         self.capture()
 
     def capture(self):
-        if wp.get_device().is_cuda:
-            with wp.ScopedCapture() as capture:
-                self.simulate()
-            self.graph = capture.graph
-        else:
-            self.graph = None
+        with wp.ScopedCapture() as capture:
+            self.simulate()
+        self.graph = capture.graph
 
     def simulate(self):
         for substep in range(self.sim_substeps):

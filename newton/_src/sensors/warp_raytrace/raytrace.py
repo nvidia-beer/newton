@@ -147,6 +147,8 @@ def create_closest_hit_function(config: RenderContext.Config, state: RenderConte
                     hit_color = wp.vec3f(0.0)
 
                     shape_type = shape_types[si]
+                    # Heightfields are triangulated meshes; RenderContext remaps
+                    # HFIELD -> MESH, so this branch renders them too.
                     if shape_type == GeoType.MESH:
                         hit_distance, hit_normal, hit_u, hit_v, hit_face_id = _ray_intersect_mesh_smooth(
                             shape_transforms[si],
@@ -274,6 +276,7 @@ def create_closest_hit_function(config: RenderContext.Config, state: RenderConte
         world_index: wp.int32,
         particles_position: wp.array[wp.vec3f],
         particles_radius: wp.array[wp.float32],
+        topology_particle_mask: wp.array[wp.bool],
         ray_origin_world: wp.vec3f,
         ray_dir_world: wp.vec3f,
     ) -> ClosestHit:
@@ -287,6 +290,9 @@ def create_closest_hit_function(config: RenderContext.Config, state: RenderConte
                 si = wp.int32(0)
 
                 while wp.bvh_query_next(query, si, closest_hit.distance):
+                    if topology_particle_mask[si]:
+                        continue
+
                     hit_distance, hit_normal = raycast.ray_intersect_particle_sphere(
                         ray_origin_world,
                         ray_dir_world,
@@ -345,6 +351,7 @@ def create_closest_hit_function(config: RenderContext.Config, state: RenderConte
         mesh_data: wp.array[MeshData],
         particles_position: wp.array[wp.vec3f],
         particles_radius: wp.array[wp.float32],
+        topology_particle_mask: wp.array[wp.bool],
         triangle_mesh_id: wp.uint64,
         gaussians_data: wp.array[Gaussian.Data],
         ray_origin_world: wp.vec3f,
@@ -377,7 +384,7 @@ def create_closest_hit_function(config: RenderContext.Config, state: RenderConte
             camera_forward,
         )
 
-        if wp.static(config.enable_particles):
+        if wp.static(config.enable_particles) and wp.static(state.has_particles):
             closest_hit = closest_hit_particles(
                 closest_hit,
                 bvh_particles_size,
@@ -386,6 +393,7 @@ def create_closest_hit_function(config: RenderContext.Config, state: RenderConte
                 world_index,
                 particles_position,
                 particles_radius,
+                topology_particle_mask,
                 ray_origin_world,
                 ray_dir_world,
             )
@@ -435,6 +443,8 @@ def create_closest_hit_depth_only_function(config: RenderContext.Config, state: 
                     hit_dist = -1.0
 
                     shape_type = shape_types[si]
+                    # Heightfields are triangulated meshes; RenderContext remaps
+                    # HFIELD -> MESH, so this branch renders them too.
                     if shape_type == GeoType.MESH:
                         hit_dist, _normal, _u, _v, _face = raycast.ray_intersect_mesh(
                             shape_transforms[si],
@@ -528,6 +538,7 @@ def create_closest_hit_depth_only_function(config: RenderContext.Config, state: 
         world_index: wp.int32,
         particles_position: wp.array[wp.vec3f],
         particles_radius: wp.array[wp.float32],
+        topology_particle_mask: wp.array[wp.bool],
         ray_origin_world: wp.vec3f,
         ray_dir_world: wp.vec3f,
     ) -> ClosestHit:
@@ -541,6 +552,9 @@ def create_closest_hit_depth_only_function(config: RenderContext.Config, state: 
                 si = wp.int32(0)
 
                 while wp.bvh_query_next(query, si, closest_hit.distance):
+                    if topology_particle_mask[si]:
+                        continue
+
                     hit_dist, _normal = raycast.ray_intersect_particle_sphere(
                         ray_origin_world,
                         ray_dir_world,
@@ -594,6 +608,7 @@ def create_closest_hit_depth_only_function(config: RenderContext.Config, state: 
         mesh_data: wp.array[MeshData],
         particles_position: wp.array[wp.vec3f],
         particles_radius: wp.array[wp.float32],
+        topology_particle_mask: wp.array[wp.bool],
         triangle_mesh_id: wp.uint64,
         gaussians_data: wp.array[Gaussian.Data],
         ray_origin_world: wp.vec3f,
@@ -627,7 +642,7 @@ def create_closest_hit_depth_only_function(config: RenderContext.Config, state: 
             camera_forward,
         )
 
-        if wp.static(config.enable_particles):
+        if wp.static(config.enable_particles) and wp.static(state.has_particles):
             closest_hit = closest_hit_particles_depth_only(
                 closest_hit,
                 bvh_particles_size,
@@ -636,6 +651,7 @@ def create_closest_hit_depth_only_function(config: RenderContext.Config, state: 
                 world_index,
                 particles_position,
                 particles_radius,
+                topology_particle_mask,
                 ray_origin_world,
                 ray_dir_world,
             )
@@ -676,6 +692,8 @@ def create_first_hit_function(config: RenderContext.Config, state: RenderContext
                     hit_dist = wp.float32(-1)
 
                     shape_type = shape_types[si]
+                    # Heightfields are triangulated meshes; RenderContext remaps
+                    # HFIELD -> MESH, so this branch renders them too.
                     if shape_type == GeoType.MESH:
                         hit_dist, _normal, _u, _v, _face = raycast.ray_intersect_mesh(
                             shape_transforms[si],
@@ -743,6 +761,7 @@ def create_first_hit_function(config: RenderContext.Config, state: RenderContext
         world_index: wp.int32,
         particles_position: wp.array[wp.vec3f],
         particles_radius: wp.array[wp.float32],
+        topology_particle_mask: wp.array[wp.bool],
         ray_origin_world: wp.vec3f,
         ray_dir_world: wp.vec3f,
         max_dist: wp.float32,
@@ -757,6 +776,9 @@ def create_first_hit_function(config: RenderContext.Config, state: RenderContext
                 si = wp.int32(0)
 
                 while wp.bvh_query_next(query, si, max_dist):
+                    if topology_particle_mask[si]:
+                        continue
+
                     hit_dist, _normal = raycast.ray_intersect_particle_sphere(
                         ray_origin_world,
                         ray_dir_world,
@@ -799,6 +821,7 @@ def create_first_hit_function(config: RenderContext.Config, state: RenderContext
         shape_source_ptr: wp.array[wp.uint64],
         particles_position: wp.array[wp.vec3f],
         particles_radius: wp.array[wp.float32],
+        topology_particle_mask: wp.array[wp.bool],
         triangle_mesh_id: wp.uint64,
         ray_origin_world: wp.vec3f,
         ray_dir_world: wp.vec3f,
@@ -823,7 +846,7 @@ def create_first_hit_function(config: RenderContext.Config, state: RenderContext
         ):
             return True
 
-        if wp.static(config.enable_particles):
+        if wp.static(config.enable_particles) and wp.static(state.has_particles):
             if first_hit_particles(
                 bvh_particles_size,
                 bvh_particles_id,
@@ -831,6 +854,7 @@ def create_first_hit_function(config: RenderContext.Config, state: RenderContext
                 world_index,
                 particles_position,
                 particles_radius,
+                topology_particle_mask,
                 ray_origin_world,
                 ray_dir_world,
                 max_distance,

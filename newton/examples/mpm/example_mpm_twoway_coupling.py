@@ -128,7 +128,7 @@ class Example:
         mpm_options.max_iterations = 50
         mpm_options.critical_fraction = 0.0
 
-        self.mpm_solver = SolverImplicitMPM(self.sand_model, mpm_options)
+        self.mpm_solver = SolverImplicitMPM(self.sand_model, config=mpm_options)
         # read colliders from the RB model rather than the sand model
         self.mpm_solver.setup_collider(model=self.model)
 
@@ -150,7 +150,7 @@ class Example:
 
         # viewer
         self.viewer.set_model(self.model)
-        if isinstance(self.viewer, newton.viewer.ViewerGL):
+        if hasattr(self.viewer, "register_ui_callback"):
             self.viewer.register_ui_callback(self.render_ui, position="side")
         self.viewer.show_particles = True
         self.show_impulses = False
@@ -178,12 +178,9 @@ class Example:
         self.capture()
 
     def capture(self):
-        if wp.get_device().is_cuda:
-            with wp.ScopedCapture() as capture:
-                self.simulate()
-            self.graph = capture.graph
-        else:
-            self.graph = None
+        with wp.ScopedCapture() as capture:
+            self.simulate()
+        self.graph = capture.graph
 
     def simulate(self):
         for _ in range(self.sim_substeps):
