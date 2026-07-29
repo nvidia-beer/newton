@@ -611,8 +611,3 @@ class Glue:
 # ---------------------------------------------------------------------------
 # MuJoCo kernel re-exports
 #
-# Placed after the Glue class definition so that when _glue_mujoco imports
-# Glue from this module (circular but safe at this point), the class is
-# already bound in the partial module object.
-# ---------------------------------------------------------------------------
-from ._glue_mujoco import GlueMuJoCo, _zero_xfrc_kernel  # noqa: E402, F401
