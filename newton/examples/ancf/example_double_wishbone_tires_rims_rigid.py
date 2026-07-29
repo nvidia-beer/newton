@@ -578,6 +578,7 @@ class Example:
             iterations=50,
             ls_iterations=10,
             njmax=500,
+            nconmax=128,
             update_data_interval=0,
         )
         self.solver.mjw_model.opt.graph_conditional = False
@@ -947,14 +948,14 @@ class Example:
 
     def _update_controls(self) -> None:
         """Write steering and throttle to control arrays (outside CUDA graph)."""
-        jtp = self.control.joint_target_pos.numpy().copy()
+        jtp = self.control.joint_target_q.numpy().copy()
         jtp[self._steer_qd_dof] = self.steer_angle
-        self.control.joint_target_pos.assign(jtp)
+        self.control.joint_target_q.assign(jtp)
 
-        jtv = self.control.joint_target_vel.numpy().copy()
+        jtv = self.control.joint_target_qd.numpy().copy()
         for e in range(_N_TIRES):
             jtv[int(self._axle_qd_dofs[e])] = self.wheel_speed
-        self.control.joint_target_vel.assign(jtv)
+        self.control.joint_target_qd.assign(jtv)
 
     def step(self) -> None:
         # CTIS pressure ramp (2000 Pa/frame toward GUI target)

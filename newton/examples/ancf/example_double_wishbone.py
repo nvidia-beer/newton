@@ -138,6 +138,7 @@ class Example:
             iterations=50,
             ls_iterations=10,
             njmax=500,
+            nconmax=128,
             use_mujoco_contacts=use_mujoco_contacts,
         )
 
@@ -179,7 +180,7 @@ class Example:
             _drive_feda,
             dim=len(self.throttle_dofs),
             inputs=[self.steer_dof, self.cmd, self.throttle_dofs],
-            outputs=[self.control.joint_target_pos, self.control.joint_target_vel],
+            outputs=[self.control.joint_target_q, self.control.joint_target_qd],
         )
 
         if not self.use_mujoco_contacts:
