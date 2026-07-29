@@ -42,8 +42,8 @@ import warp as wp
 import newton
 import newton.examples
 import newton.solvers
-from newton._src.solvers.inflatable.glue import GlueMuJoCo
 from newton._src.solvers.inflatable.glue import Glue
+from newton._src.solvers.inflatable._glue_mujoco import GlueMuJoCo
 from newton._src.solvers.inflatable.se3_tracker import (
     SE3Tracker,
     quat_compose,
