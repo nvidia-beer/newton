@@ -1,0 +1,29 @@
+{
+    "description": "ANCF FEM tire + MPM granular sand. Free FEM shell (or hub-pinned with rim) falls under gravity onto sand. Crown nodes act as MPM sphere colliders; impulses fed back as velocity kicks.",
+    "args": {
+        "viewer": "gl",
+        "num-frames": 600,
+        "headless": false,
+        "n-circ": 20,
+        "substeps": 20,
+        "pressure": 110000.0,
+        "drop-gap": 0.2,
+        "kn": 2000.0,
+        "kd": 13.0,
+        "mu-ancf": 0.9,
+        "rho": null,
+        "E": null,
+        "nu": null,
+        "nr-iters": 3,
+        "pcg-iters": 50,
+        "gauge-rate": 2000.0,
+        "max-gauge-pressure": 30000.0,
+        "no-sand-collision": null,
+        "rim": true,
+        "rpm-rate": 10.0,
+        "rpm": 0.0,
+        "max-rpm": 60.0,
+        "max-accel": 4.0,
+        "global-damp": 20.0
+    }
+}

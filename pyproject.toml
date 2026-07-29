@@ -36,8 +36,8 @@ dependencies = [
 # Core simulation dependencies
 sim = [
     # MuJoCo simulation
-    "mujoco-warp>=3.8.0.3,~=3.8.0",  # MuJoCo, warp-accelerated (3.8.0 was broken)
-    "mujoco~=3.8.0",        # MuJoCo physics engine
+    "mujoco-warp>=3.8.0.3",  # MuJoCo, warp-accelerated (3.8.0 was broken; upper bound removed — py.mujoco.org nightlies are 3.10.x)
+    "mujoco>=3.8.0",         # MuJoCo physics engine (upper bound removed — py.mujoco.org nightlies are 3.10.x)
     "newton-actuators>=0.1.0",  # deprecated — kept for backward compat, will be removed
 ]
 
@@ -151,7 +151,9 @@ name = "nvidia"
 url = "https://pypi.nvidia.com/"
 explicit = true
 
+
 [tool.uv]
+environments = ["sys_platform == 'linux'"]
 conflicts = [
     [
         { extra = "torch-cu12" },
@@ -161,6 +163,7 @@ conflicts = [
 
 [tool.uv.sources]
 warp-lang = { index = "nvidia" }
+mujoco-warp = { path = "third_party/mujoco_warp", editable = true }
 torch = [
     { index = "pytorch-cu128", extra = "torch-cu12" },
     { index = "pytorch-cu130", extra = "torch-cu13" },
@@ -206,6 +209,9 @@ ignore = [
     "E741",   # Warp often uses l as a variable name
     "UP018",  # Warp kernels often use float(val) and int(val)
     "RUF046", # Warp kernels often use int(val)
+    "RUF001", # Physics docstrings use Unicode math chars (×, γ, −, –)
+    "RUF002", # Physics docstrings use Unicode math chars (×, γ, −, –)
+    "RUF003", # Physics comments use Unicode math chars (×, γ, −, –)
     "F811",   # Allow Warp kernel/function overloads
     "TC001",  # Allow quotations in type annotations, e.g. Literal["a"]
     "TC002",
@@ -215,6 +221,9 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "asv/benchmarks/**/*" = ["RUF012", "E402"]
+# wp.set_module_options() must precede kernel imports — E402 is expected here
+"newton/_src/solvers/ancf_shell/solver_ancf_shell.py" = ["E402"]
+"newton/_src/solvers/ancf_shell/solver_ancf_shell_rigid.py" = ["E402"]
 "newton/examples/**/*" = ["E402", "TID253"]
 # TID253 (banned module-level imports) only applies to newton/_src and newton/tests
 "docs/**/*" = ["TID253"]
@@ -313,6 +322,14 @@ IIT = "IIT"
 iit = "iit"
 PN = "PN"
 pnd = "pnd"
+# ANCF director vector and derivatives (nd = d, ndd = d', nddd = d'')
+nd = "nd"
+ndd = "ndd"
+nddd = "nddd"
+# ANCF abbreviation used as local variable prefix
+anc = "anc"
+# Citation: Causin et al. 2005 (added-mass instability paper)
+Causin = "Causin"
 
 [tool.typos.default.extend-identifiers]
 PNGs = "PNGs"

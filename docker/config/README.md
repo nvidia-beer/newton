@@ -17,6 +17,7 @@ All fields optional. Unknown fields are ignored.
 ```json
 {
     "description": "Short one-liner shown in the menu.",
+    "example":     "inflatable_demo",
     "args": {
         "viewer":     "gl",
         "num-frames": 100,
@@ -24,6 +25,12 @@ All fields optional. Unknown fields are ignored.
     }
 }
 ```
+
+The optional `"example"` field overrides which Python example module is
+invoked. When omitted, the JSON filename (without `.json`) is used. Set
+it when one Python example should appear in the menu under multiple
+configs (e.g. `baymax_demo.json` → `inflatable_demo` with
+`"shape": "baymax"`).
 
 ### Key → CLI mapping
 

@@ -1,0 +1,71 @@
+{
+    "description": "ANCF3423 shell tire(s) dropped onto rigid ground. Each tire entry is independent — position, geometry, and material are fully per-tire. Global solver params (substeps, PCG, contact) apply to all tires.",
+    "args": {
+        "viewer": "gl",
+        "num-frames": 300,
+        "headless": false,
+        "substeps": 15,
+        "nr-iters": 2,
+        "pcg-iters": 25,
+        "kn": 2000.0,
+        "kd": 2.0,
+        "shell-tires": [
+            {
+                "_material": "Polaris reference — orthotropic 3-section, production stiffness",
+                "name": "polaris_ref",
+                "active": true,
+                "position": [0.0, 0.0, 0.0],
+                "n-circ": 20,
+                "pressure": 110000.0,
+                "thickness": 0.012,
+                  "E": 4.0e6,
+                "nu": null,
+                "rho": null,
+                "max-gauge-pressure": 30000.0,
+                "gauge-rate": 2000.0
+            },
+            {
+                "_material": "Soft tire — 50% stiffness, lower pressure, lighter compound",
+                "name": "soft",
+                "active": true,
+                "position": [1.0, 0.0, 0.0],
+                "n-circ": 20,
+                "pressure": 80000.0,
+                "thickness": 0.010,
+                 "E": 3.0e6,
+                "nu": 0.35,
+                "rho": 900.0,
+                "max-gauge-pressure": 15000.0,
+                "gauge-rate": 1000.0
+            },
+            {
+                "_material": "Stiff race tire — 2x stiffer, high pressure, dense compound",
+                "name": "race",
+                "active": true,
+                "position": [2.0, 0.0, 0.0],
+                "n-circ": 20,
+                "pressure": 200000.0,
+                "thickness": 0.015,
+                "E": 2.0e6,
+                "nu": 0.28,
+                "rho": 1300.0,
+                "max-gauge-pressure": 50000.0,
+                "gauge-rate": 3000.0
+            },
+            {
+                "_material": "Ultra-soft balloon — very low stiffness, thin wall",
+                "name": "balloon",
+                "active": true,
+                "position": [3.0, 0.0, 0.0],
+                "n-circ": 20,
+                "pressure": 30000.0,
+                "thickness": 0.006,
+                "E": 1.0e6,
+                "nu": 0.45,
+                "rho": 700.0,
+                "max-gauge-pressure": 8000.0,
+                "gauge-rate": 500.0
+            }
+        ]
+    }
+}

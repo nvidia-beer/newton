@@ -3262,6 +3262,14 @@ class SolverMuJoCo(SolverBase):
         self._mujoco_warp.step(self.mjw_model, self.mjw_data)
 
     @event_scope
+    def _mujoco_warp_kinematics(self):
+        self._mujoco_warp.step1(self.mjw_model, self.mjw_data)
+
+    @event_scope
+    def _mujoco_warp_dynamics(self):
+        self._mujoco_warp.step2(self.mjw_model, self.mjw_data)
+
+    @event_scope
     @override
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float) -> None:
         if self.use_mujoco_cpu:
@@ -3287,6 +3295,82 @@ class SolverMuJoCo(SolverBase):
 
             self._update_newton_state(self.model, state_out, self.mjw_data, state_prev=state_in)
         self._step += 1
+
+    def step_kinematics(
+        self, state_in: State, state_out: State, control: Control, contacts: Contacts | None, dt: float
+    ) -> None:
+        """Kinematics phase: forward position, velocity, passive forces, and collision detection.
+
+        After this returns, ``mjw_data.cvel`` and all kinematic arrays (``xpos``,
+        ``xquat``, ``cdof``, ``cinert``, …) are valid and readable via :attr:`cvel`.
+        Write coupling forces to :attr:`xfrc_applied` before calling
+        :meth:`step_dynamics`. Only supported for the mujoco_warp GPU path.
+        """
+        if self.use_mujoco_cpu:
+            raise NotImplementedError("step_kinematics/step_dynamics requires the mujoco_warp GPU path.")
+        self._enable_rne_postconstraint(state_out)
+        self._apply_mjc_control(self.model, state_in, control, self.mjw_data)
+        if self.update_data_interval > 0 and self._step % self.update_data_interval == 0:
+            self._update_mjc_data(self.mjw_data, self.model, state_in)
+        self.mjw_model.opt.timestep.fill_(dt)
+        with wp.ScopedDevice(self.model.device):
+            if not self.mjw_model.opt.run_collision_detection and contacts is not None:
+                self._convert_contacts_to_mjwarp(self.model, state_in, contacts)
+            self._mujoco_warp_kinematics()
+        self._kinematics_state_in = state_in
+
+    def step_dynamics(self, state_out: State) -> None:
+        """Dynamics phase: actuation, forward acceleration, constraint solve, and integration.
+
+        Forces written to :attr:`xfrc_applied` between :meth:`step_kinematics` and
+        this call are incorporated into MuJoCo's constraint solve before integration.
+        Must be called after :meth:`step_kinematics`.
+        """
+        if self.use_mujoco_cpu:
+            raise NotImplementedError("step_kinematics/step_dynamics requires the mujoco_warp GPU path.")
+        with wp.ScopedDevice(self.model.device):
+            self._mujoco_warp_dynamics()
+        self._update_newton_state(
+            self.model,
+            state_out,
+            self.mjw_data,
+            state_prev=getattr(self, "_kinematics_state_in", None),
+        )
+        self._step += 1
+
+    @property
+    def xfrc_applied(self) -> wp.array:
+        """Writable Warp array ``[nworld, nbody]`` of ``wp.spatial_vector`` (world-frame wrenches).
+
+        Write coupling forces here between :meth:`step_kinematics` and
+        :meth:`step_dynamics`. Not auto-zeroed — caller must zero before accumulating.
+        """
+        return self.mjw_data.xfrc_applied
+
+    @property
+    def cvel(self) -> wp.array:
+        """Read-only Warp array ``[nworld, nbody]`` of com-based spatial velocities.
+
+        Valid after :meth:`step_kinematics` completes (populated by ``fwd_velocity``).
+        Layout per body: ``[ang_x, ang_y, ang_z, lin_x, lin_y, lin_z]``.
+        """
+        return self.mjw_data.cvel
+
+    @property
+    def xpos(self) -> wp.array:
+        """Read-only Warp array ``[nworld, nbody]`` of body-frame origin positions [m].
+
+        Valid after :meth:`step_kinematics` completes (populated by ``fwd_position``).
+        """
+        return self.mjw_data.xpos
+
+    @property
+    def xquat(self) -> wp.array:
+        """Read-only Warp array ``[nworld, nbody]`` of body-frame orientations (``wp.quat``).
+
+        Valid after :meth:`step_kinematics` completes (populated by ``fwd_position``).
+        """
+        return self.mjw_data.xquat
 
     def _enable_rne_postconstraint(self, state_out: State):
         """Request computation of RNE forces if required for state fields."""
@@ -5766,8 +5850,7 @@ class SolverMuJoCo(SolverBase):
                         mjc_tendon_to_newton_tendon_np[w, mjc_tendon] = w * tendons_per_world + template_tendon
                 self.mjc_tendon_to_newton_tendon = wp.array(mjc_tendon_to_newton_tendon_np, dtype=wp.int32)
 
-            # set mjwarp-only settings
-            self.mjw_model.opt.ls_parallel = ls_parallel
+            # ls_parallel was removed in mujoco-warp 3.9.1; no-op for backward compat
 
             if separate_worlds:
                 nworld = model.world_count

@@ -1015,6 +1015,14 @@ class ModelBuilder:
         self.tet_materials: list[tuple[float, float, float]] = []
         """Tetrahedral material rows accumulated for :attr:`Model.tet_materials`."""
 
+        # hexahedra
+        self.hex_indices: list[tuple[int, int, int, int, int, int, int, int]] = []
+        """Hexahedral connectivity accumulated for :attr:`Model.hex_indices`."""
+        self.hex_activations: list[float] = []
+        """Hexahedral activations accumulated for :attr:`Model.hex_activations`."""
+        self.hex_materials: list[tuple[float, float, float]] = []
+        """Hexahedral material rows accumulated for :attr:`Model.hex_materials`."""
+
         # muscles
         self.muscle_start: list[int] = []
         """Muscle waypoint start indices accumulated for :attr:`Model.muscle_start`."""
@@ -2082,6 +2090,13 @@ class ModelBuilder:
         The number of tetrahedra in the model.
         """
         return len(self.tet_poses)
+
+    @property
+    def hex_count(self):
+        """
+        The number of hexahedra in the model.
+        """
+        return len(self.hex_indices)
 
     @property
     def edge_count(self):
@@ -7586,6 +7601,143 @@ class ModelBuilder:
 
         return volume
 
+    # ------------------------------------------------------------------
+    # Hexahedral Gauss-point precomputation (Q1, 2x2x2 rule)
+    # ------------------------------------------------------------------
+
+    _HEX_GP: float = 0.5773502691896258  # 1/√3
+
+    _HEX_NODE_SIGNS: np.ndarray = np.array(
+        [
+            [-1, -1, -1],
+            [1, -1, -1],
+            [1, 1, -1],
+            [-1, 1, -1],
+            [-1, -1, 1],
+            [1, -1, 1],
+            [1, 1, 1],
+            [-1, 1, 1],
+        ],
+        dtype=np.float64,
+    )
+
+    @staticmethod
+    def _compute_hex_gauss_data(
+        rest_q: np.ndarray,
+        hex_indices: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Precompute inverse reference Jacobians and weighted determinants for Q1 hexahedra.
+
+        Args:
+            rest_q: Particle rest positions, shape ``(P, 3)``, float64.
+            hex_indices: Element node indices, shape ``(H, 8)``, int32.
+
+        Returns:
+            inv_J0:   float32 array, shape ``(H, 8, 3, 3)`` — one 3x3 inverse Jacobian per Gauss point.
+            det_J0_w: float32 array, shape ``(H, 8)``       — ``|det J0| x w_g`` (weight = 1).
+
+        Raises:
+            ValueError: if any Gauss-point Jacobian is singular.
+        """
+        H = hex_indices.shape[0]
+        gp = ModelBuilder._HEX_GP
+        ns = ModelBuilder._HEX_NODE_SIGNS
+
+        inv_J0 = np.zeros((H, 8, 3, 3), dtype=np.float64)
+        det_J0_w = np.zeros((H, 8), dtype=np.float64)
+
+        for e in range(H):
+            x_rest = rest_q[hex_indices[e]]  # (8, 3)
+            for g in range(8):
+                xi_g, eta_g, zeta_g = ns[g] * gp
+                J0 = np.zeros((3, 3), dtype=np.float64)
+                for a in range(8):
+                    xa, ya, za = ns[a]
+                    dN = np.array(
+                        [
+                            xa * (1.0 + ya * eta_g) * (1.0 + za * zeta_g) * 0.125,
+                            (1.0 + xa * xi_g) * ya * (1.0 + za * zeta_g) * 0.125,
+                            (1.0 + xa * xi_g) * (1.0 + ya * eta_g) * za * 0.125,
+                        ]
+                    )
+                    J0 += np.outer(x_rest[a], dN)
+                det = np.linalg.det(J0)
+                if abs(det) < 1.0e-12:
+                    raise ValueError(f"Degenerate hex element {e}: Gauss-point {g} Jacobian det = {det:.3e}.")
+                inv_J0[e, g] = np.linalg.inv(J0)
+                det_J0_w[e, g] = abs(det)
+
+        return inv_J0.astype(np.float32), det_J0_w.astype(np.float32)
+
+    def add_hexahedron(
+        self,
+        i: int,
+        j: int,
+        k: int,
+        l: int,
+        m: int,
+        n: int,
+        o: int,
+        p: int,
+        k_mu: float = 1.0e3,
+        k_lambda: float = 1.0e3,
+        k_damp: float = 0.0,
+    ) -> None:
+        """Add a single Q1 hexahedral element.
+
+        Nodes must be ordered in the standard VTK Q1 convention: bottom face
+        counter-clockwise (i, j, k, l) followed by the corresponding top face
+        (m, n, o, p).  Gauss-point data is computed in :meth:`finalize`.
+
+        Args:
+            i: First node index (bottom face).
+            j: Second node index.
+            k: Third node index.
+            l: Fourth node index.
+            m: Fifth node index (top face, above i).
+            n: Sixth node index.
+            o: Seventh node index.
+            p: Eighth node index.
+            k_mu: Shear modulus [Pa].
+            k_lambda: First Lamé parameter [Pa].
+            k_damp: Rayleigh damping coefficient [Pa·s].
+        """
+        self.hex_indices.append((i, j, k, l, m, n, o, p))
+        self.hex_activations.append(0.0)
+        self.hex_materials.append((float(k_mu), float(k_lambda), float(k_damp)))
+
+    def add_soft_hex_mesh(
+        self,
+        hex_indices: np.ndarray,
+        k_mu: float | np.ndarray = 1.0e3,
+        k_lambda: float | np.ndarray = 1.0e3,
+        k_damp: float | np.ndarray = 0.0,
+    ) -> None:
+        """Add a batch of Q1 hexahedral elements with global particle indices.
+
+        Particles must already be registered with the builder before calling
+        this method.  Gauss-point data is computed in :meth:`finalize` from
+        the current particle rest positions.
+
+        Args:
+            hex_indices: Element connectivity, shape ``(H, 8)``, int — global
+                particle indices in VTK Q1 order.
+            k_mu: Shear modulus [Pa]. Scalar or per-element array of shape ``(H,)``.
+            k_lambda: First Lamé parameter [Pa]. Scalar or per-element array.
+            k_damp: Rayleigh damping [Pa·s]. Scalar or per-element array.
+        """
+        hex_indices = np.asarray(hex_indices, dtype=np.int32)
+        if hex_indices.ndim != 2 or hex_indices.shape[1] != 8:
+            raise ValueError(f"hex_indices must have shape (H, 8), got {hex_indices.shape}")
+        H = hex_indices.shape[0]
+        k_mu_arr = np.broadcast_to(np.asarray(k_mu, dtype=np.float32), (H,))
+        k_lam_arr = np.broadcast_to(np.asarray(k_lambda, dtype=np.float32), (H,))
+        k_damp_arr = np.broadcast_to(np.asarray(k_damp, dtype=np.float32), (H,))
+        for e in range(H):
+            self.hex_indices.append(tuple(int(x) for x in hex_indices[e]))
+            self.hex_activations.append(0.0)
+            self.hex_materials.append((float(k_mu_arr[e]), float(k_lam_arr[e]), float(k_damp_arr[e])))
+
     def add_edge(
         self,
         i: int,
@@ -10438,6 +10590,22 @@ class ModelBuilder:
             m.tet_activations = _to_wp_array(self.tet_activations, wp.float32, requires_grad=requires_grad)
             m.tet_materials = _to_wp_array(self.tet_materials, wp.float32, requires_grad=requires_grad)
 
+            # ---------------------
+            # hexahedra
+
+            H = len(self.hex_indices)
+            if H > 0:
+                rest_q_np = np.array(self.particle_q, dtype=np.float64)
+                hex_idx_np = np.array(self.hex_indices, dtype=np.int32)  # (H, 8)
+                inv_j0_np, det_j0w_np = ModelBuilder._compute_hex_gauss_data(rest_q_np, hex_idx_np)
+                m.hex_indices = wp.array(hex_idx_np.reshape(-1), dtype=wp.int32, device=m.device)
+                m.hex_inv_J0 = wp.array(inv_j0_np.reshape(-1, 3, 3), dtype=wp.mat33f, device=m.device)
+                m.hex_det_J0_w = wp.array(det_j0w_np.reshape(-1), dtype=wp.float32, device=m.device)
+                m.hex_activations = wp.array(self.hex_activations, dtype=wp.float32, device=m.device)
+                m.hex_materials = wp.array(
+                    np.array(self.hex_materials, dtype=np.float32), dtype=wp.float32, device=m.device
+                )
+
             # -----------------------
             # muscles
 
@@ -10683,6 +10851,7 @@ class ModelBuilder:
             m.shape_count = len(self.shape_type)
             m.tri_count = len(self.tri_poses)
             m.tet_count = len(self.tet_poses)
+            m.hex_count = len(self.hex_indices)
             m.edge_count = len(self.edge_rest_angle)
             m.spring_count = len(self.spring_rest_length)
             m.muscle_count = len(self.muscle_start)

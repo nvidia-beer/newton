@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+from .ancf_shell import SolverANCFShell
 from .featherstone import SolverFeatherstone
 from .flags import SolverNotifyFlags
 from .implicit_mpm import SolverImplicitMPM
-from .inflatable import SolverInflatable
+from .inflatable import SolverImplicitSoft, SolverInflatable
 from .kamino import SolverKamino
 from .mujoco import SolverMuJoCo
 from .semi_implicit import SolverSemiImplicit
@@ -14,9 +15,11 @@ from .vbd import SolverVBD
 from .xpbd import SolverXPBD
 
 __all__ = [
+    "SolverANCFShell",
     "SolverBase",
     "SolverFeatherstone",
     "SolverImplicitMPM",
+    "SolverImplicitSoft",
     "SolverInflatable",
     "SolverKamino",
     "SolverMuJoCo",

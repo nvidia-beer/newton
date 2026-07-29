@@ -1,0 +1,41 @@
+{
+    "description": "ANCF shell tire(s) dropped onto MPM granular sand. Identical tire params to ancf_shell_drop. Only MPM sand is added.",
+    "args": {
+        "viewer": "gl",
+        "num-frames": 300,
+        "headless": false,
+        "substeps": 15,
+        "nr-iters": 2,
+        "pcg-iters": 25,
+        "kn": 2000.0,
+        "kd": 2.0,
+        "mpm-sand": {
+            "height": 0.15,
+            "half-x": 0.60,
+            "half-z": 0.60,
+            "voxel-size": 0.04,
+            "density": 1500.0,
+            "friction": 0.50,
+            "yield-pressure": 5000.0,
+            "viscosity": 50.0,
+            "air-drag": 0.5
+        },
+        "shell-tires": [
+            {
+                "_material": "Polaris reference — same as ancf_shell_drop",
+                "name": "polaris_ref",
+                "active": true,
+                "position": [0.0, 0.0, 0.0],
+                "n-circ": 20,
+                "pressure": 110000.0,
+                "thickness": 0.012,
+                "E": null,
+                "nu": null,
+                "rho": null,
+                "max-gauge-pressure": 30000.0,
+                "gauge-rate": 2000.0
+            }
+        ]
+    },
+    "example": "ancf_mpm"
+}

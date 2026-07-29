@@ -18,6 +18,7 @@ Design notes:
 - JSON schema (all fields optional):
     {
         "description": "Short one-liner for the menu.",
+        "example":     "module_name",   # defaults to the config filename stem
         "args":        { "kebab-case-key": <json value>, ... }
     }
 - Value encoding for argparse (Newton examples use argparse with
@@ -80,7 +81,9 @@ def value_to_cli(key: str, value: object) -> list[str]:
         #   default Python ``str(dict)`` isn't JSON), so we JSON-encode
         #   the whole list into a single ``--key '<json>'`` argument.
         #   The example then parses the string with ``json.loads``.
-        if any(isinstance(v, (dict, list, tuple)) for v in value):
+        # * **Empty list** — JSON-encode so the example receives "[]"
+        #   rather than a bare flag with no argument.
+        if not value or any(isinstance(v, (dict, list, tuple)) for v in value):
             return [f"--{key}", json.dumps(list(value))]
         return [f"--{key}", *(str(v) for v in value)]
     return [f"--{key}", str(value)]

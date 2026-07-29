@@ -404,6 +404,7 @@ from ._src.solvers import (
     SolverBase,
     SolverFeatherstone,
     SolverImplicitMPM,
+    SolverImplicitSoft,
     SolverInflatable,
     SolverKamino,
     SolverMuJoCo,
@@ -413,14 +414,17 @@ from ._src.solvers import (
     SolverXPBD,
     style3d,
 )
+from ._src.solvers.coupling import InterfaceCouplerGS
 
 # solver flags
 from ._src.solvers.flags import SolverNotifyFlags
 
 __all__ = [
+    "InterfaceCouplerGS",
     "SolverBase",
     "SolverFeatherstone",
     "SolverImplicitMPM",
+    "SolverImplicitSoft",
     "SolverInflatable",
     "SolverKamino",
     "SolverMuJoCo",

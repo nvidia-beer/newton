@@ -710,6 +710,7 @@ def parse_mjcf(
                         float(rgba_values[1]),
                         float(rgba_values[2]),
                     )
+                    shape_kwargs["color"] = wp.vec3(*material_color)
 
             texture = None
             texture_name = material_info.get("texture")

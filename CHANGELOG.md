@@ -5,6 +5,7 @@
 ### Added
 
 - Add opt-in `validate_mesh` parameter to `ModelBuilder.add_cloth_mesh()`, `ModelBuilder.add_soft_mesh()`, and `style3d.add_cloth_mesh()` that warns on degenerate geometry; add public `newton.utils.validate_triangle_mesh()` and `newton.utils.validate_tet_mesh()` utilities
+- Add `min_stretch`/`max_stretch` parameters to `SolverInflatable` (on by default, `[0.05, 20.0]`) that clamp each tetrahedron's deformation-gradient singular values (invertible-FEM, Irving et al. 2004) before evaluating the Neo-Hookean stress and tangent, preventing inverted or over-stretched tets from blowing up the simulation; set either negative to disable
 - Add `ViewerGL.show_loading_splash()` / `ViewerGL.hide_loading_splash()` displaying a stylized Newton's-cradle overlay while the GL viewer waits on Warp kernel compilation; raised automatically by `newton.examples.init()` for visible GL viewers
 
 ### Fixed

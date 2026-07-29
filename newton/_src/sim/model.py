@@ -393,6 +393,20 @@ class Model:
         Components: [0] k_mu [Pa], [1] k_lambda [Pa], [2] k_damp [Pa·s].
         Stored per-element; kernels multiply by rest volume internally."""
 
+        self.hex_indices: wp.array[wp.int32] | None = None
+        """Hexahedral element indices, shape [hex_count*8], int."""
+        self.hex_inv_J0: wp.array[wp.mat33f] | None = None
+        """Inverse reference Jacobians at Gauss points, shape [hex_count*8], mat33f.
+        One 3x3 matrix per Gauss point (8 points per element)."""
+        self.hex_det_J0_w: wp.array[wp.float32] | None = None
+        """Weighted reference Jacobian determinants at Gauss points, shape [hex_count*8], float.
+        Equal to |det J0| x w_g (Gauss weight = 1 for 2x2x2 rule)."""
+        self.hex_activations: wp.array[wp.float32] | None = None
+        """Hexahedral volumetric activations, shape [hex_count], float."""
+        self.hex_materials: wp.array2d[wp.float32] | None = None
+        """Hexahedral elastic parameters, shape [hex_count, 3].
+        Components: [0] k_mu [Pa], [1] k_lambda [Pa], [2] k_damp [Pa·s]."""
+
         self.muscle_start: wp.array[wp.int32] | None = None
         """Start index of the first muscle point per muscle, shape [muscle_count], int."""
         self.muscle_params: wp.array2d[wp.float32] | None = None
@@ -700,6 +714,8 @@ class Model:
         """Total number of triangles in the system."""
         self.tet_count: int = 0
         """Total number of tetrahedra in the system."""
+        self.hex_count: int = 0
+        """Total number of hexahedra in the system."""
         self.edge_count: int = 0
         """Total number of edges in the system."""
         self.spring_count: int = 0

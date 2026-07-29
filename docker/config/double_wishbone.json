@@ -1,0 +1,11 @@
+{
+    "description": "FEDA (FED Alpha) tactical vehicle with full double-wishbone suspension, Pitman-arm steering, and TSDA air-spring approximations. Ported from Project Chrono FEDA_Full. All-primitive geometry, rigid cylinder wheels.",
+    "args": {
+        "viewer": "gl",
+        "num-frames": 600,
+        "headless": false,
+        "wheel-speed": 10.0,
+        "steer-angle": 0.0,
+        "use-mujoco-contacts": true
+    }
+}

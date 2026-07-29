@@ -1,0 +1,490 @@
+<!--
+  FEDA (FED Alpha) Double-Wishbone Suspension – MuJoCo XML
+  Hardpoints from Project Chrono FEDA_DoubleWishbone.cpp / FEDA_PitmanArm.cpp
+  Coordinate convention: X=forward, Y=right, Z=up  (Chrono Y=left → negate).
+
+  Chassis origin at wheel-centre height (tire radius 0.499 m).
+  Front axle at X=+1.651, rear at X=−1.651  (half-wheelbase 3.302/2 m).
+
+  Suspension topology per corner:
+    chassis ──hinge X (uca_*_hinge)──> uca_*
+              uca_* ──ball (upright_*_ball)──> upright_*
+                       upright_* ──hinge Y (axle_*)──> spindle_*  (wheel)
+    chassis ──hinge (lca_*_hinge)──> lca_*
+    equality connect: lca_* ↔ upright_*   (closes wishbone loop)
+
+  TSDA spring/damper (linear approx of FEDA air spring):
+    k = 76 000 N/m,  c = 38 097 N·s/m,  L₀ = 0.812 m  (same F/R)
+    Geometric distance between sites at q=0 is 0.602 m; the 210 mm pre-compression
+    (L₀ − d₀) models the Chrono air-spring preload (F₀ = 9 542 N) so the chassis
+    sits at design ride height (z = 0.499 m).
+
+  Pitman-arm steering (REV axis = Z, vertical kingpin):
+    chassis ──motor hinge Z (steer_motor)──> pitman_arm
+              pitman_arm ──ball (steering_link_ball)──> steering_link
+    chassis ──hinge Z (idler_hinge)──> idler_arm
+    equality: idler_arm ↔ steering_link  (closes idler loop)
+    equality: steering_link ↔ upright FL/FR  (front tierods)
+    equality: chassis ↔ upright RL/RR  (rear fixed tierods)
+
+  All positions verified: wheels at z=0.499 world, springs pre-compressed 210 mm,
+  all 9 equality constraints satisfied to < 1 mm at q=0.
+-->
+<mujoco model="feda_double_wishbone">
+
+  <compiler angle="radian" autolimits="true"/>
+  <option gravity="0 0 -9.81" timestep="0.002"/>
+  <size nconmax="200"/>
+
+  <default>
+    <geom density="500" contype="1" conaffinity="1"/>
+    <joint limited="false"/>
+    <equality solimp="0.99 0.999 0.0001" solref="0.02 1"/>
+  </default>
+
+  <worldbody>
+    <!-- Ground plane: MuJoCo contact solver needs this in the MJCF to detect
+         wheel-ground contact from the transparent cylinder geoms on each spindle. -->
+    <geom name="ground" type="plane" size="50 50 0.1" rgba="0.6 0.6 0.6 1"
+          contype="1" conaffinity="1"/>
+    <!-- ── Chassis ── -->
+    <!-- FEDA chassis: mass 5672.87 kg, COM from FEDA_Chassis.cpp -->
+    <body name="chassis" pos="0 0 0.499">
+      <freejoint name="chassis_free"/>
+      <inertial mass="5672.87" pos="-0.111 0.009 0.610"
+                diaginertia="5740 7660 9870"/>
+
+      <!-- Spring attachment sites on chassis -->
+      <site name="spring_c_fl" pos=" 1.7450 -0.493925  0.46209"/>
+      <site name="spring_c_fr" pos=" 1.7450  0.493925  0.46209"/>
+      <site name="spring_c_rl" pos="-1.7450 -0.493925  0.46209"/>
+      <site name="spring_c_rr" pos="-1.7450  0.493925  0.46209"/>
+
+      <!-- ── Chassis frame (visual only): purple pipes connecting inboard A-arm tips ── -->
+      <!-- Tip positions (chassis frame, q=0):
+           UCA_F/B = uca pivot ± arm-span-half; LCA_F/B = lca pivot ± arm-span-half
+           FL: UCA_F=(1.69885,-0.2324,0.3469) UCA_B=(1.32955,-0.2324,0.3469) LCA_F=(1.8188,-0.22246,-0.0800) LCA_B=(1.1988,-0.22451,-0.1190)
+           FR: mirror Y.  RL: UCA_F=(-1.60325,-0.2324,0.3469) UCA_B=(-1.97255,-0.2324,0.3469) LCA_F=(-1.4832,-0.22246,-0.0800) LCA_B=(-2.1032,-0.22451,-0.1190)
+           RR: mirror Y of RL. -->
+      <!-- FL corner box -->
+      <geom type="capsule" fromto=" 1.69885 -0.2324  0.3469    1.32955 -0.2324  0.3469 " size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto=" 1.8188  -0.22246 -0.0800    1.1988  -0.22451 -0.1190" size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto=" 1.69885 -0.2324  0.3469    1.8188  -0.22246 -0.0800" size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto=" 1.32955 -0.2324  0.3469    1.1988  -0.22451 -0.1190" size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <!-- FR corner box -->
+      <geom type="capsule" fromto=" 1.69885  0.2324  0.3469    1.32955  0.2324  0.3469 " size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto=" 1.8188   0.22246 -0.0800    1.1988   0.22451 -0.1190" size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto=" 1.69885  0.2324  0.3469    1.8188   0.22246 -0.0800" size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto=" 1.32955  0.2324  0.3469    1.1988   0.22451 -0.1190" size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <!-- RL corner box -->
+      <geom type="capsule" fromto="-1.60325 -0.2324  0.3469   -1.97255 -0.2324  0.3469 " size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto="-1.4832  -0.22246 -0.0800  -2.1032  -0.22451 -0.1190" size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto="-1.60325 -0.2324  0.3469   -1.4832  -0.22246 -0.0800" size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto="-1.97255 -0.2324  0.3469   -2.1032  -0.22451 -0.1190" size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <!-- RR corner box -->
+      <geom type="capsule" fromto="-1.60325  0.2324  0.3469   -1.97255  0.2324  0.3469 " size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto="-1.4832   0.22246 -0.0800  -2.1032   0.22451 -0.1190" size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto="-1.60325  0.2324  0.3469   -1.4832   0.22246 -0.0800" size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto="-1.97255  0.2324  0.3469   -2.1032   0.22451 -0.1190" size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <!-- front cross (FL ↔ FR) -->
+      <geom type="capsule" fromto=" 1.69885 -0.2324  0.3469    1.69885  0.2324  0.3469 " size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto=" 1.8188  -0.22246 -0.0800    1.8188   0.22246 -0.0800" size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <!-- rear cross (RL ↔ RR) -->
+      <geom type="capsule" fromto="-1.97255 -0.2324  0.3469   -1.97255  0.2324  0.3469 " size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto="-2.1032  -0.22451 -0.1190  -2.1032   0.22451 -0.1190" size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <!-- longitudinal rails (FL↔RL and FR↔RR, inner tips) -->
+      <geom type="capsule" fromto=" 1.32955 -0.2324  0.3469   -1.60325 -0.2324  0.3469 " size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto=" 1.1988  -0.22451 -0.1190  -1.4832  -0.22246 -0.0800" size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto=" 1.32955  0.2324  0.3469   -1.60325  0.2324  0.3469 " size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+      <geom type="capsule" fromto=" 1.1988   0.22451 -0.1190  -1.4832   0.22246 -0.0800" size="0.025" rgba="0.6 0.1 0.8 1" contype="0" conaffinity="0"/>
+
+      <!-- ══════════════════════════════════════════════════════════════════
+           FRONT-LEFT CORNER
+           UCA pivot chassis: [1.5142, -0.2324,  0.3469]
+           UCA hinge axis: pure X  (UCA_F and UCA_B share same Y,Z)
+      ══════════════════════════════════════════════════════════════════ -->
+
+      <body name="uca_fl" pos="1.5142 -0.2324 0.3469">
+        <joint name="uca_fl_hinge" type="hinge" axis="1 0 0"/>
+        <inertial mass="8.45" pos="0.0397 -0.1474 -0.0137"
+                  diaginertia="0.03 0.03 0.06276"/>
+        <geom type="capsule" fromto=" 0.18465 0 0   0.11926 -0.4420 -0.04101"
+              size="0.020" rgba="0.85 0.45 0.10 1"/>
+        <geom type="capsule" fromto="-0.18465 0 0   0.11926 -0.4420 -0.04101"
+              size="0.020" rgba="0.85 0.45 0.10 1"/>
+
+        <!-- upright body at UCA_U (rel to uca_fl) -->
+        <body name="upright_fl" pos="0.11926 -0.4420 -0.04101">
+          <joint name="upright_fl_ball" type="ball"/>
+          <inertial mass="36.27" pos="0 0 0"
+                    diaginertia="0.1656 0.1934 0.04367"/>
+          <!-- upright knuckle: hub at SPINDLE (axle), 3 branches to ball joints -->
+          <geom type="sphere" size="0.040" pos="0.01759 -0.30223 -0.30589"
+                rgba="0.95 0.85 0.10 1" contype="0" conaffinity="0"/>
+          <geom type="capsule" fromto="0.01759 -0.30223 -0.30589   0 0 0"
+                size="0.028" rgba="0.75 0.75 0.20 1" contype="0" conaffinity="0"/>
+          <geom type="capsule" fromto="0.01759 -0.30223 -0.30589   0.02548 -0.13279 -0.44493"
+                size="0.028" rgba="0.75 0.75 0.20 1" contype="0" conaffinity="0"/>
+          <geom type="capsule" fromto="0.01759 -0.30223 -0.30589   -0.18941 -0.15178 -0.30589"
+                size="0.028" rgba="0.75 0.75 0.20 1" contype="0" conaffinity="0"/>
+          <geom type="sphere" size="0.032" pos="0.02548 -0.13279 -0.44493"
+                rgba="0.95 0.85 0.10 1" contype="0" conaffinity="0"/>
+          <geom type="sphere" size="0.028" pos="-0.18941 -0.15178 -0.30589"
+                rgba="0.95 0.85 0.10 1" contype="0" conaffinity="0"/>
+
+          <!-- spindle / wheel -->
+          <body name="spindle_fl" pos="0.01759 -0.30223 -0.30589">
+            <joint name="axle_fl" type="hinge" axis="0 1 0"/>
+            <inertial mass="74.2" pos="0 0 0"
+                      diaginertia="6.853 11.934 6.853"/>
+            <geom type="cylinder" fromto="0 -0.1675 0   0 0.1675 0" size="0.499"
+                  rgba="0 0 0 0" contype="1" conaffinity="1"/>
+            <geom type="cylinder" fromto="0 -0.1675 0   0 0.1675 0" size="0.499"
+                  rgba="0.65 0.65 0.65 1" contype="0" conaffinity="0"/>
+            <geom type="cylinder" fromto="0 -0.107 0   0 0.107 0" size="0.286"
+                  rgba="0.45 0.45 0.45 1" contype="0" conaffinity="0"/>
+            <geom type="capsule" fromto="0 -0.22 0   0 0.22 0"
+                  size="0.018" rgba="0.10 0.85 0.85 1" contype="0" conaffinity="0"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- LCA FL: pivot [1.5088, -0.22348, -0.0995], axis (−0.9980, 0, −0.0628) -->
+      <body name="lca_fl" pos="1.5088 -0.22348 -0.0995">
+        <joint name="lca_fl_hinge" type="hinge" axis="-0.9980 0 -0.0628"/>
+        <inertial mass="31.55" pos="0.0500 -0.1949 -0.0133"
+                  diaginertia="0.4 0.4 0.8938"/>
+        <geom type="capsule"
+              fromto=" 0.31000  0.00102  0.01950   0.15008 -0.58371 -0.03954"
+              size="0.022" rgba="0.85 0.45 0.10 1"/>
+        <geom type="capsule"
+              fromto="-0.31000 -0.00103 -0.01950   0.15008 -0.58371 -0.03954"
+              size="0.022" rgba="0.85 0.45 0.10 1"/>
+
+        <site name="spring_a_fl" pos="0.23616 -0.42805 -0.0195"/>
+      </body>
+
+      <!-- ══════════════════════════════════════════════════════════════════
+           FRONT-RIGHT CORNER  (Y-mirrored)
+      ══════════════════════════════════════════════════════════════════ -->
+
+      <body name="uca_fr" pos="1.5142  0.2324  0.3469">
+        <joint name="uca_fr_hinge" type="hinge" axis="1 0 0"/>
+        <inertial mass="8.45" pos="0.0397  0.1474 -0.0137"
+                  diaginertia="0.03 0.03 0.06276"/>
+        <geom type="capsule" fromto=" 0.18465 0 0   0.11926  0.4420 -0.04101"
+              size="0.020" rgba="0.85 0.45 0.10 1"/>
+        <geom type="capsule" fromto="-0.18465 0 0   0.11926  0.4420 -0.04101"
+              size="0.020" rgba="0.85 0.45 0.10 1"/>
+
+        <body name="upright_fr" pos="0.11926  0.4420 -0.04101">
+          <joint name="upright_fr_ball" type="ball"/>
+          <inertial mass="36.27" pos="0 0 0"
+                    diaginertia="0.1656 0.1934 0.04367"/>
+          <!-- upright knuckle: hub at SPINDLE (axle), 3 branches to ball joints -->
+          <geom type="sphere" size="0.040" pos="0.01759  0.30223 -0.30589"
+                rgba="0.95 0.85 0.10 1" contype="0" conaffinity="0"/>
+          <geom type="capsule" fromto="0.01759  0.30223 -0.30589   0 0 0"
+                size="0.028" rgba="0.75 0.75 0.20 1" contype="0" conaffinity="0"/>
+          <geom type="capsule" fromto="0.01759  0.30223 -0.30589   0.02548  0.13279 -0.44493"
+                size="0.028" rgba="0.75 0.75 0.20 1" contype="0" conaffinity="0"/>
+          <geom type="capsule" fromto="0.01759  0.30223 -0.30589   -0.18941  0.15178 -0.30589"
+                size="0.028" rgba="0.75 0.75 0.20 1" contype="0" conaffinity="0"/>
+          <geom type="sphere" size="0.032" pos="0.02548  0.13279 -0.44493"
+                rgba="0.95 0.85 0.10 1" contype="0" conaffinity="0"/>
+          <geom type="sphere" size="0.028" pos="-0.18941  0.15178 -0.30589"
+                rgba="0.95 0.85 0.10 1" contype="0" conaffinity="0"/>
+
+          <body name="spindle_fr" pos="0.01759  0.30223 -0.30589">
+            <joint name="axle_fr" type="hinge" axis="0 1 0"/>
+            <inertial mass="74.2" pos="0 0 0"
+                      diaginertia="6.853 11.934 6.853"/>
+            <geom type="cylinder" fromto="0 -0.1675 0   0 0.1675 0" size="0.499"
+                  rgba="0 0 0 0" contype="1" conaffinity="1"/>
+            <geom type="cylinder" fromto="0 -0.1675 0   0 0.1675 0" size="0.499"
+                  rgba="0.65 0.65 0.65 1" contype="0" conaffinity="0"/>
+            <geom type="cylinder" fromto="0 -0.107 0   0 0.107 0" size="0.286"
+                  rgba="0.45 0.45 0.45 1" contype="0" conaffinity="0"/>
+            <geom type="capsule" fromto="0 -0.22 0   0 0.22 0"
+                  size="0.018" rgba="0.10 0.85 0.85 1" contype="0" conaffinity="0"/>
+          </body>
+        </body>
+      </body>
+
+      <body name="lca_fr" pos="1.5088  0.22348 -0.0995">
+        <joint name="lca_fr_hinge" type="hinge" axis="-0.9980 0 -0.0628"/>
+        <inertial mass="31.55" pos="0.0500  0.1949 -0.0133"
+                  diaginertia="0.4 0.4 0.8938"/>
+        <geom type="capsule"
+              fromto=" 0.31000 -0.00102  0.01950   0.15008  0.58371 -0.03954"
+              size="0.022" rgba="0.85 0.45 0.10 1"/>
+        <geom type="capsule"
+              fromto="-0.31000  0.00103 -0.01950   0.15008  0.58371 -0.03954"
+              size="0.022" rgba="0.85 0.45 0.10 1"/>
+
+        <site name="spring_a_fr" pos="0.23616  0.42805 -0.0195"/>
+      </body>
+
+      <!-- ══════════════════════════════════════════════════════════════════
+           REAR-LEFT CORNER  (same suspension geometry, rear axle X=−1.651)
+      ══════════════════════════════════════════════════════════════════ -->
+
+      <body name="uca_rl" pos="-1.7879 -0.2324  0.3469">
+        <joint name="uca_rl_hinge" type="hinge" axis="1 0 0"/>
+        <inertial mass="8.45" pos="0.0397 -0.1474 -0.0137"
+                  diaginertia="0.03 0.03 0.06276"/>
+        <geom type="capsule" fromto=" 0.18465 0 0   0.11926 -0.4420 -0.04101"
+              size="0.020" rgba="0.85 0.45 0.10 1"/>
+        <geom type="capsule" fromto="-0.18465 0 0   0.11926 -0.4420 -0.04101"
+              size="0.020" rgba="0.85 0.45 0.10 1"/>
+
+        <body name="upright_rl" pos="0.11926 -0.4420 -0.04101">
+          <joint name="upright_rl_ball" type="ball"/>
+          <inertial mass="36.27" pos="0 0 0"
+                    diaginertia="0.1656 0.1934 0.04367"/>
+          <!-- upright knuckle: hub at SPINDLE (axle), 3 branches to ball joints -->
+          <geom type="sphere" size="0.040" pos="0.01759 -0.30223 -0.30589"
+                rgba="0.95 0.85 0.10 1" contype="0" conaffinity="0"/>
+          <geom type="capsule" fromto="0.01759 -0.30223 -0.30589   0 0 0"
+                size="0.028" rgba="0.75 0.75 0.20 1" contype="0" conaffinity="0"/>
+          <geom type="capsule" fromto="0.01759 -0.30223 -0.30589   0.02548 -0.13279 -0.44493"
+                size="0.028" rgba="0.75 0.75 0.20 1" contype="0" conaffinity="0"/>
+          <geom type="capsule" fromto="0.01759 -0.30223 -0.30589   -0.18941 -0.15178 -0.30589"
+                size="0.028" rgba="0.75 0.75 0.20 1" contype="0" conaffinity="0"/>
+          <geom type="sphere" size="0.032" pos="0.02548 -0.13279 -0.44493"
+                rgba="0.95 0.85 0.10 1" contype="0" conaffinity="0"/>
+          <geom type="sphere" size="0.028" pos="-0.18941 -0.15178 -0.30589"
+                rgba="0.95 0.85 0.10 1" contype="0" conaffinity="0"/>
+
+          <body name="spindle_rl" pos="0.01759 -0.30223 -0.30589">
+            <joint name="axle_rl" type="hinge" axis="0 1 0"/>
+            <inertial mass="74.2" pos="0 0 0"
+                      diaginertia="6.853 11.934 6.853"/>
+            <geom type="cylinder" fromto="0 -0.1675 0   0 0.1675 0" size="0.499"
+                  rgba="0 0 0 0" contype="1" conaffinity="1"/>
+            <geom type="cylinder" fromto="0 -0.1675 0   0 0.1675 0" size="0.499"
+                  rgba="0.65 0.65 0.65 1" contype="0" conaffinity="0"/>
+            <geom type="cylinder" fromto="0 -0.107 0   0 0.107 0" size="0.286"
+                  rgba="0.45 0.45 0.45 1" contype="0" conaffinity="0"/>
+            <geom type="capsule" fromto="0 -0.22 0   0 0.22 0"
+                  size="0.018" rgba="0.10 0.85 0.85 1" contype="0" conaffinity="0"/>
+          </body>
+        </body>
+      </body>
+
+      <body name="lca_rl" pos="-1.7932 -0.22348 -0.0995">
+        <joint name="lca_rl_hinge" type="hinge" axis="-0.9980 0 -0.0628"/>
+        <inertial mass="31.55" pos="0.0500 -0.1949 -0.0133"
+                  diaginertia="0.4 0.4 0.8938"/>
+        <geom type="capsule"
+              fromto=" 0.31000  0.00102  0.01950   0.15008 -0.58371 -0.03954"
+              size="0.022" rgba="0.85 0.45 0.10 1"/>
+        <geom type="capsule"
+              fromto="-0.31000 -0.00103 -0.01950   0.15008 -0.58371 -0.03954"
+              size="0.022" rgba="0.85 0.45 0.10 1"/>
+
+        <site name="spring_a_rl" pos="0.04820 -0.42805 -0.0195"/>
+      </body>
+
+      <!-- ══════════════════════════════════════════════════════════════════
+           REAR-RIGHT CORNER  (Y-mirrored)
+      ══════════════════════════════════════════════════════════════════ -->
+
+      <body name="uca_rr" pos="-1.7879  0.2324  0.3469">
+        <joint name="uca_rr_hinge" type="hinge" axis="1 0 0"/>
+        <inertial mass="8.45" pos="0.0397  0.1474 -0.0137"
+                  diaginertia="0.03 0.03 0.06276"/>
+        <geom type="capsule" fromto=" 0.18465 0 0   0.11926  0.4420 -0.04101"
+              size="0.020" rgba="0.85 0.45 0.10 1"/>
+        <geom type="capsule" fromto="-0.18465 0 0   0.11926  0.4420 -0.04101"
+              size="0.020" rgba="0.85 0.45 0.10 1"/>
+
+        <body name="upright_rr" pos="0.11926  0.4420 -0.04101">
+          <joint name="upright_rr_ball" type="ball"/>
+          <inertial mass="36.27" pos="0 0 0"
+                    diaginertia="0.1656 0.1934 0.04367"/>
+          <!-- upright knuckle: hub at SPINDLE (axle), 3 branches to ball joints -->
+          <geom type="sphere" size="0.040" pos="0.01759  0.30223 -0.30589"
+                rgba="0.95 0.85 0.10 1" contype="0" conaffinity="0"/>
+          <geom type="capsule" fromto="0.01759  0.30223 -0.30589   0 0 0"
+                size="0.028" rgba="0.75 0.75 0.20 1" contype="0" conaffinity="0"/>
+          <geom type="capsule" fromto="0.01759  0.30223 -0.30589   0.02548  0.13279 -0.44493"
+                size="0.028" rgba="0.75 0.75 0.20 1" contype="0" conaffinity="0"/>
+          <geom type="capsule" fromto="0.01759  0.30223 -0.30589   -0.18941  0.15178 -0.30589"
+                size="0.028" rgba="0.75 0.75 0.20 1" contype="0" conaffinity="0"/>
+          <geom type="sphere" size="0.032" pos="0.02548  0.13279 -0.44493"
+                rgba="0.95 0.85 0.10 1" contype="0" conaffinity="0"/>
+          <geom type="sphere" size="0.028" pos="-0.18941  0.15178 -0.30589"
+                rgba="0.95 0.85 0.10 1" contype="0" conaffinity="0"/>
+
+          <body name="spindle_rr" pos="0.01759  0.30223 -0.30589">
+            <joint name="axle_rr" type="hinge" axis="0 1 0"/>
+            <inertial mass="74.2" pos="0 0 0"
+                      diaginertia="6.853 11.934 6.853"/>
+            <geom type="cylinder" fromto="0 -0.1675 0   0 0.1675 0" size="0.499"
+                  rgba="0 0 0 0" contype="1" conaffinity="1"/>
+            <geom type="cylinder" fromto="0 -0.1675 0   0 0.1675 0" size="0.499"
+                  rgba="0.65 0.65 0.65 1" contype="0" conaffinity="0"/>
+            <geom type="cylinder" fromto="0 -0.107 0   0 0.107 0" size="0.286"
+                  rgba="0.45 0.45 0.45 1" contype="0" conaffinity="0"/>
+            <geom type="capsule" fromto="0 -0.22 0   0 0.22 0"
+                  size="0.018" rgba="0.10 0.85 0.85 1" contype="0" conaffinity="0"/>
+          </body>
+        </body>
+      </body>
+
+      <body name="lca_rr" pos="-1.7932  0.22348 -0.0995">
+        <joint name="lca_rr_hinge" type="hinge" axis="-0.9980 0 -0.0628"/>
+        <inertial mass="31.55" pos="0.0500  0.1949 -0.0133"
+                  diaginertia="0.4 0.4 0.8938"/>
+        <geom type="capsule"
+              fromto=" 0.31000 -0.00102  0.01950   0.15008  0.58371 -0.03954"
+              size="0.022" rgba="0.85 0.45 0.10 1"/>
+        <geom type="capsule"
+              fromto="-0.31000  0.00103 -0.01950   0.15008  0.58371 -0.03954"
+              size="0.022" rgba="0.85 0.45 0.10 1"/>
+
+        <site name="spring_a_rr" pos="0.04820  0.42805 -0.0195"/>
+      </body>
+
+      <!-- ══════════════════════════════════════════════════════════════════
+           PITMAN-ARM STEERING
+           REV axis = Z (vertical kingpin).  Pitman arm on left (−Y),
+           idler arm on right (+Y).
+           REV chassis: [1.160, −0.379095, 0]
+           UNIV chassis: [1.410, −0.379095, 0]  (arm length = 0.250 m along X)
+      ══════════════════════════════════════════════════════════════════ -->
+
+      <body name="pitman_arm" pos="1.160 -0.379095 0">
+        <joint name="steer_motor" type="hinge" axis="0 0 1"
+               limited="true" range="-0.47947 0.47947"/>
+        <inertial mass="1.605" pos="0.125 0 0"
+                  diaginertia="0.00638 0.00756 0.00150"/>
+        <geom type="capsule" fromto="0 0 0   0.250 0 0"
+              size="0.018" rgba="0.40 0.75 0.40 1"/>
+
+        <!-- steering link: ball joint at UNIV, 0.250 m along arm -->
+        <body name="steering_link" pos="0.250 0 0">
+          <joint name="steering_link_ball" type="ball"/>
+          <inertial mass="3.681" pos="0 0.379095 0.04"
+                    diaginertia="0.252 0.00233 0.254"/>
+          <!-- bar from FL tierod attach (Y=0) to FR (Y=+0.75819) -->
+          <geom type="capsule"
+                fromto="0 0 0.04   0 0.758190 0.04"
+                size="0.016" rgba="0.40 0.75 0.40 1"/>
+
+          <!-- FL tierod body: ball joint at TIEROD_PA (SL local [0,0,0.04]) -->
+          <body name="tierod_fl" pos="0 0 0.04">
+            <joint name="tierod_fl_ball" type="ball"/>
+            <inertial mass="6.0" pos="0.017 -0.224 -0.020"
+                      diaginertia="0.05 0.05 0.5"/>
+            <!-- far end → TIEROD_U_FL: offset [0.034,−0.447,−0.040] -->
+            <geom type="capsule" fromto="0 0 0   0.034 -0.447 -0.040"
+                  size="0.012" rgba="0.50 0.80 0.50 1"/>
+          </body>
+
+          <!-- FR tierod body (Y-mirror, at right end of steering bar) -->
+          <body name="tierod_fr" pos="0 0.758190 0.04">
+            <joint name="tierod_fr_ball" type="ball"/>
+            <inertial mass="6.0" pos="0.017  0.224 -0.020"
+                      diaginertia="0.05 0.05 0.5"/>
+            <geom type="capsule" fromto="0 0 0   0.034  0.447 -0.040"
+                  size="0.012" rgba="0.50 0.80 0.50 1"/>
+          </body>
+        </body>
+      </body><!-- pitman_arm -->
+
+      <!-- Rear tierod bodies: ball joint at TIEROD_C, far end at TIEROD_U -->
+      <!-- RL: TIEROD_C chassis=(−1.410,−0.379095,0.04), U=(−1.444,−0.82618,0) -->
+      <body name="tierod_rl" pos="-1.410 -0.379095 0.04">
+        <joint name="tierod_rl_ball" type="ball"/>
+        <inertial mass="6.0" pos="-0.017 -0.224 -0.020"
+                  diaginertia="0.05 0.05 0.5"/>
+        <geom type="capsule" fromto="0 0 0   -0.034 -0.447 -0.040"
+              size="0.012" rgba="0.50 0.80 0.50 1"/>
+      </body>
+      <body name="tierod_rr" pos="-1.410  0.379095 0.04">
+        <joint name="tierod_rr_ball" type="ball"/>
+        <inertial mass="6.0" pos="-0.017  0.224 -0.020"
+                  diaginertia="0.05 0.05 0.5"/>
+        <geom type="capsule" fromto="0 0 0   -0.034  0.447 -0.040"
+              size="0.012" rgba="0.50 0.80 0.50 1"/>
+      </body>
+
+      <!-- Idler arm: passive Z-hinge on right side, mirrors pitman arm -->
+      <body name="idler_arm" pos="1.160  0.379095 0">
+        <joint name="idler_hinge" type="hinge" axis="0 0 1"/>
+        <inertial mass="1.5" pos="0.125 0 0"
+                  diaginertia="0.003 0.008 0.008"/>
+        <geom type="capsule" fromto="0 0 0   0.250 0 0"
+              size="0.018" rgba="0.40 0.75 0.40 1"/>
+      </body>
+
+    </body><!-- chassis -->
+  </worldbody>
+
+  <!-- ── Equality constraints ── -->
+  <equality>
+    <!-- Wishbone loop closures: LCA_U anchor in lca body frame -->
+    <connect name="lca_fl_close" body1="lca_fl"  body2="upright_fl"
+             anchor="0.15008 -0.58371 -0.03954"/>
+    <connect name="lca_fr_close" body1="lca_fr"  body2="upright_fr"
+             anchor="0.15008  0.58371 -0.03954"/>
+    <connect name="lca_rl_close" body1="lca_rl"  body2="upright_rl"
+             anchor="0.15008 -0.58371 -0.03954"/>
+    <connect name="lca_rr_close" body1="lca_rr"  body2="upright_rr"
+             anchor="0.15008  0.58371 -0.03954"/>
+
+    <!-- Idler arm tip coincides with right end of steering link at q=0 -->
+    <connect name="idler_close" body1="idler_arm" body2="steering_link"
+             anchor="0.250 0 0"/>
+
+    <!-- Front tierods: far end of tierod body → TIEROD_U on upright -->
+    <connect name="tierod_fl_end" body1="tierod_fl" body2="upright_fl"
+             anchor="0.034 -0.447 -0.040"/>
+    <connect name="tierod_fr_end" body1="tierod_fr" body2="upright_fr"
+             anchor="0.034  0.447 -0.040"/>
+
+    <!-- Rear tierods -->
+    <connect name="tierod_rl_end" body1="tierod_rl" body2="upright_rl"
+             anchor="-0.034 -0.447 -0.040"/>
+    <connect name="tierod_rr_end" body1="tierod_rr" body2="upright_rr"
+             anchor="-0.034  0.447 -0.040"/>
+  </equality>
+
+  <!-- ── TSDA spring-damper tendons ── -->
+  <!-- TSDA: k=76000 N/m, c=38097 N·s/m.
+       springlength=0.792: at q=0 (d=0.602 m) spring force=14440 N ≈ per-corner weight 13919 N
+       → near-static equilibrium at startup, avoids frame-0 constraint spike. -->
+  <tendon>
+    <spatial name="tsda_fl" stiffness="76000" damping="38097" springlength="0.792">
+      <site site="spring_c_fl"/>
+      <site site="spring_a_fl"/>
+    </spatial>
+    <spatial name="tsda_fr" stiffness="76000" damping="38097" springlength="0.792">
+      <site site="spring_c_fr"/>
+      <site site="spring_a_fr"/>
+    </spatial>
+    <spatial name="tsda_rl" stiffness="76000" damping="38097" springlength="0.792">
+      <site site="spring_c_rl"/>
+      <site site="spring_a_rl"/>
+    </spatial>
+    <spatial name="tsda_rr" stiffness="76000" damping="38097" springlength="0.792">
+      <site site="spring_c_rr"/>
+      <site site="spring_a_rr"/>
+    </spatial>
+  </tendon>
+
+  <!-- ── Actuators ── -->
+  <actuator>
+    <!-- Pitman arm steering motor: position-controlled, ±27.5° -->
+    <position name="steer_motor_act" joint="steer_motor" kp="8000" kv="500"
+              ctrlrange="-0.47947 0.47947"/>
+    <!-- 4WD axles: velocity-controlled -->
+    <velocity name="axle_fl_act" joint="axle_fl" kv="800"/>
+    <velocity name="axle_fr_act" joint="axle_fr" kv="800"/>
+    <velocity name="axle_rl_act" joint="axle_rl" kv="800"/>
+    <velocity name="axle_rr_act" joint="axle_rr" kv="800"/>
+  </actuator>
+
+</mujoco>

@@ -1,0 +1,82 @@
+<mujoco model="ancf_tire_testrig">
+  <!--
+    Chrono-style tire test rig. Three separate bodies so each DOF gets its own
+    Newton joint (Newton merges multiple MJCF joints on one body into a single D6).
+
+    Topology:
+      world
+       └─ carrier  [slide_z: vertical, free — gravity provides normal load]
+             └─ chassis  [slide_x: longitudinal, velocity-motor driven]
+                   └─ spindle  [spin_y: wheel rotation, velocity-motor driven]
+
+    Normal load = carrier_mass * g = 306 kg * 9.81 ≈ 3000 N (Chrono default).
+
+    Key design: carrier body is 1.0 m ABOVE the spindle (pos="0 0 -1.0" on chassis).
+    This means slide_z = drop_h + 1.0 puts the spindle at drop_h — the carrier
+    appears above the tire like in the Chrono rig, with the strut descending
+    through the tire's centre hole to the hub.
+
+    jq_init[slide_z] must be set to (r_outer + drop_clearance + 1.0) by the example.
+
+    Visual geometry:
+      - carrier_strut : grey box descending 1.0 m from carrier body to spindle
+                        (carrier is above tire, strut passes through hub hole)
+      - hub_vis       : small blue-grey disc R=0.10 m (same as ancf_single_tire.xml)
+      - axle_vis      : yellow capsule protruding past tyre width on each side
+  -->
+  <compiler angle="radian"/>
+  <option gravity="0 0 -9.81"/>
+  <default>
+    <joint damping="1.0"/>
+  </default>
+  <worldbody>
+    <light pos="0 0 4" dir="0 0 -1" diffuse="0.8 0.8 0.8"/>
+    <geom name="ground" type="plane" size="20 5 0.1" rgba="0.65 0.65 0.65 1"/>
+
+    <!-- Carrier: slides vertically. Body is 1.0 m ABOVE the spindle so the rig
+         appears above the tire. Strut descends 1.0 m to the spindle centre. -->
+    <body name="carrier" pos="0 0 0">
+      <!-- damping=500. Vertical motion controlled by drop_motor actuator (velocity servo),
+           not free-fall — matches Chrono ChLinkMotorLinearSpeed convention. -->
+      <joint name="slide_z" type="slide" axis="0 0 1" damping="500"/>
+      <!-- Minimal self-weight only (~10N). Full normal load applied via
+           xfrc_applied in the Python example so it can be tuned at runtime. -->
+      <inertial mass="1.0" pos="0 0 0" diaginertia="1 1 1"/>
+      <!-- Strut: rises 1.0 m above carrier (visual only — makes rig look like Chrono).
+           All bodies are at the SAME Z for stability (no offset = no ill-conditioned
+           constraint chain). The strut is purely visual, going upward from hub height. -->
+      <geom name="carrier_strut" type="box" size="0.04 0.04 0.50"
+            pos="0 0 0.50" rgba="0.55 0.55 0.55 1.0"
+            contype="0" conaffinity="0"/>
+
+      <!-- Chassis: same Z as carrier (physics) — avoids 1m constraint coupling -->
+      <body name="chassis" pos="0 0 0">
+        <joint name="slide_x" type="slide" axis="1 0 0" damping="10"/>
+        <inertial mass="0.001" pos="0 0 0" diaginertia="1e-6 1e-6 1e-6"/>
+        <!-- Spindle: rotates about Y. FEDA combined mass 31.88 kg required for
+             stability — near-zero mass caused F/m → ∞ → NaN. -->
+        <body name="spindle" pos="0 0 0">
+          <joint name="spin_y" type="hinge" axis="0 1 0" damping="1.0"/>
+          <inertial mass="31.88" pos="0 0 0" diaginertia="0.4639 0.6248 0.4639"/>
+          <!-- Hub disc R=0.10 m (same as ancf_single_tire.xml) -->
+          <geom name="hub_vis" type="cylinder" size="0.10 0.168"
+                euler="1.5708 0 0" rgba="0.35 0.35 0.75 1.0"
+                contype="0" conaffinity="0"/>
+          <!-- Axle stub -->
+          <geom name="axle_vis" type="capsule" size="0.025 0.238"
+                euler="1.5708 0 0" rgba="1.0 0.75 0.0 1.0"
+                contype="0" conaffinity="0"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <!-- drop_motor: lowers carrier at controlled speed (matches Chrono ChLinkMotorLinearSpeed).
+         kv=5000: stiff velocity servo. Set ctrl[0]=-drop_speed (negative=downward) during DROP,
+         ctrl[0]=0 during SETTLE/TEST to hold position. -->
+    <velocity name="drop_motor" joint="slide_z" kv="5000"/>
+    <velocity name="lin_motor"  joint="slide_x" kv="5000"/>
+    <velocity name="rot_motor"  joint="spin_y"  kv="500"/>
+  </actuator>
+</mujoco>

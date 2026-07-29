@@ -15,9 +15,15 @@
 #   ./run-examples.sh basic_pendulum -e            # By name + edit interactively
 #   ./run-examples.sh basic_pendulum --set num-frames=500
 #   ./run-examples.sh basic_pendulum -- --num-frames 500   # Raw Newton args after --
+#   ./run-examples.sh basic_pendulum --profile     # Profile with Nsight Systems
+#   ./run-examples.sh basic_pendulum --profile --profile-dir ~/my-profiles
 #
 # Interactive hints:
 #   At the menu prompt, suffix your choice with 'e' to edit (e.g. '3e').
+#
+# Profiling:
+#   --profile saves an .nsys-rep file to PROFILE_DIR (default: $HOME/newton-profiles).
+#   Open results with: ./view-profile.sh
 
 set -e
 
@@ -38,6 +44,8 @@ fi
 
 # ─── CLI parsing: pull out our own flags, stash raw args for after '--' ───────
 EDIT=0
+PROFILE=0
+PROFILE_DIR="${PROFILE_DIR:-$SCRIPT_DIR/nsys}"
 SETS=()       # --set KEY=VAL overrides (pre-'--')
 RAW_ARGS=()   # anything after '--', passed verbatim to the example
 POSITIONAL=() # example name/number and leftover args
@@ -48,8 +56,15 @@ while [ $# -gt 0 ]; do
         RAW_ARGS+=("$1"); shift; continue
     fi
     case "$1" in
-        --)        seen_dashdash=1 ;;
-        -e|--edit) EDIT=1 ;;
+        --)              seen_dashdash=1 ;;
+        -e|--edit)       EDIT=1 ;;
+        --profile)       PROFILE=1 ;;
+        --no-profile)    PROFILE=0 ;;
+        --profile-dir)
+            [ $# -lt 2 ] && { echo "error: --profile-dir expects a path" >&2; exit 2; }
+            PROFILE_DIR="$2"; shift
+            ;;
+        --profile-dir=*) PROFILE_DIR="${1#--profile-dir=}" ;;
         --set)
             [ $# -lt 2 ] && { echo "error: --set expects KEY=VAL" >&2; exit 2; }
             SETS+=("$2"); shift
@@ -148,7 +163,12 @@ else
     for extra in "$@"; do RAW_ARGS+=("$extra"); done
 fi
 
-echo "Running: $EXAMPLE"
+# A config may delegate to a different example module via the optional
+# top-level "example" field — lets multiple configs share one Python
+# example (e.g. baymax_demo.json → inflatable_demo with --shape baymax).
+INVOKE_EXAMPLE=$(python3 -c "import json; d=json.load(open('$CONFIG_DIR/$EXAMPLE.json')); print(d.get('example') or '$EXAMPLE')")
+
+echo "Running: $EXAMPLE (module: $INVOKE_EXAMPLE)"
 echo ""
 
 # ─── Resolve CLI args from the JSON (optionally edit interactively) ──────────
@@ -163,6 +183,24 @@ if [ "${#RAW_ARGS[@]}" -gt 0 ]; then
     RAW_STR=$(printf ' %q' "${RAW_ARGS[@]}")
 fi
 EXTRA_ARGS="$RESOLVED$RAW_STR"
+
+# ─── Profile output directory ────────────────────────────────────────────────
+PROFILE_MOUNT_ARGS=()
+PROFILE_CMD_PREFIX=""
+if [ "$PROFILE" -eq 1 ]; then
+    mkdir -p "$PROFILE_DIR"
+    REPORT_NAME="${EXAMPLE}_$(date +%Y%m%d_%H%M%S)"
+    PROFILE_MOUNT_ARGS=(-v "$PROFILE_DIR:/profiles")
+    PROFILE_CMD_PREFIX="nsys profile \
+        --trace=cuda,nvtx,osrt \
+        --cuda-graph-trace=node \
+        --sample=none \
+        --cpuctxsw=none \
+        --force-overwrite=true \
+        -o /profiles/${REPORT_NAME}"
+    echo "Profiling enabled → $PROFILE_DIR/${REPORT_NAME}.nsys-rep"
+    echo ""
+fi
 
 # ─── Auto-build image if missing ─────────────────────────────────────────────
 if ! docker image inspect newton:latest >/dev/null 2>&1; then
@@ -202,7 +240,7 @@ if [ -n "$XAUTHORITY" ] && [ -f "$XAUTHORITY" ]; then
 fi
 echo ""
 
-echo "+ python -m newton.examples $EXAMPLE $EXTRA_ARGS"
+echo "+ python -m newton.examples $INVOKE_EXAMPLE $EXTRA_ARGS"
 echo ""
 
 # Mount the in-tree `newton` package over the image's copy so host edits are
@@ -211,16 +249,31 @@ echo ""
 # recompilation across runs (Warp hashes kernel source and only rebuilds
 # when it changes).
 WARP_CACHE_DIR="${WARP_CACHE_DIR:-$HOME/.cache/newton-warp}"
-mkdir -p "$WARP_CACHE_DIR"
+NEWTON_CACHE_DIR="${NEWTON_CACHE_DIR:-$HOME/.cache/newton}"
+mkdir -p "$WARP_CACHE_DIR" "$NEWTON_CACHE_DIR"
+
+PROFILE_CAP=""
+[ "$PROFILE" -eq 1 ] && PROFILE_CAP="--cap-add SYS_ADMIN"
+
 docker run --rm -it \
     $GPU_ARGS \
+    $PROFILE_CAP \
     --shm-size=16g \
     --network=host \
     --ipc=host \
     --ulimit memlock=-1 \
     --ulimit stack=67108864 \
     "${DOCKER_X11_ARGS[@]}" \
+    "${PROFILE_MOUNT_ARGS[@]}" \
     -v "$NEWTON_DIR/newton:/workspace/newton/newton" \
+    -v "$NEWTON_DIR/docker/config:/workspace/newton/docker/config" \
     -v "$WARP_CACHE_DIR:/root/.cache/warp" \
+    -v "$NEWTON_CACHE_DIR:/root/.cache/newton" \
     newton:latest \
-    bash -lc "python -m newton.examples $EXAMPLE $EXTRA_ARGS"
+    bash -lc "rm -f /workspace/newton/.git && $PROFILE_CMD_PREFIX python -m newton.examples $INVOKE_EXAMPLE $EXTRA_ARGS"
+
+if [ "$PROFILE" -eq 1 ]; then
+    echo ""
+    echo "Profile saved: $PROFILE_DIR/${REPORT_NAME}.nsys-rep"
+    echo "Open with:     $(dirname "$SCRIPT_DIR")/docker/view-profile.sh"
+fi

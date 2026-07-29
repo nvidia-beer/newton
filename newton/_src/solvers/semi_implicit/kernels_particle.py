@@ -409,7 +409,7 @@ def eval_tetrahedra(
     dJdx3 = wp.cross(x10, x20) * s
 
     f_volume = (J - alpha + act) * k_lambda
-    f_damp = (wp.dot(dJdx1, v1) + wp.dot(dJdx2, v2) + wp.dot(dJdx3, v3)) * k_damp
+    f_damp = (wp.dot(dJdx1, v10) + wp.dot(dJdx2, v20) + wp.dot(dJdx3, v30)) * k_damp
 
     f_total = f_volume + f_damp
 

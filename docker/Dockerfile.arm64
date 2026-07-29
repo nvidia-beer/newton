@@ -37,7 +37,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --- UV and project deps ---
-# Copy UV binary from official UV image
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uvx /usr/local/bin/uvx
 
@@ -50,16 +49,31 @@ COPY newton/_version.py newton/_version.py
 COPY LICENSE.md LICENSE.md
 COPY newton/licenses newton/licenses
 
-# Install Python deps.
-# Not using --frozen to allow platform-specific dependency resolution
-# (on ARM64, warp-lang is installed from GitHub releases).
-RUN uv sync --no-install-workspace --extra dev
+# Submodule providing the editable `mujoco-warp` path source declared in
+# pyproject.toml under [tool.uv.sources]. Must exist before `uv sync` or
+# dependency resolution fails with "Distribution not found".
+COPY third_party/mujoco_warp third_party/mujoco_warp
+
+# Install Python deps from the lockfile exactly.
+# --frozen avoids re-resolution: mujoco 3.8.x is no longer on PyPI but is pinned
+# in uv.lock, and the arm64 warp wheel is already in the lockfile too.
+RUN uv sync --frozen --prerelease=allow --no-install-workspace --extra dev
 
 # Copy source code
 COPY . ./
 
 # Install workspace packages
-RUN uv sync --extra dev
+RUN uv sync --frozen --prerelease=allow --extra dev
+
+# Install Nsight Systems CLI — placed after uv sync to preserve dep-resolution
+# cache. cuda-nsight-systems-13-0 is in the pre-configured CUDA 13 apt repo.
+# nvtx Python package: required by wp.ScopedTimer(use_nvtx=True).
+# On CUDA 13 libnvToolsExt.so is gone (header-only); nvidia-nvtx-cu12 still
+# ships the Python bindings + stubs that nsys can intercept at the API level.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cuda-nsight-systems-13-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir nvidia-nvtx-cu12
 
 ENV PATH="/workspace/newton/.venv/bin:$PATH"
 

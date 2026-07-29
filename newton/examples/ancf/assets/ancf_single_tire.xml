@@ -1,0 +1,61 @@
+<mujoco model="ancf_single_tire">
+  <!--
+    Single-wheel test rig: ANCF FEM tire on MuJoCo rigid spindle.
+    Mirrors Chrono ChTireTestRig topology:
+      carrier - slide Z - spindle - hinge Y
+    Rim collapsed into spindle body (same as double_wishbone_tires_rims.py).
+    Combined spindle mass: 13.08 (FEDA spindle) + 18.80 (FEDA wheel) = 31.88 kg.
+    Combined inertia: diagonal sum of FEDA spindle + FEDA wheel tensors.
+    ANCF bead nodes prescribed from spindle body_q each substep.
+    Reaction wrenches fed back via xfrc_applied on the spindle body.
+  -->
+  <compiler angle="radian"/>
+  <option gravity="0 0 -9.81"/>
+  <default>
+    <joint damping="0.5"/>
+    <geom friction="0.8 0.005 0.0001" contype="1" conaffinity="1"/>
+  </default>
+
+  <worldbody>
+    <light pos="0 0 4" dir="0 0 -1" diffuse="0.8 0.8 0.8"/>
+    <geom name="ground" type="plane" size="10 10 0.1" rgba="0.65 0.65 0.65 1"/>
+
+    <!-- chassis: forward speed prescribed by lin_motor (v = omega × R, no-slip).
+         spin_y:  spin prescribed by spin_motor (kv=5000 ≈ kinematic).
+         slide_z: FREE — MuJoCo handles vertical load, mass, inertia.
+         Matches Chrono ChTireTestRig: kinematic spin+rolling, dynamic vertical. -->
+    <body name="chassis" pos="0 0 0">
+      <joint name="slide_x" type="slide" axis="1 0 0" damping="5"/>
+      <inertial mass="1e-3" pos="0 0 0" diaginertia="1e-6 1e-6 1e-6"/>
+
+      <body name="carrier" pos="0 0 0">
+        <!-- slide_z damping=200 N·s/m: v_term = M*g/D = 31.88*9.81/200 ≈ 1.56 m/s. -->
+        <joint name="slide_z" type="slide" axis="0 0 1" damping="200"/>
+        <inertial mass="1e-3" pos="0 0 0" diaginertia="1e-6 1e-6 1e-6"/>
+
+      <!-- Spindle: mass carrier only — NO spin_y joint.
+           Rotation is tracked kinematically in rim_phi/rim_omega GPU arrays
+           (like ancf_rim_shell), not as a MuJoCo DOF. -->
+      <body name="spindle" pos="0 0 0">
+        <inertial mass="31.88" pos="0 0 0"
+                  diaginertia="0.4639 0.6248 0.4639"/>
+        <!-- Hub disc: R=0.10m (brake drum area, well inside bead at 0.286m so spokes show) -->
+        <geom name="rim_vis" type="cylinder" size="0.10 0.168"
+              euler="1.5708 0 0" rgba="0.35 0.35 0.75 1.0"
+              contype="0" conaffinity="0"/>
+        <!-- Axle stick: protrudes 0.07m beyond hub disc on each side -->
+        <geom name="axle_vis" type="capsule" size="0.025 0.238"
+              euler="1.5708 0 0" rgba="1.0 0.75 0.0 1.0"
+              contype="0" conaffinity="0"/>
+      </body>
+      </body>  <!-- carrier -->
+    </body>  <!-- chassis -->
+  </worldbody>
+
+  <actuator>
+    <!-- lin_motor: prescribes chassis forward speed = rim_omega × R_outer (no-slip).
+         ctrl set each substep from rim_omega_wp GPU array (not from MuJoCo cvel).
+         Spin is tracked in Python/GPU — no spin_motor needed. -->
+    <velocity name="lin_motor" joint="slide_x" kv="5000"/>
+  </actuator>
+</mujoco>

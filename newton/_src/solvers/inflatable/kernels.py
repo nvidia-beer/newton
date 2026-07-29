@@ -43,14 +43,16 @@ Per-element BSR triplet layout
 ==============================
 
 System-matrix kernels write disjoint regions of the triplet arrays so
-``bsr_set_from_triplets`` can sum duplicates into ``A``. Per-step layout::
+``bsr_set_from_triplets`` can sum duplicates into ``A``.  Assembly order
+(matches ``SolverImplicitSoft._build_constant_matrix``)::
 
-    [0 .. P)              — per-particle diagonal (mass + spring sum)
-    [P .. P+2·S)          — per-spring (i,j) and (j,i) off-diagonals
-    [P+2·S .. P+2·S+16·T) — per-tet 4×4 nodal Hessian blocks
-    [... +3·R)            — per-tri 3 lumped diagonal blocks
+    [0 .. P)                       — per-particle diagonal (mass + spring sum)
+    [P .. P+2·S)                   — per-spring (i,j) and (j,i) off-diagonals
+    [P+2·S .. P+2·S+3·R)          — per-tri 3 lumped diagonal blocks
+    [P+2·S+3·R .. P+2·S+3·R+16·T) — per-tet 4×4 nodal Hessian blocks (rest-state)
+    [... +4·E)                     — per-edge 4 lumped diagonal blocks (bending)
 
-where P = particle_count, S = spring_count, T = tet_count, R = tri_count.
+where P = particle_count, S = spring_count, R = tri_count, T = tet_count, E = edge_count.
 
 Sign convention for forces
 ==========================
@@ -65,7 +67,7 @@ Stable Neo-Hookean tetrahedra
 
 Per-element strain energy density (Smith, De Goes & Kim 2018):
 
-    ψ(F) = ½·μ·(I_C − 3) − μ·log(I_C + 1) + ½·λ·(J − α)²
+    ψ(F) = ½·μ·(I_C − 3) − ½·μ·log(I_C + 1) + ½·λ·(J − α)²
     α    = 1 + μ/λ − μ/(4·λ)            (rest correction)
     I_C  = ‖F‖²_F                       (squared Frobenius norm)
     J    = det(F)
@@ -100,8 +102,9 @@ When the kinematic glue is configured, two kernels enforce
 
     apply_dirichlet_pin_kernel        — per-particle: capture reaction
         particle_f[p] := target_dv[p]                     (mask[p] == 1)
-        reaction[p]   := particle_f_old[p] / dt
-                         − mass · g − mass · target_dv[p] / dt
+        reaction[p]   := particle_f_old[p] / dt − mass · g
+        (inertial term −mass·target_dv/dt is intentionally omitted;
+         see kernel docstring for the added-mass stability argument)
 
     filter_dirichlet_pin_in_bsr_kernel — per-BSR-row: filter A, Schur RHS
         A[p, p]   := I,  A[p, c≠p] := 0,  A[r≠p, p] := 0
@@ -119,7 +122,7 @@ File layout
 3. Mass diagonal    — ``build_system_matrix_diagonal_mass_kernel``
 4. Linear springs   — force + matrix tangent
 5. Tetrahedral FEM  — Stable Neo-Hookean force + tangent
-6. Triangle FEM     — membrane + tangent + edge bending
+6. Triangle FEM     — membrane + tangent + edge bending (force + implicit tangent)
 7. Particle-particle (hash grid)
 8. Particle-rigid contact — ground plane, force-based, constraint-based
 9. Gravity
@@ -129,7 +132,6 @@ File layout
 import warp as wp
 
 from newton import ParticleFlags
-
 
 # =====================================================================
 # 1. Constants and helper types
@@ -148,14 +150,15 @@ PARTICLE_FLAG_ACTIVE = int(ParticleFlags.ACTIVE)
 # it edits the RHS, not A.
 # =====================================================================
 
+
 @wp.kernel
 def update_state(
-    dv: wp.array(dtype=wp.vec3),
+    dv: wp.array[wp.vec3],
     dt: wp.float32,
-    positions_in: wp.array(dtype=wp.vec3),
-    velocities_in: wp.array(dtype=wp.vec3),
-    positions_out: wp.array(dtype=wp.vec3),
-    velocities_out: wp.array(dtype=wp.vec3),
+    positions_in: wp.array[wp.vec3],
+    velocities_in: wp.array[wp.vec3],
+    positions_out: wp.array[wp.vec3],
+    velocities_out: wp.array[wp.vec3],
 ):
     """Integrate the BE solution: ``v_{n+1} = v_n + Δv``, ``x_{n+1} = x_n + h·v_{n+1}``."""
     tid = wp.tid()
@@ -166,16 +169,16 @@ def update_state(
 
 @wp.kernel
 def apply_dirichlet_pin_kernel(
-    mask: wp.array(dtype=wp.int32),
-    target_dv: wp.array(dtype=wp.vec3),
+    mask: wp.array[wp.int32],
+    target_dv: wp.array[wp.vec3],
     gravity: wp.vec3,
     mass: wp.float32,
     target_scale: wp.float32,
     dt: float,
     # in/out
-    particle_f: wp.array(dtype=wp.vec3),
+    particle_f: wp.array[wp.vec3],
     # out
-    reaction: wp.array(dtype=wp.vec3),
+    reaction: wp.array[wp.vec3],
 ):
     """Dirichlet RHS override and reaction capture for kinematic-pinned particles.
 
@@ -191,16 +194,19 @@ def apply_dirichlet_pin_kernel(
     A's diagonal is still ``m + h²·k_pp``, so ``Δv[p] ≈ target_dv[p]``
     with the soft-pin compliance the FEM tangent introduces).
 
-    The reaction is the constraint force the rigid body must supply at the
-    attach point: elastic / contact / damping forces the FEM wanted to apply
-    at this vertex, minus gravity (already an external force on the soft
-    particle), minus the inertial reaction ``m · target_dv / dt`` needed to
-    accelerate the soft particle onto the rigid kinematic target. By Newton's
-    third law the rigid body feels ``+reaction``; the glue forwards it onto
-    ``state.body_f``. Including the inertial term is necessary for momentum
-    conservation at the interface — without it the rigid body never feels the
-    soft mass and the coupling oscillates under fast rigid motion (Macklin et
-    al., XPBD rigid bodies, SCA 2020).
+    The reaction is the elastic / contact / damping force the FEM wanted to
+    apply at this vertex, minus gravity (already an external force on the soft
+    particle).  By Newton's third law the rigid body feels ``+reaction``; the
+    glue forwards it onto ``state.body_f`` or ``mjw_data.xfrc_applied``.
+
+    The inertial term ``m · target_dv / dt`` is intentionally omitted.
+    Including it is correct when the rigid body uses a position-based (XPBD)
+    integrator where ``body_f`` enters as a positional displacement, but it
+    creates an added-mass instability when forwarded as a continuous force to
+    an explicit-Euler integrator (MuJoCo, Newton's impulse integrator): the
+    stability condition ``N_pin · m_particle / M_rigid < 1`` is easily violated
+    (Causin et al. 2005, Förster et al. 2007).  Elastic-only reaction is
+    bounded by the FEM stiffness and unconditionally stable.
 
     The RHS override is paired with :func:`filter_dirichlet_pin_in_bsr_kernel`,
     which sets ``A[p, p] = I`` and zeros the rest of row/column ``p``. The
@@ -230,20 +236,22 @@ def apply_dirichlet_pin_kernel(
         return
 
     f_total = particle_f[p]
-    reaction[p] = (f_total / dt) - mass * gravity - mass * target_dv[p] / dt
+    # Elastic-only: omit the inertial term (mass·target_dv/dt) to avoid
+    # added-mass instability when forwarding to an explicit-Euler rigid solver.
+    reaction[p] = (f_total / dt) - mass * gravity
 
     particle_f[p] = target_scale * target_dv[p]
 
 
 @wp.kernel
 def filter_dirichlet_pin_in_bsr_kernel(
-    mask: wp.array(dtype=wp.int32),
-    target_dv: wp.array(dtype=wp.vec3),
-    bsr_offsets: wp.array(dtype=int),
-    bsr_columns: wp.array(dtype=int),
-    bsr_values: wp.array(dtype=wp.mat33f),
+    mask: wp.array[wp.int32],
+    target_dv: wp.array[wp.vec3],
+    bsr_offsets: wp.array[int],
+    bsr_columns: wp.array[int],
+    bsr_values: wp.array[wp.mat33f],
     # in/out
-    particle_f: wp.array(dtype=wp.vec3),
+    particle_f: wp.array[wp.vec3],
 ):
     """Row/column elimination of pinned DOFs in the assembled BSR matrix.
 
@@ -274,9 +282,9 @@ def filter_dirichlet_pin_in_bsr_kernel(
     a phantom rigid translation through the zeroed stiffness coupling.
 
     Run AFTER ``bsr_set_from_triplets`` and AFTER the per-particle pin RHS
-    override, BEFORE the preconditioner is rebuilt and BEFORE the linear
-    solve. Modifies ``A`` in place — ``A`` must be rebuilt from scratch on
-    the next substep when a pin is active (the solver enforces this).
+    override, BEFORE the linear solve. Modifies ``A`` in place —
+    ``apply_dirichlet_filter`` restores ``A`` from a clean snapshot before
+    each call so the Schur step sees the original off-diagonals every substep.
 
     Args:
         mask: Per-particle ``int32`` flag, ``1`` for pinned and ``0`` for free.
@@ -323,18 +331,20 @@ def filter_dirichlet_pin_in_bsr_kernel(
 # writes M·I plus the spring contributions in one pass.
 # =====================================================================
 
+
 @wp.kernel
 def build_system_matrix_diagonal_mass_kernel(
-    rows: wp.array(dtype=wp.int32),
-    cols: wp.array(dtype=wp.int32),
-    values: wp.array(dtype=wp.mat33f),
-    mass: wp.float32,
+    rows: wp.array[wp.int32],
+    cols: wp.array[wp.int32],
+    values: wp.array[wp.mat33f],
+    particle_mass: wp.array[wp.float32],
 ):
-    """Write ``A_ii = mass·I`` for each particle (no springs path)."""
+    """Write ``A_ii = m_i·I`` for each particle (no springs path)."""
     tid = wp.tid()
     rows[tid] = tid
     cols[tid] = tid
-    values[tid] = wp.mat33f(mass, 0.0, 0.0, 0.0, mass, 0.0, 0.0, 0.0, mass)
+    m = particle_mass[tid]
+    values[tid] = wp.mat33f(m, 0.0, 0.0, 0.0, m, 0.0, 0.0, 0.0, m)
 
 
 # =====================================================================
@@ -348,23 +358,24 @@ def build_system_matrix_diagonal_mass_kernel(
 #
 # Backward-Euler tangent contribution (lumped isotropic):
 #
-#     A_ii  +=  +h² · k · I + h · k_d · I
-#     A_ij  +=  −h² · k · I       (one block per (i,j), one per (j,i))
+#     A_ii  +=  +(h² · k + h · k_d) · I
+#     A_ij  +=  −(h² · k + h · k_d) · I    (one block per (i,j), one per (j,i))
 #
 # Together this is a graph-Laplacian-style contribution: the constant mode
 # (rigid translation) is in the null space of the spring contribution, so
 # pure translations don't see spurious spring forces in the implicit step.
 # =====================================================================
 
+
 @wp.kernel
 def eval_springs(
-    x: wp.array(dtype=wp.vec3),
-    v: wp.array(dtype=wp.vec3),
-    spring_indices: wp.array(dtype=int),
-    spring_rest_lengths: wp.array(dtype=float),
-    spring_stiffness: wp.array(dtype=float),
-    spring_damping: wp.array(dtype=float),
-    f: wp.array(dtype=wp.vec3),
+    x: wp.array[wp.vec3],
+    v: wp.array[wp.vec3],
+    spring_indices: wp.array[int],
+    spring_rest_lengths: wp.array[float],
+    spring_stiffness: wp.array[float],
+    spring_damping: wp.array[float],
+    f: wp.array[wp.vec3],
 ):
     """Linear spring restoring + damping force on each endpoint."""
     tid = wp.tid()
@@ -403,16 +414,16 @@ def eval_springs(
 
 @wp.kernel
 def eval_springs_linear_and_torque(
-    x: wp.array(dtype=wp.vec3),
-    v: wp.array(dtype=wp.vec3),
-    spring_indices: wp.array(dtype=int),
-    spring_rest_lengths: wp.array(dtype=float),
-    spring_stiffness: wp.array(dtype=float),
-    spring_damping: wp.array(dtype=float),
-    spring_rest_direction: wp.array(dtype=wp.vec3),
+    x: wp.array[wp.vec3],
+    v: wp.array[wp.vec3],
+    spring_indices: wp.array[int],
+    spring_rest_lengths: wp.array[float],
+    spring_stiffness: wp.array[float],
+    spring_damping: wp.array[float],
+    spring_rest_direction: wp.array[wp.vec3],
     torque_stiffness: wp.float32,
     torque_damping: wp.float32,
-    f: wp.array(dtype=wp.vec3),
+    f: wp.array[wp.vec3],
 ):
     """Linear spring + torsional restoring force toward a per-spring rest direction.
 
@@ -454,7 +465,9 @@ def eval_springs_linear_and_torque(
     wp.atomic_add(f, j, fs)
 
     # --- Torque part (skip for zero rest direction) --------------
-    d0 = spring_rest_direction[tid]
+    # spring_rest_direction is baked as (V[hi] - V[lo])/|..| (lo→hi).
+    # d above is (xi - xj) = (x[lo] - x[hi])/l (hi→lo). Negate to align.
+    d0 = -spring_rest_direction[tid]
     if wp.length(d0) < 0.5:
         return
     dot_d_d0 = wp.clamp(wp.dot(d, d0), -1.0, 1.0)
@@ -474,24 +487,24 @@ def eval_springs_linear_and_torque(
 
 @wp.kernel
 def build_system_matrix_diagonal_kernel(
-    rows: wp.array(dtype=wp.int32),
-    cols: wp.array(dtype=wp.int32),
-    values: wp.array(dtype=wp.mat33f),
-    spring_indices: wp.array(dtype=int),
-    spring_stiffness: wp.array(dtype=wp.float32),
-    spring_damping: wp.array(dtype=wp.float32),
+    rows: wp.array[wp.int32],
+    cols: wp.array[wp.int32],
+    values: wp.array[wp.mat33f],
+    spring_indices: wp.array[int],
+    spring_stiffness: wp.array[wp.float32],
+    spring_damping: wp.array[wp.float32],
     dt: wp.float32,
-    mass: wp.float32,
+    particle_mass: wp.array[wp.float32],
     n_springs: wp.int32,
 ):
-    """Per-particle diagonal of A: ``A_ii = (mass + Σ_springs (h·d + h²·k))·I``.
+    """Per-particle diagonal of A: ``A_ii = (m_i + Σ_springs (h·d + h²·k))·I``.
 
     The off-diagonal counterpart ``A_ij = −(h·d + h²·k)·I`` lives in
     :func:`build_system_matrix_sparse_kernel`.
     """
     i = wp.tid()
     dt2 = dt * dt
-    diag = mass
+    diag = particle_mass[i]
     for s in range(n_springs):
         ia = spring_indices[s * 2 + 0]
         ja = spring_indices[s * 2 + 1]
@@ -506,12 +519,12 @@ def build_system_matrix_diagonal_kernel(
 
 @wp.kernel
 def build_system_matrix_sparse_kernel(
-    rows: wp.array(dtype=wp.int32),
-    cols: wp.array(dtype=wp.int32),
-    values: wp.array(dtype=wp.mat33f),
-    indices: wp.array(dtype=int),
-    spring_stiffness: wp.array(dtype=wp.float32),
-    spring_damping: wp.array(dtype=wp.float32),
+    rows: wp.array[wp.int32],
+    cols: wp.array[wp.int32],
+    values: wp.array[wp.mat33f],
+    indices: wp.array[int],
+    spring_stiffness: wp.array[wp.float32],
+    spring_damping: wp.array[wp.float32],
     dt: wp.float32,
     block_offset: wp.int32,
 ):
@@ -528,9 +541,15 @@ def build_system_matrix_sparse_kernel(
     d = spring_damping[tid]
     neg_off = -(dt * d + dt * dt * k)
     block_ij = wp.mat33f(
-        neg_off, 0.0, 0.0,
-        0.0, neg_off, 0.0,
-        0.0, 0.0, neg_off,
+        neg_off,
+        0.0,
+        0.0,
+        0.0,
+        neg_off,
+        0.0,
+        0.0,
+        0.0,
+        neg_off,
     )
     block_idx = block_offset + tid * 2
     rows[block_idx] = i
@@ -547,7 +566,7 @@ def build_system_matrix_sparse_kernel(
 #
 # Per-element strain energy density (Smith, De Goes & Kim 2018):
 #
-#     ψ(F) = ½·μ·(I_C − 3) − μ·log(I_C + 1) + ½·λ·(J − α)²
+#     ψ(F) = ½·μ·(I_C − 3) − ½·μ·log(I_C + 1) + ½·λ·(J − α)²
 #     α    = 1 + μ/λ − μ/(4·λ)              (rest correction → ψ(I) = 0)
 #     I_C  = ‖F‖²_F = trace(F^T F)
 #     J    = det(F)
@@ -576,15 +595,68 @@ def build_system_matrix_sparse_kernel(
 # blocks under large deformation; not yet applied (planned).
 # =====================================================================
 
+
+@wp.func
+def skew3(v: wp.vec3) -> wp.mat33:
+    """3×3 skew-symmetric matrix: skew3(v) · u == v × u."""
+    return wp.mat33(
+        0.0,
+        -v[2],
+        v[1],
+        v[2],
+        0.0,
+        -v[0],
+        -v[1],
+        v[0],
+        0.0,
+    )
+
+
+@wp.func
+def clamp_deformation_stretch(F: wp.mat33, min_stretch: float, max_stretch: float):
+    """Principal-stretch clamp on the deformation gradient.
+
+    Bounds the singular values (principal stretches) of ``F`` to
+    ``[min_stretch, max_stretch]`` and rebuilds ``F`` from the clamped values:
+    ``F ← U · diag(clamp(Σ)) · Vᵀ``. A positive ``min_stretch`` floors the
+    smallest stretch above zero, so an element can never invert (``det F ≤ 0``)
+    or collapse, and ``max_stretch`` caps run-away extension — the two states
+    that make the Neo-Hookean stress and its tangent blow up. The clamped ``F``
+    is then used for both the force and the Hessian so they stay consistent.
+
+    NOTE: this borrows the SVD-of-F framework popularised by invertible FEM
+    (Irving et al. 2004) but is NOT that method. Irving *admits* inversion (it
+    lets the smallest singular value go negative via a deliberate sign choice
+    and extrapolates the stress to push the element back out); this clamp
+    instead floors the stretches positive and forbids inversion outright —
+    simpler and more aggressive, trading physical fidelity for a hard
+    ``det F > 0`` guarantee.
+
+    Disabled (returns ``F`` unchanged) when either bound is negative. The
+    solver enables it by default with loose bounds that normal deformation
+    never reaches, so the clamp only engages on near-degenerate elements.
+    """
+    if min_stretch < 0.0 or max_stretch < 0.0:
+        return F
+    U = wp.mat33()
+    S = wp.vec3()
+    V = wp.mat33()
+    wp.svd3(F, U, S, V)
+    S = wp.max(wp.min(S, wp.vec3(max_stretch)), wp.vec3(min_stretch))
+    return U * wp.diag(S) * wp.transpose(V)
+
+
 @wp.kernel
 def eval_tetrahedra(
-    x: wp.array(dtype=wp.vec3),
-    v: wp.array(dtype=wp.vec3),
-    indices: wp.array2d(dtype=int),
-    pose: wp.array(dtype=wp.mat33),
-    activation: wp.array(dtype=float),
-    materials: wp.array2d(dtype=float),
-    f: wp.array(dtype=wp.vec3),
+    x: wp.array[wp.vec3],
+    v: wp.array[wp.vec3],
+    indices: wp.array2d[int],
+    pose: wp.array[wp.mat33],
+    activation: wp.array[float],
+    materials: wp.array2d[float],
+    min_stretch: float,
+    max_stretch: float,
+    f: wp.array[wp.vec3],
 ):
     """Stable Neo-Hookean tet force per node ``[N]``.
 
@@ -593,8 +665,12 @@ def eval_tetrahedra(
     changing the rest pose. Rayleigh damping is applied via the deformation
     gradient time derivative ``dF/dt`` and ``dJ/dt``.
 
-    ``J`` is clamped at ``J_MIN = 0.01`` to avoid the volumetric force
-    exploding when a tet inverts (``J < 0``) or collapses (``J → 0``).
+    When ``min_stretch``/``max_stretch`` are non-negative, the deformation
+    gradient is passed through :func:`clamp_deformation_stretch` first, so an
+    inverted or over-stretched tet can never drive the stress to blow up
+    (a principal-stretch clamp; see that function for how it relates to and
+    differs from invertible FEM, Irving et al. 2004). ``J`` is additionally
+    clamped at ``J_MIN = 0.01`` as a backstop when the stretch clamp is disabled.
     """
     tid = wp.tid()
 
@@ -644,6 +720,9 @@ def eval_tetrahedra(
 
     # F = Ds · Dm   and  dF/dt = (velocity-gradient-shape) · Dm.
     F = Ds * Dm
+    # Invertible-FEM stretch clamp (no-op unless both bounds are non-negative);
+    # keeps an inverted / over-stretched tet from blowing up the stress.
+    F = clamp_deformation_stretch(F, min_stretch, max_stretch)
     dFdt = wp.matrix_from_cols(v10, v20, v30) * Dm
 
     col1 = wp.vec3(F[0, 0], F[1, 0], F[2, 0])
@@ -674,7 +753,7 @@ def eval_tetrahedra(
     dJdx3 = wp.cross(x10, x20) * s
 
     f_volume = (J - alpha + act) * k_lambda
-    f_damp = (wp.dot(dJdx1, v1) + wp.dot(dJdx2, v2) + wp.dot(dJdx3, v3)) * k_damp
+    f_damp = (wp.dot(dJdx1, v10) + wp.dot(dJdx2, v20) + wp.dot(dJdx3, v30)) * k_damp
 
     f_total = f_volume + f_damp
 
@@ -693,32 +772,51 @@ def eval_tetrahedra(
 
 @wp.kernel
 def build_system_matrix_tet_kernel(
-    x: wp.array(dtype=wp.vec3),
-    indices: wp.array2d(dtype=int),
-    pose: wp.array(dtype=wp.mat33),
-    materials: wp.array2d(dtype=float),
+    x: wp.array[wp.vec3],
+    indices: wp.array2d[int],
+    pose: wp.array[wp.mat33],
+    materials: wp.array2d[float],
+    min_stretch: float,
+    max_stretch: float,
     dt: wp.float32,
     block_offset: wp.int32,
-    rows: wp.array(dtype=wp.int32),
-    cols: wp.array(dtype=wp.int32),
-    values: wp.array(dtype=wp.mat33f),
+    rows: wp.array[wp.int32],
+    cols: wp.array[wp.int32],
+    values: wp.array[wp.mat33f],
+    dirty: wp.array[wp.int32],
 ):
     """Per-tet Hessian: 4×4 = 16 nodal blocks of ``+h² · ∂²ψ/∂x_a∂x_b``.
 
-    Deviatoric: ``H_dev[a,b] = (dF/dx_a)^T · (∂²ψ/∂F²) · (dF/dx_b)`` with
-    ``∂²ψ/∂F²(B) = μ·s·B + (2μ/(I_C+1)²)·F·(F:B)`` and ``s = 1 − 1/(I_C+1)``.
+    Deviatoric (exact closed-form, not the incorrect dFdx matrix approximation):
 
-    Volumetric: ``H_vol[a,b] = λ · (dJ/dx_a) ⊗ (dJ/dx_b)`` (the ``(J−α)`` term
-    that would also appear is dropped here; near rest its contribution is
-    small. PSD projection of ``H`` is the planned next iteration).
+    .. code-block:: none
 
-    ``∂F/∂x_a`` packing: ``∂F/∂x_0 = −Dm`` (full matrix), ``∂F/∂x_1 = [Dm[:,0],
-    0, 0]``, ``∂F/∂x_2 = [0, Dm[:,1], 0]``, ``∂F/∂x_3 = [0, 0, Dm[:,2]]``.
+        K_dev[a,b][α,β] = k_mu·s·dot(Dm_row_a, Dm_row_b)·δ_{αβ}
+                         + (2·k_mu/(I_C+1)²)·(F·Dm_row_a)[α]·(F·Dm_row_b)[β]
+
+    where ``Dm_row_k = Dm[k-1, :]`` (k-th row of Dm) for nodes k=1,2,3, and
+    ``Dm_row_0 = −(Dm_row_1 + Dm_row_2 + Dm_row_3)`` (Newton's law: Σ=0).
+
+    Volumetric: ``H_vol[a,b] = λ · (dJ/dx_a) ⊗ (dJ/dx_b)`` (rank-1 PSD).
+
+    The geometric stiffness ``λ(J−α)·d²J/∂xₐ∂x_b = geo·skew3(w_ab)`` is
+    intentionally omitted.  Although its coefficient can be clamped to ≥0,
+    the skew-symmetric 3×3 blocks it contributes to off-diagonal entries
+    break the PSD property of the assembled 12×12 element Hessian and cause
+    BiCGStab/CG divergence for stiff or nearly-incompressible materials.
+    ``K_dev + K_vol`` alone is unconditionally PSD (proof: both quadratic
+    forms are non-negative for all displacement fields).
 
     Degenerate / inverted rest poses (``inv_rest_volume ≤ 0``) write zero
     blocks instead of NaN-propagating.
+
+    ``dirty[tid] == 0`` means the deformation gradient has not changed
+    enough since the last frame; the kernel returns early, leaving the
+    stale (but correct) triplet values in place.
     """
     tid = wp.tid()
+    if dirty[tid] == 0:
+        return
     i = indices[tid, 0]
     j = indices[tid, 1]
     k = indices[tid, 2]
@@ -755,11 +853,13 @@ def build_system_matrix_tet_kernel(
         return
     rest_volume = 1.0 / inv_rest_volume
 
-    alpha = 1.0 + k_mu / k_lambda - k_mu / (4.0 * k_lambda)
     k_mu = k_mu * rest_volume
     k_lambda = k_lambda * rest_volume
 
     F = Ds * Dm
+    # Same principal-stretch clamp as the force kernel, so the tangent is
+    # built from the same (clamped) F and stays consistent with the force.
+    F = clamp_deformation_stretch(F, min_stretch, max_stretch)
     col1 = wp.vec3(F[0, 0], F[1, 0], F[2, 0])
     col2 = wp.vec3(F[0, 1], F[1, 1], F[2, 1])
     col3 = wp.vec3(F[0, 2], F[1, 2], F[2, 2])
@@ -769,83 +869,111 @@ def build_system_matrix_tet_kernel(
     s = 1.0 - 1.0 / Ic1
     coef = k_mu * 2.0 / (Ic1 * Ic1)
 
-    # ∂F/∂x_a: per-node 3×3 derivatives.
-    dFdx0 = wp.mat33(
-        -Dm[0, 0], -Dm[0, 1], -Dm[0, 2],
-        -Dm[1, 0], -Dm[1, 1], -Dm[1, 2],
-        -Dm[2, 0], -Dm[2, 1], -Dm[2, 2],
-    )
-    dFdx1 = wp.mat33(Dm[0, 0], 0.0, 0.0, Dm[1, 0], 0.0, 0.0, Dm[2, 0], 0.0, 0.0)
-    dFdx2 = wp.mat33(0.0, Dm[0, 1], 0.0, 0.0, Dm[1, 1], 0.0, 0.0, Dm[2, 1], 0.0)
-    dFdx3 = wp.mat33(0.0, 0.0, Dm[0, 2], 0.0, 0.0, Dm[1, 2], 0.0, 0.0, Dm[2, 2])
-
     # ∂J/∂x_a: per-node gradient of det(F).
-    J = wp.determinant(F)
-    J_MIN = 0.01
-    J = wp.max(J, J_MIN)
     s_vol = inv_rest_volume / 6.0
     dJdx1 = wp.cross(x20, x30) * s_vol
     dJdx2 = wp.cross(x30, x10) * s_vol
     dJdx3 = wp.cross(x10, x20) * s_vol
     dJdx0 = -(dJdx1 + dJdx2 + dJdx3)
 
-    dFdx = wp.mat33()
+    # Per-node Dm row vectors for the correct deviatoric Hessian.
+    #
+    # From the chain rule, ∂F[i,j]/∂(x_a)_α = δ_{i,α} · Dm_row_a[j], so the
+    # exact 3×3 deviatoric block is:
+    #
+    #   K_dev[a,b][α,β] = k_mu·s·dot(Dm_row_a, Dm_row_b)·δ_{αβ}
+    #                    + coef·(F·Dm_row_a)[α]·(F·Dm_row_b)[β]
+    #
+    # Node 0 is the reference: its Dm_row is minus the sum of the other three
+    # (Newton's law: Σ_a ∂F/∂x_a = 0).
+    dm_row_1 = wp.vec3(Dm[0, 0], Dm[0, 1], Dm[0, 2])
+    dm_row_2 = wp.vec3(Dm[1, 0], Dm[1, 1], Dm[1, 2])
+    dm_row_3 = wp.vec3(Dm[2, 0], Dm[2, 1], Dm[2, 2])
+    dm_row_0 = -(dm_row_1 + dm_row_2 + dm_row_3)
+
+    # F·Dm_row_a — one matrix-vector product per node (vec3).
+    F_dm_0 = F * dm_row_0
+    F_dm_1 = F * dm_row_1
+    F_dm_2 = F * dm_row_2
+    F_dm_3 = F * dm_row_3
+
     dJdx = wp.vec3()
+    dm_row_a = wp.vec3()
+    F_dm_a = wp.vec3()
 
     # Per-tet rest volume is already folded into k_mu / k_lambda above, so
     # the global scale is just +h². Sign is + because we want to add
     # ``+h²·H_pot`` to ``A``.
     scale = dt * dt
 
+    # The geometric stiffness λ(J−α)·d²J/∂xₐ∂x_b = geo·skew3(w_ab) is dropped.
+    # skew3 is antisymmetric, so those off-diagonal blocks break the PSD property
+    # of the full 12×12 element Hessian even when the coefficient is positive.
+    # K_dev + K_vol alone is provably PSD for all F (proof in the module docstring).
     for a in range(4):
         if a == 0:
-            dFdx = dFdx0
             dJdx = dJdx0
+            dm_row_a = dm_row_0
+            F_dm_a = F_dm_0
         elif a == 1:
-            dFdx = dFdx1
             dJdx = dJdx1
+            dm_row_a = dm_row_1
+            F_dm_a = F_dm_1
         elif a == 2:
-            dFdx = dFdx2
             dJdx = dJdx2
+            dm_row_a = dm_row_2
+            F_dm_a = F_dm_2
         else:
-            dFdx = dFdx3
             dJdx = dJdx3
+            dm_row_a = dm_row_3
+            F_dm_a = F_dm_3
         for b in range(4):
+            dJdx_b = wp.vec3()
+            dm_row_b = wp.vec3()
+            F_dm_b = wp.vec3()
             if b == 0:
-                dFdx_b = dFdx0
                 dJdx_b = dJdx0
+                dm_row_b = dm_row_0
+                F_dm_b = F_dm_0
             elif b == 1:
-                dFdx_b = dFdx1
                 dJdx_b = dJdx1
+                dm_row_b = dm_row_1
+                F_dm_b = F_dm_1
             elif b == 2:
-                dFdx_b = dFdx2
                 dJdx_b = dJdx2
+                dm_row_b = dm_row_2
+                F_dm_b = F_dm_2
             else:
-                dFdx_b = dFdx3
                 dJdx_b = dJdx3
+                dm_row_b = dm_row_3
+                F_dm_b = F_dm_3
 
-            # Deviatoric: H_dev[a,b] = (dFdx_a)^T · (∂²ψ/∂F²)(dFdx_b).
-            #   ∂²ψ/∂F²(B) = μ·s·B + coef·F·(F:B), with coef = 2μ/(I_C+1)².
-            F_dot_dF_b = F[0, 0] * dFdx_b[0, 0] + F[0, 1] * dFdx_b[0, 1] + F[0, 2] * dFdx_b[0, 2]
-            F_dot_dF_b += F[1, 0] * dFdx_b[1, 0] + F[1, 1] * dFdx_b[1, 1] + F[1, 2] * dFdx_b[1, 2]
-            F_dot_dF_b += F[2, 0] * dFdx_b[2, 0] + F[2, 1] * dFdx_b[2, 1] + F[2, 2] * dFdx_b[2, 2]
-            dP_dF_dFdx_b = wp.mat33(
-                k_mu * s * dFdx_b[0, 0] + coef * F[0, 0] * F_dot_dF_b, k_mu * s * dFdx_b[0, 1] + coef * F[0, 1] * F_dot_dF_b, k_mu * s * dFdx_b[0, 2] + coef * F[0, 2] * F_dot_dF_b,
-                k_mu * s * dFdx_b[1, 0] + coef * F[1, 0] * F_dot_dF_b, k_mu * s * dFdx_b[1, 1] + coef * F[1, 1] * F_dot_dF_b, k_mu * s * dFdx_b[1, 2] + coef * F[1, 2] * F_dot_dF_b,
-                k_mu * s * dFdx_b[2, 0] + coef * F[2, 0] * F_dot_dF_b, k_mu * s * dFdx_b[2, 1] + coef * F[2, 1] * F_dot_dF_b, k_mu * s * dFdx_b[2, 2] + coef * F[2, 2] * F_dot_dF_b,
-            )
-            K_dev_ab = wp.transpose(dFdx) * dP_dF_dFdx_b
+            # Deviatoric: K_dev[a,b] = k_mu·s·dot(Dm_row_a,Dm_row_b)·I
+            #                         + coef·(F·Dm_row_a)⊗(F·Dm_row_b).
+            dot_ab = wp.dot(dm_row_a, dm_row_b)
+            K_dev_ab = wp.identity(n=3, dtype=float) * (k_mu * s * dot_ab) + wp.outer(F_dm_a, F_dm_b) * coef
 
-            # Volumetric: H_vol[a,b] = λ · (dJ/dx_a) ⊗ (dJ/dx_b).
-            K_vol_ab = wp.outer(dJdx, dJdx) * k_lambda
+            # Volumetric rank-1: H_vol[a,b] = λ · (dJ/dx_a) ⊗ (dJ/dx_b).
+            K_vol_ab = wp.outer(dJdx, dJdx_b) * k_lambda
 
+            # geo_coeff == 0: K_geo_ab is dropped (see comment above).
             K_ab = (K_dev_ab + K_vol_ab) * scale
             row_a = i if a == 0 else (j if a == 1 else (k if a == 2 else l))
             col_b = i if b == 0 else (j if b == 1 else (k if b == 2 else l))
             blk = block_offset + tid * 16 + a * 4 + b
             rows[blk] = row_a
             cols[blk] = col_b
-            values[blk] = wp.mat33f(K_ab[0, 0], K_ab[0, 1], K_ab[0, 2], K_ab[1, 0], K_ab[1, 1], K_ab[1, 2], K_ab[2, 0], K_ab[2, 1], K_ab[2, 2])
+            values[blk] = wp.mat33f(
+                K_ab[0, 0],
+                K_ab[0, 1],
+                K_ab[0, 2],
+                K_ab[1, 0],
+                K_ab[1, 1],
+                K_ab[1, 2],
+                K_ab[2, 0],
+                K_ab[2, 1],
+                K_ab[2, 2],
+            )
 
 
 # =====================================================================
@@ -860,8 +988,8 @@ def build_system_matrix_tet_kernel(
 #     plus an area-preservation constraint  c = area/area_rest − 1 + act
 #
 # The matrix kernel uses the lumped Baraff–Witkin tangent
-# ``+h² · (μ + λ) · area / 3`` per vertex on the diagonal — coarse but PSD
-# by construction.
+# ``+h² · (μ + λ) · area_rest / 3`` per vertex on the diagonal (rest area, as
+# the Lamé parameters are folded with it) — coarse but PSD by construction.
 #
 # Edge bending uses a dihedral-angle force (Bridson-style discrete bending):
 #
@@ -870,15 +998,16 @@ def build_system_matrix_tet_kernel(
 # The bending tangent is not in ``A``: bending is treated explicitly.
 # =====================================================================
 
+
 @wp.kernel
 def eval_triangles(
-    x: wp.array(dtype=wp.vec3),
-    v: wp.array(dtype=wp.vec3),
-    indices: wp.array2d(dtype=int),
-    pose: wp.array(dtype=wp.mat22),
-    activation: wp.array(dtype=float),
-    materials: wp.array2d(dtype=float),
-    f: wp.array(dtype=wp.vec3),
+    x: wp.array[wp.vec3],
+    v: wp.array[wp.vec3],
+    indices: wp.array2d[int],
+    pose: wp.array[wp.mat22],
+    activation: wp.array[float],
+    materials: wp.array2d[float],
+    f: wp.array[wp.vec3],
 ):
     """Triangle membrane force ``[N]`` (deviatoric + area + drag/lift)."""
     tid = wp.tid()
@@ -970,21 +1099,22 @@ def eval_triangles(
 
 @wp.kernel
 def build_system_matrix_tri_kernel(
-    x: wp.array(dtype=wp.vec3),
-    indices: wp.array2d(dtype=int),
-    pose: wp.array(dtype=wp.mat22),
-    materials: wp.array2d(dtype=float),
+    indices: wp.array2d[int],
+    pose: wp.array[wp.mat22],
+    materials: wp.array2d[float],
     dt: wp.float32,
     block_offset: wp.int32,
-    rows: wp.array(dtype=wp.int32),
-    cols: wp.array(dtype=wp.int32),
-    values: wp.array(dtype=wp.mat33f),
+    rows: wp.array[wp.int32],
+    cols: wp.array[wp.int32],
+    values: wp.array[wp.mat33f],
 ):
-    """Lumped triangle tangent: ``A_ii += +h²·(μ + λ)·area/3·I`` per vertex.
+    """Lumped triangle tangent: ``A_ii += +h²·(μ + λ)·area_rest/3·I`` per vertex.
 
     Baraff–Witkin lumping: a coarse approximation that is diagonal-PSD by
-    construction (no per-element eigendecomposition needed). Skips
-    degenerate triangles by writing zero blocks.
+    construction (no per-element eigendecomposition needed). Depends only on
+    rest geometry (``pose``) and material constants — position-independent, so
+    this kernel runs once at construction, not every frame. Skips degenerate
+    triangles by writing zero blocks.
     """
     tid = wp.tid()
     i = indices[tid, 0]
@@ -994,11 +1124,6 @@ def build_system_matrix_tri_kernel(
     k_mu = materials[tid, 0]
     k_lambda = materials[tid, 1]
 
-    x0 = x[i]
-    x1 = x[j]
-    x2 = x[k]
-    x10 = x1 - x0
-    x20 = x2 - x0
     Dm = pose[tid]
     det_Dm = wp.determinant(Dm)
     inv_rest_area = det_Dm * 2.0
@@ -1033,88 +1158,6 @@ def build_system_matrix_tri_kernel(
     values[block_offset + tid * 3 + 2] = block
 
 
-@wp.kernel
-def eval_bending(
-    x: wp.array(dtype=wp.vec3),
-    v: wp.array(dtype=wp.vec3),
-    indices: wp.array2d(dtype=int),
-    rest: wp.array(dtype=float),
-    bending_properties: wp.array2d(dtype=float),
-    f: wp.array(dtype=wp.vec3),
-):
-    """Edge dihedral-angle bending force ``[N]``.
-
-    For each shared edge (vertices 3-4 with adjacent triangles 1-3-4 and
-    2-3-4) computes the dihedral angle ``θ`` between the two face normals,
-    its rate ``θ̇`` from velocities, and applies
-
-        f_a = −e_length · (k_e · (θ − θ_rest) + k_d · θ̇) · ∂θ/∂x_a
-
-    on the four involved vertices. Treats degenerate triangles or edges as
-    inactive.
-    """
-    tid = wp.tid()
-    eps = 1.0e-6
-
-    ke = bending_properties[tid, 0]
-    kd = bending_properties[tid, 1]
-
-    i = indices[tid, 0]
-    j = indices[tid, 1]
-    k = indices[tid, 2]
-    l = indices[tid, 3]
-
-    if i == -1 or j == -1 or k == -1 or l == -1:
-        return
-
-    rest_angle = rest[tid]
-
-    x1 = x[i]
-    x2 = x[j]
-    x3 = x[k]
-    x4 = x[l]
-
-    v1 = v[i]
-    v2 = v[j]
-    v3 = v[k]
-    v4 = v[l]
-
-    n1 = wp.cross(x3 - x1, x4 - x1)
-    n2 = wp.cross(x4 - x2, x3 - x2)
-    e = x4 - x3
-
-    n1_length = wp.length(n1)
-    n2_length = wp.length(n2)
-    e_length = wp.length(e)
-
-    if n1_length < eps or n2_length < eps or e_length < eps:
-        return
-
-    n1 = n1 / n1_length
-    n2 = n2 / n2_length
-    e_hat = e / e_length
-
-    cos_theta = wp.dot(n1, n2)
-    sin_theta = wp.dot(wp.cross(n1, n2), e_hat)
-    theta = wp.atan2(sin_theta, cos_theta)
-
-    d1 = n1 * e_length
-    d2 = n2 * e_length
-    d3 = n1 * wp.dot(x1 - x4, e_hat) + n2 * wp.dot(x2 - x4, e_hat)
-    d4 = n1 * wp.dot(x3 - x1, e_hat) + n2 * wp.dot(x3 - x2, e_hat)
-
-    f_elastic = ke * (theta - rest_angle)
-    f_damp = kd * (wp.dot(d1, v1) + wp.dot(d2, v2) + wp.dot(d3, v3) + wp.dot(d4, v4))
-
-    f_total = -e_length * (f_elastic + f_damp)
-
-    wp.atomic_add(f, i, d1 * f_total)
-    wp.atomic_add(f, j, d2 * f_total)
-    wp.atomic_add(f, k, d3 * f_total)
-    wp.atomic_add(f, l, d4 * f_total)
-
-
-# =====================================================================
 # 7. Particle-particle interactions (hash grid)
 # =====================================================================
 #
@@ -1122,6 +1165,7 @@ def eval_bending(
 # cells in the hash grid and applies a penalty + Coulomb-friction force.
 # Skipped entirely for FEM-only meshes (where ``model.particle_grid is None``).
 # =====================================================================
+
 
 @wp.func
 def particle_force(n: wp.vec3, v: wp.vec3, c: float, k_n: float, k_d: float, k_f: float, k_mu: float):
@@ -1152,10 +1196,10 @@ def particle_force(n: wp.vec3, v: wp.vec3, c: float, k_n: float, k_d: float, k_f
 @wp.kernel
 def eval_particle_forces(
     grid: wp.uint64,
-    particle_x: wp.array(dtype=wp.vec3),
-    particle_v: wp.array(dtype=wp.vec3),
-    particle_radius: wp.array(dtype=float),
-    particle_flags: wp.array(dtype=wp.int32),
+    particle_x: wp.array[wp.vec3],
+    particle_v: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    particle_flags: wp.array[wp.int32],
     k_contact: float,
     k_damp: float,
     k_friction: float,
@@ -1163,7 +1207,7 @@ def eval_particle_forces(
     k_cohesion: float,
     max_radius: float,
     # outputs
-    particle_f: wp.array(dtype=wp.vec3),
+    particle_f: wp.array[wp.vec3],
 ):
     """Aggregate per-particle force from hash-grid neighbour pairs ``[N]``."""
     tid = wp.tid()
@@ -1187,6 +1231,8 @@ def eval_particle_forces(
         if (particle_flags[index] & PARTICLE_FLAG_ACTIVE) != 0 and index != i:
             n = x - particle_x[index]
             d = wp.length(n)
+            if d < 1.0e-10:  # co-located vertices (e.g. glued seam) — skip
+                continue
             err = d - radius - particle_radius[index]
             if err <= k_cohesion:
                 n = n / d
@@ -1204,25 +1250,27 @@ def eval_particle_forces(
 #
 # * Analytic ground plane n·x + d = 0 — penalty + Coulomb.
 # * Force-based soft-rigid contact from ``model.collide(state)`` output.
-# * Constraint-based (XPBD-style) post-integration position projection
+# * Constraint-based PBD-style post-integration position projection (relaxed
+#   Gauss–Seidel; no XPBD compliance term or running Lagrange multiplier)
 #   with per-particle / per-body delta accumulation; the
 #   ``apply_particle_corrections`` kernel applies the deltas with clamps.
 # =====================================================================
 
+
 @wp.kernel
 def eval_particle_ground_contacts(
-    particle_x: wp.array(dtype=wp.vec3),
-    particle_v: wp.array(dtype=wp.vec3),
-    particle_radius: wp.array(dtype=float),
-    particle_inv_mass: wp.array(dtype=float),
-    particle_flags: wp.array(dtype=wp.int32),
+    particle_x: wp.array[wp.vec3],
+    particle_v: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    particle_inv_mass: wp.array[float],
+    particle_flags: wp.array[wp.int32],
     ke: float,
     kd: float,
     kf: float,
     mu: float,
-    ground: wp.array(dtype=float),
-    gravity_world0: wp.array(dtype=wp.vec3),
-    f: wp.array(dtype=wp.vec3),
+    ground: wp.array[float],
+    gravity_world0: wp.array[wp.vec3],
+    f: wp.array[wp.vec3],
 ):
     """Analytic ground-plane contact: penalty + Coulomb friction ``[N]``.
 
@@ -1277,19 +1325,19 @@ def eval_particle_ground_contacts(
 
 @wp.kernel
 def eval_soft_contacts(
-    particle_x: wp.array(dtype=wp.vec3),
-    particle_v: wp.array(dtype=wp.vec3),
-    soft_contact_count: wp.array(dtype=wp.int32),
-    soft_contact_particle: wp.array(dtype=int),
-    soft_contact_body_pos: wp.array(dtype=wp.vec3),
-    soft_contact_body_vel: wp.array(dtype=wp.vec3),
-    soft_contact_normal: wp.array(dtype=wp.vec3),
+    particle_x: wp.array[wp.vec3],
+    particle_v: wp.array[wp.vec3],
+    soft_contact_count: wp.array[wp.int32],
+    soft_contact_particle: wp.array[int],
+    soft_contact_body_pos: wp.array[wp.vec3],
+    soft_contact_body_vel: wp.array[wp.vec3],
+    soft_contact_normal: wp.array[wp.vec3],
     ke: float,
     kd: float,
     kf: float,
     mu: float,
-    particle_radius: wp.array(dtype=float),
-    f: wp.array(dtype=wp.vec3),
+    particle_radius: wp.array[float],
+    f: wp.array[wp.vec3],
 ):
     """Force-based soft-rigid contact from the collision pipeline output ``[N]``.
 
@@ -1341,280 +1389,6 @@ def eval_soft_contacts(
         wp.atomic_add(f, particle_idx, force)
 
 
-@wp.kernel
-def solve_soft_contacts_constraint(
-    particle_x: wp.array(dtype=wp.vec3),
-    particle_v: wp.array(dtype=wp.vec3),
-    particle_invmass: wp.array(dtype=float),
-    particle_radius: wp.array(dtype=float),
-    particle_flags: wp.array(dtype=wp.int32),
-    body_q: wp.array(dtype=wp.transform),
-    body_qd: wp.array(dtype=wp.spatial_vector),
-    body_com: wp.array(dtype=wp.vec3),
-    body_m_inv: wp.array(dtype=float),
-    body_I_inv: wp.array(dtype=wp.mat33),
-    shape_body: wp.array(dtype=int),
-    shape_material_mu: wp.array(dtype=float),
-    particle_friction: wp.array(dtype=float),
-    particle_ka: float,
-    soft_contact_count: wp.array(dtype=wp.int32),
-    soft_contact_particle: wp.array(dtype=int),
-    soft_contact_shape: wp.array(dtype=int),
-    soft_contact_body_pos: wp.array(dtype=wp.vec3),
-    soft_contact_body_vel: wp.array(dtype=wp.vec3),
-    soft_contact_normal: wp.array(dtype=wp.vec3),
-    contact_max: int,
-    dt: float,
-    relaxation: float,
-    # outputs
-    delta: wp.array(dtype=wp.vec3),
-    body_delta: wp.array(dtype=wp.spatial_vector),
-):
-    """XPBD-style constraint solve for soft-rigid contacts.
-
-    Computes per-particle position deltas (and rigid-body spatial deltas)
-    that prevent penetration. Preventive: kicks in when ``c < particle_ka``
-    rather than waiting for deep penetration like the force-based path.
-    Apply with :func:`apply_particle_corrections`.
-
-    Coulomb friction in constraint form: tangential correction magnitude
-    is bounded by ``μ · |normal_correction|``.
-    """
-    tid = wp.tid()
-
-    count = min(contact_max, soft_contact_count[0])
-    if tid >= count:
-        return
-
-    shape_index = soft_contact_shape[tid]
-    body_index = shape_body[shape_index]
-    particle_index = soft_contact_particle[tid]
-
-    if (particle_flags[particle_index] & 1) == 0:  # PARTICLE_FLAG_ACTIVE = 1
-        return
-
-    px = particle_x[particle_index]
-    pv = particle_v[particle_index]
-
-    # Body transform (identity if static / ground).
-    X_wb = wp.transform_identity()
-    X_com = wp.vec3()
-    if body_index >= 0:
-        X_wb = body_q[body_index]
-        X_com = body_com[body_index]
-
-    bx = wp.transform_point(X_wb, soft_contact_body_pos[tid])
-    r = bx - wp.transform_point(X_wb, X_com)
-
-    n = soft_contact_normal[tid]
-    c = wp.dot(n, px - bx) - particle_radius[particle_index]
-
-    # Preventive engagement: act before deep penetration.
-    if c > particle_ka:
-        return
-
-    # Use shape friction so per-shape μ from builder is honored.
-    mu = shape_material_mu[shape_index]
-
-    # Body velocity at the contact point.
-    body_v_s = wp.spatial_vector()
-    if body_index >= 0:
-        body_v_s = body_qd[body_index]
-    body_w = wp.spatial_bottom(body_v_s)
-    body_v = wp.spatial_top(body_v_s)
-    bv = body_v + wp.cross(body_w, r) + wp.transform_vector(X_wb, soft_contact_body_vel[tid])
-
-    v = pv - bv
-
-    # Normal correction (capped to 3·radius to avoid catastrophic step).
-    max_n = 3.0 * particle_radius[particle_index]
-    lambda_n = wp.max(c, -max_n)
-    delta_n = n * lambda_n
-
-    vn = wp.dot(n, v)
-    vt = v - n * vn
-
-    # Effective inverse mass (particle + lever-arm-projected body inertia).
-    w1 = particle_invmass[particle_index]
-    w2 = 0.0
-    if body_index >= 0:
-        angular = wp.cross(r, n)
-        q = wp.transform_get_rotation(X_wb)
-        rot_angular = wp.quat_rotate_inv(q, angular)
-        I_inv = body_I_inv[body_index]
-        w2 = body_m_inv[body_index] + wp.dot(rot_angular, I_inv * rot_angular)
-    denom = w1 + w2
-    if denom == 0.0:
-        return
-
-    # Coulomb cap: |λ_f| ≤ μ · |λ_n|.
-    penetration = wp.max(-lambda_n, 0.0)
-    friction_cap = mu * penetration
-    lambda_f = wp.max(-friction_cap, -wp.length(vt) * dt)
-    if wp.length(vt) > 1e-6:
-        delta_f = wp.normalize(vt) * lambda_f
-    else:
-        delta_f = wp.vec3(0.0)
-
-    # Total correction; relax to avoid overshoot.
-    delta_total = (delta_f - delta_n) / denom * relaxation
-
-    # Particle correction weighted by inverse mass.
-    wp.atomic_add(delta, particle_index, w1 * delta_total)
-
-    # Reaction onto the body (Newton's third law) as a spatial vector.
-    if body_index >= 0:
-        delta_t = wp.cross(r, delta_total)
-        wp.atomic_sub(body_delta, body_index, wp.spatial_vector(delta_total, delta_t))
-
-
-@wp.kernel
-def accumulate_body_force_from_constraint_delta(
-    body_deltas: wp.array(dtype=wp.spatial_vector),
-    body_inv_mass: wp.array(dtype=float),
-    inv_dt2: float,
-    # in/out (one thread per body, no race):
-    body_f: wp.array(dtype=wp.spatial_vector),
-):
-    """Convert XPBD-style body position-correction deltas into forces and
-    accumulate into the input state's ``body_f``.
-
-    ``body_deltas[b]`` is what :func:`solve_soft_contacts_constraint` writes
-    via ``atomic_sub``; each spatial-vector entry has units of ``m·kg``
-    (top: linear Lagrange-multiplier × inverse-mass-weighted, bottom:
-    angular cross-arm-projected). Dividing by ``dt²`` converts to Newtons /
-    Newton-metres. Accumulating across the 48 contact iterations gives the
-    integrated reaction force the rigid solver should see.
-
-    Skipped for static / kinematic bodies (``inv_m == 0``) so the kinematic
-    stem stays prescribed and the ground stays at infinity.
-
-    Why force, not direct ``body_q`` write: in the dual-solver simulate
-    loop the rigid solver (XPBD or MuJoCo) reads ``state_in.body_q`` and
-    writes ``state_rigid.body_q``; whatever the inflatable solver writes
-    to ``state_out.body_q`` is then *overwritten* by the merge step. So
-    the soft-rigid reaction has to flow through ``body_f`` (a force the
-    rigid solver consumes during its own step), the same channel the
-    glue's :meth:`apply_reaction_to_body` uses.
-    """
-    bid = wp.tid()
-    if body_inv_mass[bid] == 0.0:
-        return
-    delta = body_deltas[bid]
-    f_lin = wp.spatial_top(delta) * inv_dt2
-    f_ang = wp.spatial_bottom(delta) * inv_dt2
-    cur = body_f[bid]
-    cur_lin = wp.spatial_top(cur)
-    cur_ang = wp.spatial_bottom(cur)
-    body_f[bid] = wp.spatial_vector(cur_lin + f_lin, cur_ang + f_ang)
-
-
-@wp.kernel
-def apply_body_corrections(
-    body_inv_mass: wp.array(dtype=float),
-    body_inv_inertia: wp.array(dtype=wp.mat33),
-    body_deltas: wp.array(dtype=wp.spatial_vector),
-    dt: float,
-    # in/out (one thread per body, no race):
-    body_q: wp.array(dtype=wp.transform),
-    body_qd: wp.array(dtype=wp.spatial_vector),
-):
-    """Apply ``body_deltas`` from :func:`solve_soft_contacts_constraint` to
-    each dynamic rigid body's pose and velocity (Newton's 3rd-law reaction
-    from soft-rigid contacts).
-
-    ``body_deltas[b]`` is a spatial vector with ``top = -delta_total`` and
-    ``bottom = -cross(r, delta_total)`` accumulated atomically per contact.
-    Multiplying by ``inv_m`` / applying ``inv_I`` recovers the linear /
-    angular position correction; the velocity update is ``correction / dt``
-    per the PBD position-to-velocity convention. Skipped for static or
-    kinematic bodies (``inv_m == 0``) so the kinematic stem stays prescribed.
-
-    Without this pass, the constraint-contact projection updates only the
-    soft particles — the rigid body never feels the equal-and-opposite
-    force, and free dynamic bodies (e.g. a ball squeezed by a soft gripper)
-    don't move regardless of grip force.
-    """
-    bid = wp.tid()
-    inv_m = body_inv_mass[bid]
-    if inv_m == 0.0:
-        return
-    inv_I = body_inv_inertia[bid]
-
-    delta = body_deltas[bid]
-    dlin = wp.spatial_top(delta) * inv_m
-    dang_world = wp.spatial_bottom(delta)
-
-    tf = body_q[bid]
-    p0 = wp.transform_get_translation(tf)
-    q0 = wp.transform_get_rotation(tf)
-
-    # Angular: rotate dang into body frame, apply inv_I, rotate back to world.
-    dang_body = wp.quat_rotate_inv(q0, dang_world)
-    dw_body = inv_I * dang_body
-    dw_world = wp.quat_rotate(q0, dw_body)
-
-    # Position update.
-    p1 = p0 + dlin
-
-    # Quaternion update: q_new = normalize(q + 0.5 · (dw·dt, 0) · q).
-    dq = wp.quat(dw_world * dt, 0.0)
-    q1 = wp.normalize(q0 + 0.5 * dq * q0)
-
-    body_q[bid] = wp.transform(p1, q1)
-
-    # Velocity update: v += dlin / dt, w += dw.
-    v0 = wp.spatial_top(body_qd[bid])
-    w0 = wp.spatial_bottom(body_qd[bid])
-    v1 = v0 + dlin / dt
-    w1 = w0 + dw_world
-    body_qd[bid] = wp.spatial_vector(v1, w1)
-
-
-@wp.kernel
-def apply_particle_corrections(
-    x_current: wp.array(dtype=wp.vec3),
-    v_current: wp.array(dtype=wp.vec3),
-    delta: wp.array(dtype=wp.vec3),
-    particle_flags: wp.array(dtype=wp.int32),
-    dt: float,
-    v_max: float,
-    max_correction: float,
-    x_out: wp.array(dtype=wp.vec3),
-    v_out: wp.array(dtype=wp.vec3),
-):
-    """Apply XPBD-style position deltas with stability clamps.
-
-    ``x_new = x + clamp(δ, max_correction)``,
-    ``v_new = clamp(v + δ/dt, v_max)``.
-
-    The position-clamp prevents single-step explosions on stiff penalties;
-    the velocity-clamp keeps post-correction velocity bounded.
-    """
-    tid = wp.tid()
-    if (particle_flags[tid] & PARTICLE_FLAG_ACTIVE) == 0:
-        return
-
-    xp = x_current[tid]
-    vp = v_current[tid]
-    d = delta[tid]
-
-    d_mag = wp.length(d)
-    if d_mag > max_correction and d_mag > 1.0e-9:
-        d = d * (max_correction / d_mag)
-
-    x_new = xp + d
-    v_new = vp + d / dt
-    v_new_mag = wp.length(v_new)
-    if v_new_mag > v_max:
-        v_new = v_new * (v_max / v_new_mag)
-
-    x_out[tid] = x_new
-    v_out[tid] = v_new
-
-
-
-
 # =====================================================================
 # 9. Gravity
 # =====================================================================
@@ -1623,19 +1397,42 @@ def apply_particle_corrections(
 # CUDA-graph capture (``model.gravity.numpy()`` would break capture).
 # =====================================================================
 
+
 @wp.kernel
 def eval_gravity_from_array(
-    gravity: wp.array(dtype=wp.vec3),
-    mass: wp.float32,
-    particle_flags: wp.array(dtype=wp.int32),
-    forces: wp.array(dtype=wp.vec3),
+    gravity: wp.array[wp.vec3],
+    particle_mass: wp.array[wp.float32],
+    particle_flags: wp.array[wp.int32],
+    forces: wp.array[wp.vec3],
 ):
-    """Per-particle gravity ``f = mass · g`` ``[N]`` for active particles."""
+    """Per-particle gravity ``f = m_i · g`` ``[N]`` for active particles."""
     tid = wp.tid()
     if (particle_flags[tid] & PARTICLE_FLAG_ACTIVE) == 0:
         return
     g = gravity[0]
-    forces[tid] = wp.vec3(g[0] * mass, g[1] * mass, g[2] * mass)
+    m = particle_mass[tid]
+    forces[tid] = wp.vec3(g[0] * m, g[1] * m, g[2] * m)
+
+
+@wp.kernel
+def eval_linear_damping_kernel(
+    particle_v: wp.array[wp.vec3],
+    particle_mass: wp.array[wp.float32],
+    particle_flags: wp.array[wp.int32],
+    alpha: wp.float32,
+    forces: wp.array[wp.vec3],
+):
+    """Mass-proportional Rayleigh damping ``f = −α · m_i · v_i`` [N].
+
+    Provides rigid-body velocity damping (translation + rotation) that the
+    FEM volumetric term cannot supply — the latter only damps deformation-rate,
+    not rigid motion.  The explicit force ``−α·m·v`` is unconditionally stable
+    for ``h·α ≪ 1`` (typically α ≤ 5 s⁻¹ at h = 1.67 ms).
+    """
+    tid = wp.tid()
+    if (particle_flags[tid] & PARTICLE_FLAG_ACTIVE) == 0:
+        return
+    forces[tid] = -alpha * particle_mass[tid] * particle_v[tid]
 
 
 # =====================================================================
@@ -1656,11 +1453,12 @@ def eval_gravity_from_array(
 # host-side telemetry methods on ``SolverInflatable``.
 # =====================================================================
 
+
 @wp.kernel
 def scale_spring_rest_lengths_kernel(
-    original_rest_lengths: wp.array(dtype=wp.float32),
+    original_rest_lengths: wp.array[wp.float32],
     scale: wp.float32,
-    scaled_rest_lengths: wp.array(dtype=wp.float32),
+    scaled_rest_lengths: wp.array[wp.float32],
 ):
     """Per-spring scalar scale: ``L₀ ← L₀_orig · cbrt(p)``."""
     sid = wp.tid()
@@ -1669,9 +1467,9 @@ def scale_spring_rest_lengths_kernel(
 
 @wp.kernel
 def scale_tet_poses_kernel(
-    original_poses: wp.array(dtype=wp.mat33),
+    original_poses: wp.array[wp.mat33],
     scale: wp.float32,
-    scaled_poses: wp.array(dtype=wp.mat33),
+    scaled_poses: wp.array[wp.mat33],
 ):
     """Per-tet inverse-rest scale: ``Dm ← Dm_orig / cbrt(p)``.
 
@@ -1682,19 +1480,25 @@ def scale_tet_poses_kernel(
     inv_scale = 1.0 / scale
     orig = original_poses[tid]
     scaled_poses[tid] = wp.mat33(
-        orig[0, 0] * inv_scale, orig[0, 1] * inv_scale, orig[0, 2] * inv_scale,
-        orig[1, 0] * inv_scale, orig[1, 1] * inv_scale, orig[1, 2] * inv_scale,
-        orig[2, 0] * inv_scale, orig[2, 1] * inv_scale, orig[2, 2] * inv_scale,
+        orig[0, 0] * inv_scale,
+        orig[0, 1] * inv_scale,
+        orig[0, 2] * inv_scale,
+        orig[1, 0] * inv_scale,
+        orig[1, 1] * inv_scale,
+        orig[1, 2] * inv_scale,
+        orig[2, 0] * inv_scale,
+        orig[2, 1] * inv_scale,
+        orig[2, 2] * inv_scale,
     )
 
 
 @wp.kernel
 def scale_spring_rest_lengths_per_chamber_kernel(
-    original_rest_lengths: wp.array(dtype=wp.float32),
-    spring_chamber_mask: wp.array(dtype=wp.int32),
-    chamber_pressures: wp.array(dtype=wp.float32),
+    original_rest_lengths: wp.array[wp.float32],
+    spring_chamber_mask: wp.array[wp.int32],
+    chamber_pressures: wp.array[wp.float32],
     num_chambers: int,
-    scaled_rest_lengths: wp.array(dtype=wp.float32),
+    scaled_rest_lengths: wp.array[wp.float32],
 ):
     """Per-spring chamber-specific scale ``L₀ ← L₀_orig · cbrt(p_chamber)``.
 
@@ -1714,11 +1518,11 @@ def scale_spring_rest_lengths_per_chamber_kernel(
 
 @wp.kernel
 def scale_tet_poses_per_chamber_kernel(
-    original_poses: wp.array(dtype=wp.mat33),
-    tet_chamber_mask: wp.array(dtype=wp.int32),
-    chamber_pressures: wp.array(dtype=wp.float32),
+    original_poses: wp.array[wp.mat33],
+    tet_chamber_mask: wp.array[wp.int32],
+    chamber_pressures: wp.array[wp.float32],
     num_chambers: int,
-    scaled_poses: wp.array(dtype=wp.mat33),
+    scaled_poses: wp.array[wp.mat33],
 ):
     """Per-tet chamber-specific inverse-rest scale ``Dm ← Dm_orig / cbrt(p_chamber)``.
 
@@ -1736,17 +1540,23 @@ def scale_tet_poses_per_chamber_kernel(
     linear_scale = wp.cbrt(pressure)
     inv_scale = 1.0 / linear_scale
     scaled_poses[tid] = wp.mat33(
-        orig[0, 0] * inv_scale, orig[0, 1] * inv_scale, orig[0, 2] * inv_scale,
-        orig[1, 0] * inv_scale, orig[1, 1] * inv_scale, orig[1, 2] * inv_scale,
-        orig[2, 0] * inv_scale, orig[2, 1] * inv_scale, orig[2, 2] * inv_scale,
+        orig[0, 0] * inv_scale,
+        orig[0, 1] * inv_scale,
+        orig[0, 2] * inv_scale,
+        orig[1, 0] * inv_scale,
+        orig[1, 1] * inv_scale,
+        orig[1, 2] * inv_scale,
+        orig[2, 0] * inv_scale,
+        orig[2, 1] * inv_scale,
+        orig[2, 2] * inv_scale,
     )
 
 
 @wp.kernel
 def compute_volume_kernel(
-    positions: wp.array(dtype=wp.vec3),
-    tet_indices: wp.array2d(dtype=wp.int32),
-    tet_volumes: wp.array(dtype=wp.float32),
+    positions: wp.array[wp.vec3],
+    tet_indices: wp.array2d[wp.int32],
+    tet_volumes: wp.array[wp.float32],
 ):
     """Per-tet volume ``V_e = ⅙ · |det([e₁, e₂, e₃])|`` ``[m³]``.
 
@@ -1774,3 +1584,568 @@ def compute_volume_kernel(
     det = wp.dot(e1, cross)
 
     tet_volumes[tid] = wp.abs(det) / 6.0
+
+
+# =====================================================================
+# 11. Hexahedral FEM kernels (Q1 trilinear element, 2×2×2 Gauss rule)
+# =====================================================================
+
+# 1. Constants and small helpers
+# ---------------------------------------------------------------------------
+
+# Gauss-point parametric coordinate ±1/√3
+_HEX_GP_FLOAT = 0.5773502691896258
+
+HEX_GP = wp.constant(wp.float32(_HEX_GP_FLOAT))
+
+
+@wp.func
+def _hex_gauss_xi(g: int) -> float:
+    """ξ-coordinate of 2×2×2 Gauss point g (0–7)."""
+    if g == 1 or g == 2 or g == 5 or g == 6:
+        return HEX_GP
+    return -HEX_GP
+
+
+@wp.func
+def _hex_gauss_eta(g: int) -> float:
+    """η-coordinate of 2×2×2 Gauss point g (0–7)."""
+    if g == 2 or g == 3 or g == 6 or g == 7:
+        return HEX_GP
+    return -HEX_GP
+
+
+@wp.func
+def _hex_gauss_zeta(g: int) -> float:
+    """ζ-coordinate of 2×2×2 Gauss point g (0–7)."""
+    if g == 4 or g == 5 or g == 6 or g == 7:
+        return HEX_GP
+    return -HEX_GP
+
+
+@wp.func
+def _hex_node_xi(a: int) -> float:
+    """ξ-sign of node a (0–7)."""
+    if a == 1 or a == 2 or a == 5 or a == 6:
+        return wp.float32(1.0)
+    return wp.float32(-1.0)
+
+
+@wp.func
+def _hex_node_eta(a: int) -> float:
+    """η-sign of node a (0–7)."""
+    if a == 2 or a == 3 or a == 6 or a == 7:
+        return wp.float32(1.0)
+    return wp.float32(-1.0)
+
+
+@wp.func
+def _hex_node_zeta(a: int) -> float:
+    """ζ-sign of node a (0–7)."""
+    if a == 4 or a == 5 or a == 6 or a == 7:
+        return wp.float32(1.0)
+    return wp.float32(-1.0)
+
+
+@wp.func
+def _hex_dN_dxi(a: int, xi: float, eta: float, zeta: float) -> wp.vec3:
+    """Shape-function gradient ∂N_a/∂(ξ, η, ζ) for trilinear hex node a."""
+    xa = _hex_node_xi(a)
+    ya = _hex_node_eta(a)
+    za = _hex_node_zeta(a)
+    dNdxi = xa * (1.0 + ya * eta) * (1.0 + za * zeta) * 0.125
+    dNdeta = (1.0 + xa * xi) * ya * (1.0 + za * zeta) * 0.125
+    dNdzeta = (1.0 + xa * xi) * (1.0 + ya * eta) * za * 0.125
+    return wp.vec3(dNdxi, dNdeta, dNdzeta)
+
+
+@wp.func
+def _select_vec3(
+    a: int, v0: wp.vec3, v1: wp.vec3, v2: wp.vec3, v3: wp.vec3, v4: wp.vec3, v5: wp.vec3, v6: wp.vec3, v7: wp.vec3
+) -> wp.vec3:
+    """Select v{a} for a ∈ [0, 7] via an if-chain (no dynamic indexing needed)."""
+    if a == 0:
+        return v0
+    elif a == 1:
+        return v1
+    elif a == 2:
+        return v2
+    elif a == 3:
+        return v3
+    elif a == 4:
+        return v4
+    elif a == 5:
+        return v5
+    elif a == 6:
+        return v6
+    else:
+        return v7
+
+
+@wp.func
+def _select_int(a: int, n0: int, n1: int, n2: int, n3: int, n4: int, n5: int, n6: int, n7: int) -> int:
+    """Select n{a} for a ∈ [0, 7]."""
+    if a == 0:
+        return n0
+    elif a == 1:
+        return n1
+    elif a == 2:
+        return n2
+    elif a == 3:
+        return n3
+    elif a == 4:
+        return n4
+    elif a == 5:
+        return n5
+    elif a == 6:
+        return n6
+    else:
+        return n7
+
+
+@wp.func
+def _clamp_stretch(F: wp.mat33f, min_s: float, max_s: float) -> wp.mat33f:
+    """Clamp principal stretches of F to [min_s, max_s] via SVD.
+
+    Identical in purpose to the tetrahedral kernel's ``clamp_deformation_stretch``.
+    Disabled (F returned unchanged) when either bound is negative.
+    """
+    if min_s < 0.0 or max_s < 0.0:
+        return F
+    U = wp.mat33f()
+    S = wp.vec3f()
+    V = wp.mat33f()
+    wp.svd3(F, U, S, V)
+    S = wp.max(wp.min(S, wp.vec3f(max_s)), wp.vec3f(min_s))
+    return U * wp.diag(S) * wp.transpose(V)
+
+
+# ---------------------------------------------------------------------------
+# 2. Force kernel
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel
+def eval_hexahedra(
+    x: wp.array[wp.vec3],
+    v: wp.array[wp.vec3],
+    indices: wp.array2d[wp.int32],
+    inv_J0: wp.array2d[wp.mat33f],
+    det_J0_w: wp.array2d[wp.float32],
+    activation: wp.array[wp.float32],
+    materials: wp.array2d[wp.float32],
+    min_stretch: float,
+    max_stretch: float,
+    f: wp.array[wp.vec3],
+):
+    """Stable Neo-Hookean hexahedral force per node [N].
+
+    One thread per element.  Integrates PK1 stress over the 2×2×2 Gauss rule.
+    ``activation[e]`` shifts the volumetric strain (J − α + act), identical to
+    the tetrahedral kernel convention.  Rayleigh damping uses dF/dt.
+    """
+    eid = wp.tid()
+
+    k_mu = materials[eid, 0]
+    k_lambda = materials[eid, 1]
+    k_damp = materials[eid, 2]
+    act = activation[eid]
+    alpha = 1.0 + k_mu / k_lambda - k_mu / (4.0 * k_lambda)
+
+    n0 = indices[eid, 0]
+    n1 = indices[eid, 1]
+    n2 = indices[eid, 2]
+    n3 = indices[eid, 3]
+    n4 = indices[eid, 4]
+    n5 = indices[eid, 5]
+    n6 = indices[eid, 6]
+    n7 = indices[eid, 7]
+
+    x0 = x[n0]
+    x1 = x[n1]
+    x2 = x[n2]
+    x3 = x[n3]
+    x4 = x[n4]
+    x5 = x[n5]
+    x6 = x[n6]
+    x7 = x[n7]
+    v0 = v[n0]
+    v1 = v[n1]
+    v2 = v[n2]
+    v3 = v[n3]
+    v4 = v[n4]
+    v5 = v[n5]
+    v6 = v[n6]
+    v7 = v[n7]
+
+    for g in range(8):
+        xi_g = _hex_gauss_xi(g)
+        eta_g = _hex_gauss_eta(g)
+        zeta_g = _hex_gauss_zeta(g)
+
+        inv_J0_g = inv_J0[eid, g]
+        det_J0_g = det_J0_w[eid, g]
+        inv_J0_gT = wp.transpose(inv_J0_g)
+
+        # Reference-config shape gradients ∇_X N_a = J0^{-T} · ∇_ξ N_a
+        dN0 = inv_J0_gT * _hex_dN_dxi(0, xi_g, eta_g, zeta_g)
+        dN1 = inv_J0_gT * _hex_dN_dxi(1, xi_g, eta_g, zeta_g)
+        dN2 = inv_J0_gT * _hex_dN_dxi(2, xi_g, eta_g, zeta_g)
+        dN3 = inv_J0_gT * _hex_dN_dxi(3, xi_g, eta_g, zeta_g)
+        dN4 = inv_J0_gT * _hex_dN_dxi(4, xi_g, eta_g, zeta_g)
+        dN5 = inv_J0_gT * _hex_dN_dxi(5, xi_g, eta_g, zeta_g)
+        dN6 = inv_J0_gT * _hex_dN_dxi(6, xi_g, eta_g, zeta_g)
+        dN7 = inv_J0_gT * _hex_dN_dxi(7, xi_g, eta_g, zeta_g)
+
+        # Deformation gradient F = Σ_a x_a^curr ⊗ ∇_X N_a
+        F = (
+            wp.outer(x0, dN0)
+            + wp.outer(x1, dN1)
+            + wp.outer(x2, dN2)
+            + wp.outer(x3, dN3)
+            + wp.outer(x4, dN4)
+            + wp.outer(x5, dN5)
+            + wp.outer(x6, dN6)
+            + wp.outer(x7, dN7)
+        )
+        F = _clamp_stretch(F, min_stretch, max_stretch)
+
+        # Velocity gradient dF/dt (for Rayleigh damping)
+        dFdt = (
+            wp.outer(v0, dN0)
+            + wp.outer(v1, dN1)
+            + wp.outer(v2, dN2)
+            + wp.outer(v3, dN3)
+            + wp.outer(v4, dN4)
+            + wp.outer(v5, dN5)
+            + wp.outer(v6, dN6)
+            + wp.outer(v7, dN7)
+        )
+
+        # I_C = ‖F‖²_F
+        fc0 = wp.vec3f(F[0, 0], F[1, 0], F[2, 0])
+        fc1 = wp.vec3f(F[0, 1], F[1, 1], F[2, 1])
+        fc2 = wp.vec3f(F[0, 2], F[1, 2], F[2, 2])
+        Ic = wp.dot(fc0, fc0) + wp.dot(fc1, fc1) + wp.dot(fc2, fc2)
+
+        # Deviatoric PK1 + Rayleigh damping
+        P = F * (k_mu * (1.0 - 1.0 / (Ic + 1.0))) + dFdt * k_damp
+
+        # Volumetric PK1: P_vol = λ·(J−α+act) · cof(F)
+        J = wp.max(wp.determinant(F), wp.float32(0.01))
+        cof_col0 = wp.cross(fc1, fc2)
+        cof_col1 = wp.cross(fc2, fc0)
+        cof_col2 = wp.cross(fc0, fc1)
+        cof_F = wp.matrix_from_cols(cof_col0, cof_col1, cof_col2)
+        P = P + cof_F * (k_lambda * (J - alpha + act))
+
+        # Nodal forces: f_a −= det_J0_g · P · ∇_X N_a
+        w = det_J0_g
+        wp.atomic_sub(f, n0, w * (P * dN0))
+        wp.atomic_sub(f, n1, w * (P * dN1))
+        wp.atomic_sub(f, n2, w * (P * dN2))
+        wp.atomic_sub(f, n3, w * (P * dN3))
+        wp.atomic_sub(f, n4, w * (P * dN4))
+        wp.atomic_sub(f, n5, w * (P * dN5))
+        wp.atomic_sub(f, n6, w * (P * dN6))
+        wp.atomic_sub(f, n7, w * (P * dN7))
+
+
+# ---------------------------------------------------------------------------
+# 3. System-matrix (Hessian) kernel
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel
+def build_system_matrix_hex_kernel(
+    x: wp.array[wp.vec3],
+    indices: wp.array2d[wp.int32],
+    inv_J0: wp.array2d[wp.mat33f],
+    det_J0_w: wp.array2d[wp.float32],
+    materials: wp.array2d[wp.float32],
+    min_stretch: float,
+    max_stretch: float,
+    dt: wp.float32,
+    block_offset: wp.int32,
+    rows: wp.array[wp.int32],
+    cols: wp.array[wp.int32],
+    values: wp.array[wp.mat33f],
+    dirty: wp.array[wp.int32],
+):
+    """Per-hex PSD tangent: one thread per element × node-pair (a, b).
+
+    Launch with ``dim = hex_count * 64``.  Thread ``tid`` handles element
+    ``eid = tid // 64`` and block pair ``(a, b) = (tid % 64 // 8, tid % 8)``.
+
+    Each thread accumulates its single 3×3 block K[a,b] over 8 Gauss points,
+    then writes one BSR triplet.  This keeps register pressure low (one mat33f
+    accumulator) at the cost of recomputing the Gauss data 64× per element;
+    the ``inv_J0`` / ``det_J0_w`` rows for a given element are accessed by all
+    64 threads of that element and should reside in L1 after the first hit.
+
+    The geometric stiffness λ(J−α)·d²J/(∂x_a ∂x_b) is omitted (same reason
+    as in the tetrahedral solver: its skew-antisymmetric 3×3 off-diagonal
+    contributions break the BSR positive-semidefiniteness for stiff materials).
+
+    K[a,b] = Σ_g det_J0_g · [ k_mu·s · dot(∇N_a,∇N_b)·I
+                              + 2·k_mu/(I_C+1)² · (F·∇N_a)⊗(F·∇N_b)
+                              + k_lambda · (cof(F)·∇N_a)⊗(cof(F)·∇N_b) ]
+
+    ``dirty[eid] == 0`` skips assembly (stale-but-correct triplets remain).
+    """
+    tid = wp.tid()
+    eid = tid // 64
+    ab = tid % 64
+    a = ab // 8
+    b = ab % 8
+
+    if dirty[eid] == 0:
+        return
+
+    k_mu = materials[eid, 0]
+    k_lambda = materials[eid, 1]
+
+    n0 = indices[eid, 0]
+    n1 = indices[eid, 1]
+    n2 = indices[eid, 2]
+    n3 = indices[eid, 3]
+    n4 = indices[eid, 4]
+    n5 = indices[eid, 5]
+    n6 = indices[eid, 6]
+    n7 = indices[eid, 7]
+
+    x0 = x[n0]
+    x1 = x[n1]
+    x2 = x[n2]
+    x3 = x[n3]
+    x4 = x[n4]
+    x5 = x[n5]
+    x6 = x[n6]
+    x7 = x[n7]
+
+    na = _select_int(a, n0, n1, n2, n3, n4, n5, n6, n7)
+    nb = _select_int(b, n0, n1, n2, n3, n4, n5, n6, n7)
+
+    Kab = wp.mat33f(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    for g in range(8):
+        xi_g = _hex_gauss_xi(g)
+        eta_g = _hex_gauss_eta(g)
+        zeta_g = _hex_gauss_zeta(g)
+
+        inv_J0_g = inv_J0[eid, g]
+        det_J0_g = det_J0_w[eid, g]
+        inv_J0_gT = wp.transpose(inv_J0_g)
+
+        # Reference-config shape gradients for all 8 nodes
+        dN0g = inv_J0_gT * _hex_dN_dxi(0, xi_g, eta_g, zeta_g)
+        dN1g = inv_J0_gT * _hex_dN_dxi(1, xi_g, eta_g, zeta_g)
+        dN2g = inv_J0_gT * _hex_dN_dxi(2, xi_g, eta_g, zeta_g)
+        dN3g = inv_J0_gT * _hex_dN_dxi(3, xi_g, eta_g, zeta_g)
+        dN4g = inv_J0_gT * _hex_dN_dxi(4, xi_g, eta_g, zeta_g)
+        dN5g = inv_J0_gT * _hex_dN_dxi(5, xi_g, eta_g, zeta_g)
+        dN6g = inv_J0_gT * _hex_dN_dxi(6, xi_g, eta_g, zeta_g)
+        dN7g = inv_J0_gT * _hex_dN_dxi(7, xi_g, eta_g, zeta_g)
+
+        # Deformation gradient
+        F = (
+            wp.outer(x0, dN0g)
+            + wp.outer(x1, dN1g)
+            + wp.outer(x2, dN2g)
+            + wp.outer(x3, dN3g)
+            + wp.outer(x4, dN4g)
+            + wp.outer(x5, dN5g)
+            + wp.outer(x6, dN6g)
+            + wp.outer(x7, dN7g)
+        )
+        F = _clamp_stretch(F, min_stretch, max_stretch)
+
+        fc0 = wp.vec3f(F[0, 0], F[1, 0], F[2, 0])
+        fc1 = wp.vec3f(F[0, 1], F[1, 1], F[2, 1])
+        fc2 = wp.vec3f(F[0, 2], F[1, 2], F[2, 2])
+        Ic = wp.dot(fc0, fc0) + wp.dot(fc1, fc1) + wp.dot(fc2, fc2)
+        Ic1 = wp.max(Ic + 1.0, wp.float32(1.0e-6))
+        s = 1.0 - 1.0 / Ic1
+        coef = k_mu * 2.0 / (Ic1 * Ic1)
+
+        # Cofactor matrix cof(F) = [fc1×fc2, fc2×fc0, fc0×fc1]
+        cof_col0 = wp.cross(fc1, fc2)
+        cof_col1 = wp.cross(fc2, fc0)
+        cof_col2 = wp.cross(fc0, fc1)
+        cof_F = wp.matrix_from_cols(cof_col0, cof_col1, cof_col2)
+
+        # Shape gradients for the specific (a, b) pair
+        dN_Xa = _select_vec3(a, dN0g, dN1g, dN2g, dN3g, dN4g, dN5g, dN6g, dN7g)
+        dN_Xb = _select_vec3(b, dN0g, dN1g, dN2g, dN3g, dN4g, dN5g, dN6g, dN7g)
+
+        Fd_a = F * dN_Xa  # F · ∇_X N_a
+        Fd_b = F * dN_Xb  # F · ∇_X N_b
+        dJ_a = cof_F * dN_Xa  # ∂J/∂x_a
+        dJ_b = cof_F * dN_Xb  # ∂J/∂x_b
+
+        dot_ab = wp.dot(dN_Xa, dN_Xb)
+        I3 = wp.identity(n=3, dtype=wp.float32)
+
+        K_dev = I3 * (k_mu * s * dot_ab) + wp.outer(Fd_a, Fd_b) * coef
+        K_vol = wp.outer(dJ_a, dJ_b) * k_lambda
+        Kab = Kab + (K_dev + K_vol) * det_J0_g
+
+    scale = dt * dt
+    blk = block_offset + tid
+    rows[blk] = na
+    cols[blk] = nb
+    values[blk] = Kab * scale
+
+
+# ---------------------------------------------------------------------------
+# 4. Volume kernel
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel
+def compute_hex_volume_kernel(
+    det_J0_w: wp.array2d[wp.float32],
+    volumes: wp.array[wp.float32],
+):
+    """Element volume V_e = Σ_g det_J0_g (Gauss weight = 1 already folded in)."""
+    eid = wp.tid()
+    v = wp.float32(0.0)
+    for g in range(8):
+        v = v + det_J0_w[eid, g]
+    volumes[eid] = v
+
+
+# ---------------------------------------------------------------------------
+# 5. Inflation scaling kernels (used by SolverInflatableHex)
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel
+def scale_hex_gauss_kernel(
+    original_inv_J0: wp.array2d[wp.mat33f],
+    original_det_J0_w: wp.array2d[wp.float32],
+    linear_scale: wp.float32,
+    inv_J0_out: wp.array2d[wp.mat33f],
+    det_J0_w_out: wp.array2d[wp.float32],
+):
+    """Uniform pressure scale for all hex elements.
+
+    When the rest config expands by ``s = cbrt(p)``:
+
+    - ``J0 → s · J0``  so  ``inv_J0 → inv_J0 / s``
+    - ``det_J0_w → s³ · det_J0_w = p · det_J0_w``
+
+    Launch with ``dim = hex_count * 8`` (one thread per element × Gauss point).
+    """
+    tid = wp.tid()
+    eid = tid // 8
+    g = tid % 8
+    inv_s = wp.float32(1.0) / linear_scale
+    vol_s = linear_scale * linear_scale * linear_scale  # = p
+    inv_J0_out[eid, g] = original_inv_J0[eid, g] * inv_s
+    det_J0_w_out[eid, g] = original_det_J0_w[eid, g] * vol_s
+
+
+@wp.kernel
+def scale_hex_gauss_per_chamber_kernel(
+    original_inv_J0: wp.array2d[wp.mat33f],
+    original_det_J0_w: wp.array2d[wp.float32],
+    hex_chamber_mask: wp.array[wp.int32],
+    chamber_pressures: wp.array[wp.float32],
+    num_chambers: int,
+    inv_J0_out: wp.array2d[wp.mat33f],
+    det_J0_w_out: wp.array2d[wp.float32],
+):
+    """Per-chamber pressure scale for hex elements.
+
+    Mask entry ``-1`` means the element belongs to the rigid base; its Gauss
+    data is copied unchanged.
+
+    Launch with ``dim = hex_count * 8``.
+    """
+    tid = wp.tid()
+    eid = tid // 8
+    g = tid % 8
+    c = hex_chamber_mask[eid]
+    if c < 0:
+        inv_J0_out[eid, g] = original_inv_J0[eid, g]
+        det_J0_w_out[eid, g] = original_det_J0_w[eid, g]
+        return
+    c = wp.min(c, num_chambers - 1)
+    pressure = chamber_pressures[c]
+    pressure = wp.max(wp.float32(1.0e-6), wp.min(pressure, wp.float32(100.0)))
+    s = wp.cbrt(pressure)
+    inv_s = wp.float32(1.0) / s
+    vol_s = pressure  # = s³
+    inv_J0_out[eid, g] = original_inv_J0[eid, g] * inv_s
+    det_J0_w_out[eid, g] = original_det_J0_w[eid, g] * vol_s
+
+
+# ---------------------------------------------------------------------------
+# 12. Block-Jacobi (3x3) preconditioner
+#
+# Warp's built-in ``preconditioner(ptype="diag")`` keeps only the three
+# diagonal scalars of each 3x3 block (see ``_extract_inverse_diagonal_blocked``
+# in warp/optim/linear.py), discarding the intra-particle x/y/z coupling.  For
+# Neo-Hookean elasticity that coupling is strong, so inverting the full 3x3
+# block markedly improves CG conditioning.
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel
+def invert_block_diagonal_kernel(
+    offsets: wp.array[wp.int32],
+    columns: wp.array[wp.int32],
+    values: wp.array[wp.mat33f],
+    inv_diag: wp.array[wp.mat33f],
+):
+    """Invert each 3x3 diagonal block of a BSR matrix in place.
+
+    Falls back to point-Jacobi (per-component reciprocal) when a block is
+    numerically singular, so the result is never worse-conditioned than
+    Warp's built-in ``"diag"`` preconditioner.
+    """
+    i = wp.tid()
+
+    D = wp.identity(n=3, dtype=wp.float32)
+    for k in range(offsets[i], offsets[i + 1]):
+        if columns[k] == i:
+            D = values[k]
+
+    # Scale-aware singularity test: compare |det| against the cube of the mean
+    # diagonal, so the threshold tracks the block's magnitude.
+    tr = (D[0, 0] + D[1, 1] + D[2, 2]) / 3.0
+    det = wp.determinant(D)
+
+    if tr > 0.0 and wp.abs(det) > 1.0e-9 * tr * tr * tr:
+        inv_diag[i] = wp.inverse(D)
+    else:
+        r0 = float(1.0)
+        r1 = float(1.0)
+        r2 = float(1.0)
+        if wp.abs(D[0, 0]) > 1.0e-12:
+            r0 = 1.0 / D[0, 0]
+        if wp.abs(D[1, 1]) > 1.0e-12:
+            r1 = 1.0 / D[1, 1]
+        if wp.abs(D[2, 2]) > 1.0e-12:
+            r2 = 1.0 / D[2, 2]
+        inv_diag[i] = wp.mat33f(r0, 0.0, 0.0, 0.0, r1, 0.0, 0.0, 0.0, r2)
+
+
+@wp.kernel
+def block_jacobi_mv_kernel(
+    Minv: wp.array[wp.mat33f],
+    x: wp.array[wp.vec3],
+    y: wp.array[wp.vec3],
+    z: wp.array[wp.vec3],
+    alpha: wp.float32,
+    beta: wp.float32,
+):
+    """Generalised block-diagonal matvec ``z = alpha * (Minv @ x) + beta * y``."""
+    i = wp.tid()
+    s = wp.vec3(0.0, 0.0, 0.0)
+    if alpha != 0.0:
+        s = s + alpha * (Minv[i] * x[i])
+    if beta != 0.0:
+        s = s + beta * y[i]
+    z[i] = s

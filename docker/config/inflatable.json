@@ -1,0 +1,167 @@
+{
+    "description": "Inflatable FEM showcase: tet soft bodies + Q1 hex bodies in one row. All chambers are independently pressure-controllable; glue coupling toggleable in real time.",
+    "example": "inflatable",
+    "args": {
+        "viewer": "gl",
+        "num-frames": 3600,
+        "headless": false,
+        "mode": "showcase",
+        "gravity": 9.81,
+        "substeps": 10,
+        "solver-type": "cg",
+        "solver-maxiter": 50,
+        "debug-interval": 30,
+        "max-pressure": 5.0,
+        "contact-ke": 1000.0,
+        "contact-kd": 1.0,
+        "ground-ke": 10000.0,
+        "ground-kd": 10.0,
+        "ground-kf": 500.0,
+        "ground-mu": 0.5,
+        "rigid-mass": 1.0,
+        "coupling-alpha": 0.1,
+        "coupling-kd-rigid": 50.0,
+        "glue-damping": 1.0,
+        "objects": [
+            {
+                "_comment": "All FEM objects in one row along Y at X=0, 1.5 m spacing.",
+                "_comment2": "Order: tet-box | hex-cube | tet-sphere | hex-tire | tet-baymax | hex-pyramid",
+                "active": true,
+                "path": "assets/tet_box/tet_box.usda",
+                "position": [
+                    0.0,
+                    -1.112,
+                    2.0
+                ],
+                "color": [
+                    0.22,
+                    0.56,
+                    0.9
+                ],
+                "density": 800.0,
+                "k-mu": 100000.0,
+                "k-lambda": 100000.0,
+                "k-damp": 100.0,
+                "particle-radius": 0.008
+            },
+            {
+                "active": true,
+                "path": "assets/hex_cube/hex_cube.usda",
+                "position": [
+                    0.0,
+                    -0.732,
+                    2.0
+                ],
+                "color": [
+                    0.18,
+                    0.72,
+                    0.42
+                ],
+                "density": 1000.0,
+                "k-mu": 500000.0,
+                "k-lambda": 500000.0,
+                "k-damp": 0.01,
+                "particle-radius": 0.008
+            },
+            {
+                "active": true,
+                "path": "assets/tet_sphere/tet_sphere.usda",
+                "position": [
+                    0.0,
+                    -0.257,
+                    2.0
+                ],
+                "color": [
+                    0.95,
+                    0.4,
+                    0.2
+                ],
+                "density": 800.0,
+                "k-mu": 300000.0,
+                "k-lambda": 300000.0,
+                "k-damp": 100.0,
+                "particle-radius": 0.008
+            },
+            {
+                "active": true,
+                "path": "assets/hex_tire/hex_tire.usda",
+                "position": [
+                    0.0,
+                    0.199,
+                    2.0
+                ],
+                "color": [
+                    0.88,
+                    0.75,
+                    0.1
+                ],
+                "density": 1000.0,
+                "k-mu": 500000.0,
+                "k-lambda": 500000.0,
+                "k-damp": 0.01,
+                "particle-radius": 0.008
+            },
+            {
+                "active": true,
+                "path": "assets/tet_baymax/tet_baymax.usda",
+                "position": [
+                    0.0,
+                    0.67,
+                    2.0
+                ],
+                "color": [
+                    0.95,
+                    0.95,
+                    0.95
+                ],
+                "density": 2000.0,
+                "k-mu": 800000.0,
+                "k-lambda": 800000.0,
+                "k-damp": 100.0,
+                "particle-radius": 0.008
+            },
+            {
+                "active": true,
+                "path": "assets/hex_pyramid/hex_pyramid.usda",
+                "position": [
+                    0.0,
+                    1.112,
+                    2.0
+                ],
+                "color": [
+                    0.7,
+                    0.3,
+                    0.85
+                ],
+                "density": 1000.0,
+                "k-mu": 500000.0,
+                "k-lambda": 500000.0,
+                "k-damp": 0.01,
+                "particle-radius": 0.008
+            },
+            {
+                "_comment": "Glue assembly \u2014 disable when running full row; enable for glue demo.",
+                "active": false,
+                "path": "assets/tet_glue_box/tet_glue_box.usda",
+                "position": [
+                    0.0,
+                    0.0,
+                    0.5
+                ],
+                "color": [
+                    0.85,
+                    0.45,
+                    0.1
+                ],
+                "density": 800.0,
+                "k-mu": 100000.0,
+                "k-lambda": 100000.0,
+                "k-damp": 200.0,
+                "particle-radius": 0.008
+            }
+        ],
+        "linear-damping": 2.0,
+        "preconditioner": "block_diag",
+        "cg-check-every": 0
+    }
+}

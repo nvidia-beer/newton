@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .solver_implicit_soft import SolverImplicitSoft
 from .solver_inflatable import SolverInflatable
 
 __all__ = [
+    "SolverImplicitSoft",
     "SolverInflatable",
 ]
