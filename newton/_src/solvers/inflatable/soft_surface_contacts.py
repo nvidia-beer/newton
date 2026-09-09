@@ -220,6 +220,7 @@ class SoftBodySurfaceContacts:
         self._surface_p_idx = wp.array(np.array(surface_p_idx, dtype=np.int32), dtype=wp.int32, device=device)
         self._surface_b_idx = wp.array(np.array(surface_b_idx, dtype=np.int32), dtype=wp.int32, device=device)
         self._n_surface = len(surface_p_idx)
+        self._forces_buf: wp.array | None = None
 
     # ------------------------------------------------------------------
 
@@ -255,7 +256,14 @@ class SoftBodySurfaceContacts:
         Returns:
             Force array [N], shape ``(N,)``, dtype :class:`wp.vec3`.
         """
-        forces = wp.zeros(particle_count, dtype=wp.vec3, device=self.device)
+        # Reused across calls: allocating inside a captured CUDA graph leaves the
+        # graph writing to memory that is freed after capture.
+        forces = self._forces_buf
+        if forces is None or forces.shape[0] != particle_count:
+            forces = wp.zeros(particle_count, dtype=wp.vec3, device=self.device)
+            self._forces_buf = forces
+        else:
+            forces.zero_()
         if self._n_surface == 0 or self.n_bodies < 2:
             return forces
 

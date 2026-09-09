@@ -93,6 +93,16 @@ from .soft_surface_contacts import SoftBodySurfaceContacts
 PARTICLE_FLAG_ACTIVE = int(ParticleFlags.ACTIVE)
 
 
+@wp.kernel
+def accumulate_scaled_kernel(
+    src: wp.array[wp.vec3],
+    scale: wp.float32,
+    dst: wp.array[wp.vec3],
+):
+    tid = wp.tid()
+    dst[tid] = dst[tid] + scale * src[tid]
+
+
 class SolverImplicitSoft(SolverBase):
     """Fully-implicit Backward-Euler FEM soft-body solver.
 
@@ -225,6 +235,24 @@ class SolverImplicitSoft(SolverBase):
         self._pc_inv_diag = None
         self.M_bsr = self._build_preconditioner()
         self.dv = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        # Scratch reused across steps so nothing allocates inside a captured graph.
+        self._force_bufs: dict[str, wp.array] = {}
+        for key in (
+            "spring",
+            "tet",
+            "hex",
+            "tri",
+            "particle",
+            "ground",
+            "soft_contact",
+            "gravity",
+            "damping",
+            "surface",
+        ):
+            self._forces(key)
+        self._gravity_arr: wp.array | None = None
+        self._lin_solver = None
+        self._lin_solver_key = None
 
         # Initial volume: sum contributions from tet and/or hex elements.
         self._initial_volume = 0.0
@@ -331,20 +359,32 @@ class SolverImplicitSoft(SolverBase):
                 model.particle_count,
             )
         else:
-            surface_contact_forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+            surface_contact_forces = self._forces("surface")
 
-        state_in.particle_f = dt * (
-            self.eval_spring_forces(model, state_in)
-            + self.eval_tetrahedral_forces(model, control, state_in)
-            + self.eval_hexahedral_forces(model, control, state_in)
-            + self.eval_triangle_forces(model, control, state_in)
-            + self.eval_particle_particle_forces(model, control, state_in)
-            + self.eval_particle_ground_contact_forces(model, control, state_in)
-            + self.eval_soft_contact_forces(model, state_in, contacts)
-            + self.eval_gravity_forces(model)
-            + self.eval_linear_damping_forces(model, state_in)
-            + surface_contact_forces
-        )
+        # Accumulate in place: wp.array arithmetic allocates a fresh array per
+        # operand, and any allocation inside a captured CUDA graph is freed after
+        # capture while the graph keeps writing to it.
+        particle_f = state_in.particle_f
+        particle_f.zero_()
+        for term in (
+            self.eval_spring_forces(model, state_in),
+            self.eval_tetrahedral_forces(model, control, state_in),
+            self.eval_hexahedral_forces(model, control, state_in),
+            self.eval_triangle_forces(model, control, state_in),
+            self.eval_particle_particle_forces(model, control, state_in),
+            self.eval_particle_ground_contact_forces(model, control, state_in),
+            self.eval_soft_contact_forces(model, state_in, contacts),
+            self.eval_gravity_forces(model),
+            self.eval_linear_damping_forces(model, state_in),
+            surface_contact_forces,
+        ):
+            wp.launch(
+                kernel=accumulate_scaled_kernel,
+                dim=model.particle_count,
+                inputs=[term, wp.float32(dt)],
+                outputs=[particle_f],
+                device=model.device,
+            )
 
     def _rebuild_element_blocks(
         self,
@@ -683,16 +723,23 @@ class SolverImplicitSoft(SolverBase):
         if solve is None:
             raise ValueError(f"Invalid solver type: {self.solver_type}")
 
-        result = solve(
-            self.A_bsr,
-            state_in.particle_f,
-            self.dv,
-            tol=1e-2,
-            maxiter=maxiter,
-            M=self.M_bsr,
-            check_every=check_every,
-            use_cuda_graph=False,
-        )
+        # Persistent functor: the one-shot solver functions allocate their scratch
+        # buffers on every call, which is not safe inside a captured CUDA graph.
+        key = (self.solver_type, maxiter, check_every)
+        if self._lin_solver is None or self._lin_solver_key != key:
+            self._lin_solver = solve(
+                self.A_bsr,
+                state_in.particle_f,
+                self.dv,
+                tol=1e-2,
+                maxiter=maxiter,
+                M=self.M_bsr,
+                check_every=check_every,
+                use_cuda_graph=False,
+                run=False,
+            )
+            self._lin_solver_key = key
+        result = self._lin_solver(b=state_in.particle_f, M=self.M_bsr)
 
         if check_every > 0 and result is not None:
             # Host-check path returns (iterations, residual, tolerance).
@@ -718,7 +765,7 @@ class SolverImplicitSoft(SolverBase):
 
     def eval_tetrahedral_forces(self, model: Model, control: Control, state: State):
         """Tet FEM elastic force from Stable Neo-Hookean [N]."""
-        forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        forces = self._forces("tet")
         if model.tet_count:
             wp.launch(
                 kernel=eval_tetrahedra,
@@ -743,7 +790,7 @@ class SolverImplicitSoft(SolverBase):
 
         Returns zeros when ``hex_count == 0``.
         """
-        forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        forces = self._forces("hex")
         if self.hex_count == 0:
             return forces
         act = (
@@ -772,7 +819,7 @@ class SolverImplicitSoft(SolverBase):
 
     def eval_triangle_forces(self, model: Model, control: Control, state: State):
         """Triangle membrane (in-plane stretch + area-preservation) force [N]."""
-        forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        forces = self._forces("tri")
         if model.tri_count:
             wp.launch(
                 kernel=eval_triangles,
@@ -792,9 +839,9 @@ class SolverImplicitSoft(SolverBase):
 
     def eval_spring_forces(self, model: Model, state: State):
         """Linear spring force [N] with optional bend torque."""
+        forces = self._forces("spring")
         if model.spring_count == 0:
-            return wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
-        forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+            return forces
         if self.torque_stiffness > 0.0:
             wp.launch(
                 kernel=eval_springs_linear_and_torque,
@@ -832,7 +879,7 @@ class SolverImplicitSoft(SolverBase):
 
     def eval_particle_particle_forces(self, model: Model, control: Control, state: State):
         """Hash-grid particle-particle penalty + Coulomb friction [N]."""
-        forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        forces = self._forces("particle")
         if (
             model.particle_ke <= 0.0
             or model.particle_count <= 1
@@ -869,9 +916,9 @@ class SolverImplicitSoft(SolverBase):
 
         Returns zeros when no ``ground_plane`` was configured.
         """
+        forces = self._forces("ground")
         if self._ground_plane is None:
-            return wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
-        forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+            return forces
         wp.launch(
             kernel=eval_particle_ground_contacts,
             dim=model.particle_count,
@@ -895,7 +942,7 @@ class SolverImplicitSoft(SolverBase):
 
     def eval_soft_contact_forces(self, model: Model, state: State, contacts: Contacts):
         """Force-based soft-rigid contact from ``model.collide(state)`` [N]."""
-        forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        forces = self._forces("soft_contact")
         if contacts is None or not hasattr(contacts, "soft_contact_count"):
             return forces
         wp.launch(
@@ -922,7 +969,7 @@ class SolverImplicitSoft(SolverBase):
 
     def eval_gravity_forces(self, model: Model):
         """Per-particle gravity ``f = m · g`` [N]."""
-        forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        forces = self._forces("gravity")
         if model.particle_count:
             wp.launch(
                 kernel=eval_gravity_from_array,
@@ -939,7 +986,7 @@ class SolverImplicitSoft(SolverBase):
         Damps rigid-body drift and rolling without affecting rest-state
         equilibrium.  Zero-cost when ``linear_damping == 0``.
         """
-        forces = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        forces = self._forces("damping")
         if self.linear_damping > 0.0 and model.particle_count:
             wp.launch(
                 kernel=eval_linear_damping_kernel,
@@ -964,4 +1011,16 @@ class SolverImplicitSoft(SolverBase):
         g = model.gravity
         if isinstance(g, wp.array):
             return g
-        return wp.array([g], dtype=wp.vec3, device=model.device)
+        if self._gravity_arr is None:
+            self._gravity_arr = wp.array([g], dtype=wp.vec3, device=model.device)
+        return self._gravity_arr
+
+    def _forces(self, key: str) -> wp.array:
+        """Return the zeroed persistent force scratch buffer for ``key``."""
+        buf = self._force_bufs.get(key)
+        if buf is None:
+            buf = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=self.model.device)
+            self._force_bufs[key] = buf
+        else:
+            buf.zero_()
+        return buf

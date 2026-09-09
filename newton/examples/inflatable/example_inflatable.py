@@ -1597,11 +1597,13 @@ class _ShowcaseExample(Example):
         tet_ranges = []
         tet_particle_ranges = []
         tet_surface_tris = []
+        tet_spring_ranges = []
         # (name, tri_start, tri_end, color) for per-object mesh coloring
         _mesh_color_ranges: list[tuple[str, int, int, tuple]] = []
         for asset, obj in zip(tet_assets, tet_objs, strict=False):
             p0 = builder.particle_count
             t0 = builder.tet_count
+            s0 = builder.spring_count
             tri0 = builder.tri_count
             builder.add_soft_mesh(
                 pos=wp.vec3(*[float(v) for v in obj["position"]]),
@@ -1619,6 +1621,7 @@ class _ShowcaseExample(Example):
             t1 = builder.tet_count
             p1 = builder.particle_count
             tet_ranges.append((t0, t1))
+            tet_spring_ranges.append((s0, builder.spring_count))
             tet_particle_ranges.append((p0, p1 - p0))
             surf_tris = asset.get("surface_triangles")
             tet_surface_tris.append(surf_tris)
@@ -1638,10 +1641,12 @@ class _ShowcaseExample(Example):
         # --- Glue assembly at X = 0 m (only if active) ---
         go = glue_objs[0] if glue_objs else None
         glue_p0 = glue_t0 = glue_t1 = glue_p1 = 0
+        glue_s0 = glue_s1 = 0
         glue_rigid_body_id = -1
         if go and glue_soft is not None:
             glue_p0 = builder.particle_count
             glue_t0 = builder.tet_count
+            glue_s0 = builder.spring_count
             _glue_tri0 = builder.tri_count
             builder.add_soft_mesh(
                 pos=wp.vec3(*[float(v) for v in go["position"]]),
@@ -1657,6 +1662,7 @@ class _ShowcaseExample(Example):
                 particle_radius=float(go.get("particle-radius", 0.008)),
             )
             glue_t1 = builder.tet_count
+            glue_s1 = builder.spring_count
             glue_p1 = builder.particle_count
             _glue_surf = glue_soft.get("surface_triangles")
             if _glue_surf is not None:
@@ -1783,6 +1789,15 @@ class _ShowcaseExample(Example):
             for i, (h0, h1) in enumerate(hex_ranges):
                 hex_mask_np[h0:h1] = n_hex_base + i
 
+        # add_soft_mesh adds a spring per tet edge; without a per-spring mask the
+        # solver scales every spring by the mean chamber pressure, coupling objects.
+        spring_mask_np = np.full(model.spring_count, -1, dtype=np.int32) if model.spring_count > 0 else None
+        if spring_mask_np is not None:
+            for ch, (s0, s1) in enumerate(tet_spring_ranges):
+                spring_mask_np[s0:s1] = ch
+            if glue_objs and glue_s1 > glue_s0:
+                spring_mask_np[glue_s0:glue_s1] = glue_chamber_id
+
         # ----- Create solver -----
         self.solver = SolverInflatable(
             model=model,
@@ -1824,6 +1839,9 @@ class _ShowcaseExample(Example):
                 else None,
                 hex_chamber_mask=wp.array(hex_mask_np, dtype=wp.int32, device=model.device)
                 if hex_mask_np is not None
+                else None,
+                spring_chamber_mask=wp.array(spring_mask_np, dtype=wp.int32, device=model.device)
+                if spring_mask_np is not None
                 else None,
                 num_chambers=total_chambers,
             )
