@@ -695,6 +695,7 @@ class Example:
         self._t = 0.0
         self.viewer = viewer
         self._diag_period = int(getattr(args, "diag_period", 5))
+        self._debug_rpm = bool(getattr(args, "debug_rpm", False))
         self._t_wall = time.perf_counter()
         self._t_step = 0.0
         self._t_render = 0.0
@@ -1059,12 +1060,13 @@ class Example:
                 lateral_offset=float(_e) * _lat_spacing,
                 device=device,
             )
-        # Debug wrenches printed at each diag period (toggled on/off around _print_diag)
-        self.ancf_solver._debug_wrenches = False
 
         # ── GPU scalars / per-env arrays ─────────────────────────────────────
         self._rim_phi = wp.zeros(n_envs, dtype=float, device=device)  # kinematic, self-tracked
         self._rim_omega_wp = wp.zeros(n_envs, dtype=float, device=device)  # kinematic spin (not from MuJoCo cvel)
+        # Host mirror of _rim_omega_wp; kept in sync by step() so the RPM ramp
+        # never reads back from the device.  Starts zeroed to match the array above.
+        self._rim_omega_np = np.zeros(n_envs, dtype=np.float32)
         self._xfrc_stg = wp.zeros(n_envs, dtype=wp.spatial_vector, device=device)
         self._n_nodes = n_nodes
         self._n_envs = n_envs
@@ -1561,20 +1563,29 @@ class Example:
                 self._build_pressures,
             )
 
-        # Ramp rim_omega_wp toward GUI target RPM.
-        rim_omega_np = self._rim_omega_wp.numpy()
+        # Ramp rim_omega_wp toward GUI target RPM.  The host is the sole writer of
+        # rim_omega_wp (kernels only read it), so ramp the host mirror and upload
+        # only when it actually changes — steady RPM costs no PCIe traffic.
+        rim_omega_np = self._rim_omega_np
+        rpm_changed = False
         for e in range(self._n_envs):
             d = self._target_rpm[e] - self._current_rpm[e]
             if abs(d) <= _RPM_RATE:
                 self._current_rpm[e] = self._target_rpm[e]
             else:
                 self._current_rpm[e] += _RPM_RATE if d > 0.0 else -_RPM_RATE
-            rim_omega_np[e] = self._current_rpm[e] * (2.0 * math.pi / 60.0)
-        self._rim_omega_wp.assign(rim_omega_np)
+            omega = self._current_rpm[e] * (2.0 * math.pi / 60.0)
+            if omega != rim_omega_np[e]:
+                rim_omega_np[e] = omega
+                rpm_changed = True
+        if rpm_changed:
+            self._rim_omega_wp.assign(rim_omega_np)
 
         # ── RPM debug (every 1 second real time) ─────────────────────────────
+        # Off by default: the block below issues ~8 device-to-host copies per
+        # print, which stalls the pipeline.  Enable with --debug-rpm.
         _now = time.perf_counter()
-        if _now - getattr(self, "_rpm_dbg_last", 0.0) >= 1.0:
+        if self._debug_rpm and _now - getattr(self, "_rpm_dbg_last", 0.0) >= 1.0:
             try:
                 self.control.joint_target_vel.numpy()
                 self.state_0.joint_qd.numpy()
@@ -1582,7 +1593,6 @@ class Example:
                 phi_np = self._rim_phi.numpy()
                 xd_np = self.ancf_solver.node_xd.numpy()
                 print(f"\n[RPM dbg f={self._frame}]")
-                rim_omega_np = self._rim_omega_wp.numpy()
                 for e in range(self._n_envs):
                     float("nan")  # no spin_motor ctrl — spin is kinematic
                     float("nan")  # no spin_y DOF in MuJoCo
@@ -1665,10 +1675,6 @@ class Example:
             _now = time.perf_counter()
             _fps = self._diag_period / max(_now - self._t_wall, 1e-9)
             _ms = 1e3 / max(_fps, 1e-3)
-            print(f"\n[rigid-dbg] frame={self._frame} — per-wheel wrenches:")
-            self.ancf_solver._debug_wrenches = True
-            self._accumulate_wrenches()  # re-run wrench accumulation with debug on
-            self.ancf_solver._debug_wrenches = False
             self._print_diag(_fps, _ms)
             self._t_wall = _now
             self._t_step = self._t_render = self._t_kin = self._t_ancf = self._t_dyn = 0.0
@@ -2032,6 +2038,11 @@ class Example:
             type=int,
             default=5,
             help="Print diagnostics every N frames.",
+        )
+        parser.add_argument(
+            "--debug-rpm",
+            action="store_true",
+            help="Print per-env RPM/velocity debug once per second.  Costs ~8 device-to-host copies per print.",
         )
         parser.add_argument(
             "--substeps",

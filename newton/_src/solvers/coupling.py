@@ -176,6 +176,7 @@ class InterfaceCouplerGS:
         self._n_iters = n_iters
         self._tol = tol
         self._n_nodes = None  # set by allocate()
+        self.gs_iter = 0  # current GS iteration inside substep(); see prescribe_fn
 
     # ── allocation ──────────────────────────────────────────────────────────
 
@@ -370,6 +371,12 @@ class InterfaceCouplerGS:
         sp_prev: np.ndarray | None = None
 
         for k in range(self._n_iters):
+            # Current GS iteration, readable by prescribe_fn: at k=0 the rigid
+            # pose in solver.xpos is t_n (extrapolate by v*dt to reach t_{n+1});
+            # at k>0 it is already the k-th estimate of t_{n+1} (do not
+            # extrapolate again).
+            self.gs_iter = k
+
             # ── restore ANCF to t_n (1 kernel, not 7 copies) ──────────────
             self._unpack_ancf(self._ancf_cur)
 

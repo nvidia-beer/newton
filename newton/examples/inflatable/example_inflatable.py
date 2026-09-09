@@ -1899,6 +1899,12 @@ class _ShowcaseExample(Example):
         # Suppress the viewer's default single-color unified triangle mesh;
         # render() draws per-object colored meshes instead.
         self.viewer.show_triangles = False
+        # The GL viewer's spotlight is camera-anchored with a fixed 30/45 degree
+        # cone, so objects at the ends of the showcase row fall outside it and
+        # render with only the (very dim) ambient term, i.e. black.
+        renderer = getattr(self.viewer, "renderer", None)
+        if renderer is not None:
+            renderer.spotlight_enabled = False
         self._n_particles = model.particle_count
 
         # ----- Pressure state -----

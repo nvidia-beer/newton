@@ -1,0 +1,38 @@
+{
+  "description": "FEDA double-wishbone vehicle on 4 inflatable ANCF FEM tires. Combines example 7 (FEDA suspension, Pitman steering, TSDA air springs) with example 2 (MuJoCo<->ANCF bead coupling). No rigid wheels: feda_rims_only.xml leaves only an R=0.286 rim bottom-out stop, so the FEM tires carry the full 1492 kg/corner. Locked solver budget substeps=10 / nr=2 / pcg=25 and material E=50MPa, kn=20k, alpha-damp=0.15 (settles at h=0.42 m, ~14-17 kN/corner; verified 2026-09-09). 30 kPa inflation.",
+  "args": {
+    "viewer": "gl",
+    "num-frames": 600,
+    "headless": false,
+    "diag-period": 5,
+    "wheel-speed": 0.0,
+    "steer-angle": 0.0,
+    "kn": 20000.0,
+    "kd": 42.0,
+    "mu": 0.9,
+    "substeps": 10,
+    "nr-iters": 2,
+    "pcg-iters": 25,
+    "gs-iters": 2,
+    "ride-drop": 0.03,
+    "fast-math": true,
+    "shell-tires": [
+      {
+        "mesh-type": "polaris",
+        "E": 50000000.0,
+        "nu": 0.45,
+        "rho": 700.0,
+        "alpha-damp": 0.15,
+        "n-circ": 16,
+        "sec-divs": [
+          2,
+          2,
+          3
+        ],
+        "pressure": 30000.0,
+        "thickness": 0.01
+      }
+    ]
+  },
+  "example": "double_wishbone_ancf_tires"
+}

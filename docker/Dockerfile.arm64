@@ -40,6 +40,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uvx /usr/local/bin/uvx
 
+# Force uv to target the explicitly-installed python3.11 instead of falling
+# back to Ubuntu 22.04's system-default python3 (3.10). Several deps (e.g.
+# imgui-bundle) ship prebuilt manylinux_aarch64 wheels for cp311+ only; on
+# 3.10 uv falls back to a from-source build that fails against the
+# build-isolation nanobind version.
+ENV UV_PYTHON=3.11
+
 # Copy dependency files only (for layer caching)
 COPY pyproject.toml uv.lock ./
 
@@ -57,13 +64,13 @@ COPY third_party/mujoco_warp third_party/mujoco_warp
 # Install Python deps from the lockfile exactly.
 # --frozen avoids re-resolution: mujoco 3.8.x is no longer on PyPI but is pinned
 # in uv.lock, and the arm64 warp wheel is already in the lockfile too.
-RUN uv sync --frozen --prerelease=allow --no-install-workspace --extra dev
+RUN uv sync --frozen --prerelease=allow --no-install-workspace --extra dev --extra cudss
 
 # Copy source code
 COPY . ./
 
 # Install workspace packages
-RUN uv sync --frozen --prerelease=allow --extra dev
+RUN uv sync --frozen --prerelease=allow --extra dev --extra cudss
 
 # Install Nsight Systems CLI — placed after uv sync to preserve dep-resolution
 # cache. cuda-nsight-systems-13-0 is in the pre-configured CUDA 13 apt repo.

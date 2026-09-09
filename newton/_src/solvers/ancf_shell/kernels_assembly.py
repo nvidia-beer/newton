@@ -47,12 +47,6 @@ def scatter_forces(
 
 
 @wp.func
-def _skew(v: wp.vec3) -> wp.mat33:
-    """Skew-symmetric matrix [v]× such that [v]× w = v × w."""
-    return wp.mat33(0.0, -v[2], v[1], v[2], 0.0, -v[0], -v[1], v[0], 0.0)
-
-
-@wp.func
 def _pressure_element(
     x0: wp.vec3,
     x1: wp.vec3,
@@ -61,16 +55,15 @@ def _pressure_element(
     p: float,
     e: int,
     elem_fp: wp.array2d[float],  # (.,24) zeroed, write block
-    elem_Kp: wp.array3d[float],  # (.,24,24) zeroed, write block
 ):
-    """Rigorous follower pressure on the deformed bilinear quad mid-surface.
+    """Follower pressure on the deformed bilinear quad mid-surface.
 
     Force   f_a = p ∫ N_a (x_,ξ × x_,η) dξ dη          (acts normal to current surface)
-    Stiff   K_ab = p ∫ N_a (N_b,η [x_,ξ]× − N_b,ξ [x_,η]×) dξ dη   (consistent linearization)
 
-    2×2 Gauss quadrature on ξ,η ∈ [−1,1].  Writes the symmetric part of K
-    (Schweizerhof–Ramm) so the tangent stays SPD for PCG.  ``p`` already carries
-    the per-element orientation sign so positive p pushes outward.
+    2×2 Gauss quadrature on ξ,η ∈ [−1,1].  ``p`` already carries the per-element
+    orientation sign so positive p pushes outward.  The follower-load tangent is
+    deliberately not assembled (as in Chrono's ChANCFTire, SetStiff(false)):
+    the pressure enters the residual only.
     """
     g = 0.5773502691896258  # 1/sqrt(3)
     gpxi = wp.vec4(-g, g, g, -g)
@@ -92,40 +85,22 @@ def _pressure_element(
         dxi1 = 0.25 * cxi[1] * (1.0 + ceta[1] * eta)
         dxi2 = 0.25 * cxi[2] * (1.0 + ceta[2] * eta)
         dxi3 = 0.25 * cxi[3] * (1.0 + ceta[3] * eta)
-        dXi = wp.vec4(dxi0, dxi1, dxi2, dxi3)
 
         det0 = 0.25 * ceta[0] * (1.0 + cxi[0] * xi)
         det1 = 0.25 * ceta[1] * (1.0 + cxi[1] * xi)
         det2 = 0.25 * ceta[2] * (1.0 + cxi[2] * xi)
         det3 = 0.25 * ceta[3] * (1.0 + cxi[3] * xi)
-        dEta = wp.vec4(det0, det1, det2, det3)
 
         # Surface tangents at the Gauss point (weight = 1).
         x_xi = dxi0 * x0 + dxi1 * x1 + dxi2 * x2 + dxi3 * x3
         x_eta = det0 * x0 + det1 * x1 + det2 * x2 + det3 * x3
         nvec = wp.cross(x_xi, x_eta)  # area-weighted current normal
-        Sxi = _skew(x_xi)
-        Seta = _skew(x_eta)
 
         for a in range(4):
             fa = (p * Nv[a]) * nvec
             elem_fp[e, a * 6 + 0] = elem_fp[e, a * 6 + 0] + fa[0]
             elem_fp[e, a * 6 + 1] = elem_fp[e, a * 6 + 1] + fa[1]
             elem_fp[e, a * 6 + 2] = elem_fp[e, a * 6 + 2] + fa[2]
-            for b in range(4):
-                m = (p * Nv[a]) * (dEta[b] * Sxi - dXi[b] * Seta)
-                for r in range(3):
-                    for c in range(3):
-                        ia = a * 6 + r
-                        jb = b * 6 + c
-                        elem_Kp[e, ia, jb] = elem_Kp[e, ia, jb] + m[r, c]
-
-    # Symmetrize the position block in place (Schweizerhof–Ramm): SPD for PCG.
-    for i in range(24):
-        for j in range(i + 1, 24):
-            s = 0.5 * (elem_Kp[e, i, j] + elem_Kp[e, j, i])
-            elem_Kp[e, i, j] = s
-            elem_Kp[e, j, i] = s
 
 
 # ---------------------------------------------------------------------------
@@ -215,16 +190,15 @@ def compute_pressure_force_stiffness(
     psign: wp.array[float],  # (n_elem,) orientation +1/−1
     pressure: wp.array[float],  # [1] gauge pressure [Pa]
     elem_fp: wp.array2d[float],  # (n_elem, 24)   zeroed by caller
-    elem_Kp: wp.array3d[float],  # (n_elem,24,24) zeroed by caller
 ):
-    """Single-env follower pressure force + consistent symmetric stiffness."""
+    """Single-env follower pressure force."""
     e = wp.tid()
     p = pressure[0] * psign[e]
     x0 = node_x[elem_nodes[e, 0]]
     x1 = node_x[elem_nodes[e, 1]]
     x2 = node_x[elem_nodes[e, 2]]
     x3 = node_x[elem_nodes[e, 3]]
-    _pressure_element(x0, x1, x2, x3, p, e, elem_fp, elem_Kp)
+    _pressure_element(x0, x1, x2, x3, p, e, elem_fp)
 
 
 @wp.kernel
@@ -234,11 +208,10 @@ def compute_pressure_force_stiffness_batched(
     psign: wp.array[float],  # (n_elems,) — shared orientation
     pressure: wp.array[float],  # (N,) per-env gauge pressure [Pa]
     elem_fp: wp.array2d[float],  # (N*n_elems, 24)   zeroed by caller
-    elem_Kp: wp.array3d[float],  # (N*n_elems,24,24) zeroed by caller
     n_elems: int,
     n_nodes: int,
 ):
-    """dim = N*n_elems.  Per-env follower pressure force + consistent stiffness."""
+    """dim = N*n_elems.  Per-env follower pressure force."""
     tid = wp.tid()
     env = tid // n_elems
     e = tid % n_elems
@@ -248,7 +221,7 @@ def compute_pressure_force_stiffness_batched(
     x1 = node_x[nb + elem_nodes[e, 1]]
     x2 = node_x[nb + elem_nodes[e, 2]]
     x3 = node_x[nb + elem_nodes[e, 3]]
-    _pressure_element(x0, x1, x2, x3, p, tid, elem_fp, elem_Kp)
+    _pressure_element(x0, x1, x2, x3, p, tid, elem_fp)
 
 
 @wp.kernel
@@ -258,16 +231,13 @@ def compute_pressure_force_stiffness_batched_gp(
     psign: wp.array[float],
     pressure: wp.array[float],
     elem_fp: wp.array2d[float],  # (N*n_elems, 24)  zeroed by caller
-    elem_Kp: wp.array3d[float],  # (N*n_elems,24,24) zeroed by caller
     n_elems: int,
     n_nodes: int,
 ):
     """dim = N*n_elems*4.  One thread per (element, Gauss point).
 
-    Identical physics to compute_pressure_force_stiffness_batched but each
-    of the 4 in-plane GP is handled by its own thread.  Forces and stiffness
-    contributions are accumulated via atomic_add, removing the serial GP loop
-    and quadrupling the thread count (560 → 2240 for 4-env, 140-element tires).
+    Same physics as compute_pressure_force_stiffness_batched, one thread per
+    in-plane Gauss point; forces accumulate via atomic_add.
     """
     tid = wp.tid()
     e_global = tid // 4
@@ -319,32 +289,21 @@ def compute_pressure_force_stiffness_batched_gp(
     dxi1 = 0.25 * cxi1 * (1.0 + ceta1 * eta)
     dxi2 = 0.25 * cxi2 * (1.0 + ceta2 * eta)
     dxi3 = 0.25 * cxi3 * (1.0 + ceta3 * eta)
-    dXi = wp.vec4(dxi0, dxi1, dxi2, dxi3)
 
     det0 = 0.25 * ceta0 * (1.0 + cxi0 * xi)
     det1 = 0.25 * ceta1 * (1.0 + cxi1 * xi)
     det2 = 0.25 * ceta2 * (1.0 + cxi2 * xi)
     det3 = 0.25 * ceta3 * (1.0 + cxi3 * xi)
-    dEta = wp.vec4(det0, det1, det2, det3)
 
     x_xi = dxi0 * x0 + dxi1 * x1 + dxi2 * x2 + dxi3 * x3
     x_eta = det0 * x0 + det1 * x1 + det2 * x2 + det3 * x3
     nvec = wp.cross(x_xi, x_eta)
-    Sxi = _skew(x_xi)
-    Seta = _skew(x_eta)
 
     for a in range(4):
         fa = (p * Nv[a]) * nvec
         wp.atomic_add(elem_fp, e_global, a * 6 + 0, fa[0])
         wp.atomic_add(elem_fp, e_global, a * 6 + 1, fa[1])
         wp.atomic_add(elem_fp, e_global, a * 6 + 2, fa[2])
-        for b in range(4):
-            m = (p * Nv[a]) * (dEta[b] * Sxi - dXi[b] * Seta)
-            for r in range(3):
-                for c in range(3):
-                    half = 0.5 * m[r, c]
-                    wp.atomic_add(elem_Kp, e_global, a * 6 + r, b * 6 + c, half)
-                    wp.atomic_add(elem_Kp, e_global, b * 6 + c, a * 6 + r, half)
 
 
 # ---------------------------------------------------------------------------
@@ -557,4 +516,5 @@ def add_diag_to_bsr_values_batched(
     for ptr in range(bsr_offsets[i], bsr_offsets[i + 1]):
         if bsr_columns[ptr] == i:
             wp.atomic_add(bsr_vals, base + ptr, diag_val)
+            break
             break

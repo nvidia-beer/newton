@@ -1,5 +1,5 @@
 {
-    "description": "4 ANCF FEM tires on MuJoCo rigid spindles \u2014 DW material params matching ancf_rim_shell. E=50MPa, n-circ=16, kn=20k, alpha-damp=0.15, no-slip rolling via lin_motor.",
+    "description": "4 ANCF FEM tires on MuJoCo rigid spindles \u2014 DW material params matching ancf_rim_shell. E=50MPa, n-circ=16, kn=20k, locked budget substeps=10/nr=2/pcg=25 (verified 2026-09-09), no-slip rolling via lin_motor.",
     "args": {
         "viewer": "gl",
         "num-frames": 300,
@@ -7,11 +7,11 @@
         "duration": 5.0,
         "diag-period": 120,
         "drop-clearance": 0.1,
-        "substeps": 20,
+        "substeps": 10,
         "kn": 20000.0,
         "kd": 20.0,
         "mu": 0.9,
-        "nr-iters": 4,
+        "nr-iters": 2,
         "pcg-iters": 25,
         "f-load": 0.0,
         "shell-tires": [
