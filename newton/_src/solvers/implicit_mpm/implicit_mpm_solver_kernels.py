@@ -1053,6 +1053,90 @@ def mark_active_cells(
         active_cells[s_grid.element_index] = 1
 
 
+@fem.integrand
+def mask_cells_outside_regions(
+    s: fem.Sample,
+    domain: fem.Domain,
+    half_cell: wp.vec3,
+    region_lo: wp.array[wp.vec3],
+    region_hi: wp.array[wp.vec3],
+    active_cells: wp.array[int],
+):
+    """Deactivate cells whose (half-cell inflated) extent misses every region AABB.
+
+    Evaluated once per cell (``at=fem.Cells(grid)``); ``domain(s)`` is the cell centre.
+    """
+    c = domain(s)
+    lo = c - half_cell
+    hi = c + half_cell
+    for k in range(region_lo.shape[0]):
+        rlo = region_lo[k]
+        rhi = region_hi[k]
+        if (
+            hi[0] >= rlo[0]
+            and lo[0] <= rhi[0]
+            and hi[1] >= rlo[1]
+            and lo[1] <= rhi[1]
+            and hi[2] >= rlo[2]
+            and lo[2] <= rhi[2]
+        ):
+            return
+    active_cells[s.element_index] = 0
+
+
+@wp.kernel
+def flag_active_particles(cell_indices: wp.array[int], flags: wp.array[int]):
+    i = wp.tid()
+    flags[i] = wp.where(cell_indices[i] == fem.NULL_ELEMENT_INDEX, 0, 1)
+
+
+@wp.kernel
+def compact_active_particles(
+    cell_indices: wp.array[int],
+    cell_coords: wp.array[wp.vec3],
+    measures: wp.array[float],
+    flags: wp.array[int],
+    offsets: wp.array[int],
+    out_particle_ids: wp.array[int],
+    out_cell_indices: wp.array[int],
+    out_cell_coords: wp.array[wp.vec3],
+    out_measures: wp.array[float],
+    active_count: wp.array[int],
+):
+    """Scatter particles with a valid cell into a dense list (offsets = inclusive scan of flags).
+
+    Particles past the list capacity are dropped for this step, i.e. treated as inactive.
+    """
+    i = wp.tid()
+    if i == cell_indices.shape[0] - 1:
+        active_count[0] = offsets[i]
+    if flags[i] == 0:
+        return
+    j = offsets[i] - 1
+    if j >= out_particle_ids.shape[0]:
+        return
+    out_particle_ids[j] = i
+    out_cell_indices[j] = cell_indices[i]
+    out_cell_coords[j] = cell_coords[i]
+    out_measures[j] = measures[i]
+
+
+@wp.kernel
+def clear_compacted_tail(active_count: wp.array[int], out_cell_indices: wp.array[int]):
+    j = wp.tid()
+    if j >= active_count[0]:
+        out_cell_indices[j] = fem.NULL_ELEMENT_INDEX
+
+
+@wp.kernel
+def remap_pic_particle_indices(active_particle_ids: wp.array[int], cell_particle_index: wp.array[int]):
+    """Turn compacted-list indices stored by PicQuadrature back into model particle indices."""
+    cp = wp.tid()
+    pi = cell_particle_index[cp]
+    if pi >= 0 and pi < active_particle_ids.shape[0]:
+        cell_particle_index[cp] = active_particle_ids[pi]
+
+
 @wp.kernel(module="unique")
 def scatter_field_dof_values(
     space_node_indices: wp.array[int],

@@ -41,13 +41,16 @@ from .implicit_mpm_solver_kernels import (
     advect_particles,
     allocate_by_voxels,
     average_elastic_parameters,
+    clear_compacted_tail,
     collision_weight_field,
+    compact_active_particles,
     compliance_form,
     compute_bounds,
     compute_color_offsets,
     compute_eigenvalues,
     compute_unilateral_strain_offset,
     fill_uniform_color_block_indices,
+    flag_active_particles,
     free_velocity,
     integrate_active_fraction,
     integrate_collider_fraction,
@@ -66,12 +69,14 @@ from .implicit_mpm_solver_kernels import (
     make_inverse_rotate_vectors,
     make_rotate_vectors,
     mark_active_cells,
+    mask_cells_outside_regions,
     mass_form,
     mat11,
     mat13,
     mat31,
     mat66,
     node_color,
+    remap_pic_particle_indices,
     rotate_matrix_columns,
     rotate_matrix_rows,
     scatter_field_dof_values,
@@ -682,6 +687,12 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         """Number of empty cells to add around particles when allocating the grid."""
         max_active_cell_count: int = -1
         """Maximum number of active cells to use for active subsets of dense grids. -1 means unlimited."""
+        max_active_particle_count: int = -1
+        """Capacity of the compacted list of particles whose cell is in the active partition.
+        While active regions are set (:meth:`set_active_regions`), particle-grid transfers and
+        advection run over this list instead of all particles; particles beyond the capacity
+        are treated as inactive for that step. -1 disables compaction. Requires
+        ``integration_scheme="pic"``."""
         transfer_scheme: Literal["apic", "pic"] = "apic"
         """Transfer scheme to use for particle-grid transfers."""
         integration_scheme: Literal["pic", "gimp"] = "pic"
@@ -969,6 +980,25 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
         self._use_cuda_graph = self.model.device.is_cuda and wp.is_conditional_graph_supported()
 
         self._timers_use_nvtx = False
+
+        self._region_lo: wp.array | None = None
+        self._region_hi: wp.array | None = None
+
+        self._max_active_particles = int(config.max_active_particle_count)
+        if self._max_active_particles > 0:
+            if self.gimp:
+                raise ValueError("max_active_particle_count requires integration_scheme 'pic'")
+            n = model.particle_count
+            cap = min(self._max_active_particles, n)
+            with wp.ScopedDevice(model.device):
+                self._compact_flags = wp.zeros(n, dtype=int)
+                self._compact_offsets = wp.zeros(n, dtype=int)
+                self._active_particle_ids = wp.zeros(cap, dtype=int)
+                self._compact_cells = wp.full(cap, int(fem.NULL_ELEMENT_INDEX), dtype=int)
+                self._compact_coords = wp.zeros(cap, dtype=wp.vec3)
+                self._compact_measures = wp.zeros(cap, dtype=float)
+                self.active_particle_count = wp.zeros(1, dtype=int)
+                """Number of particles inside the active partition at the last step, shape [1] (device)."""
 
         # Pre-allocate scratchpad and last step data so that step() can be graph-captured
         self._scratchpad = None
@@ -1340,6 +1370,67 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             state.collider_ids,
         )
 
+    def set_active_regions(self, region_lo: wp.array | None, region_hi: wp.array | None) -> None:
+        """Restrict the active grid to cells overlapping a set of world-space AABBs.
+
+        Particles whose cell lies outside every region are excluded from the
+        transfer, rheology solve and advection for that step; their positions
+        are preserved and their velocity is zeroed. Intended for scenes where
+        the disturbance sources are known (e.g. a few moving contact patches),
+        so the rest of a large bed stays dormant. The arrays are read on every
+        step, so update them in place to keep captured graphs valid.
+
+        Frozen particles keep no elastic strain across steps: do not combine
+        with compliant particles or ``warmstart_mode="particles"``.
+
+        Args:
+            region_lo: Lower corners of the regions [m], shape [region_count].
+                ``None`` disables region masking.
+            region_hi: Upper corners of the regions [m], shape [region_count].
+        """
+        if region_lo is None or region_hi is None:
+            self._region_lo = None
+            self._region_hi = None
+            return
+        if self.grid_type == "sparse":
+            raise ValueError("Active regions require grid_type 'dense' or 'fixed'")
+        if region_lo.shape != region_hi.shape:
+            raise ValueError("region_lo and region_hi must have the same shape")
+        self._region_lo = region_lo
+        self._region_hi = region_hi
+
+    def collect_deformable_collider_particle_forces(
+        self, state: newton.State, dt: float, out_particle_f: wp.array[wp.vec3]
+    ) -> None:
+        """Accumulate collider impulses onto the vertices of deformable mesh colliders.
+
+        Each active collider node's impulse is divided by ``dt`` and split
+        barycentrically over the three vertices of the closest triangle of its
+        collider mesh, then added to ``out_particle_f`` at the model particle
+        ids the mesh was registered with (see :meth:`setup_collider`,
+        ``collider_particle_ids``). The caller zeroes ``out_particle_f``.
+
+        Args:
+            state: State returned by the latest :meth:`step`.
+            dt: Time step the impulses were accumulated over [s].
+            out_particle_f: Per-particle force accumulator [N], shape [particle_count].
+        """
+        if dt <= 0.0:
+            raise ValueError("dt must be positive")
+        if not self._mpm_model.deformable_collider_vertex_ranges:
+            return
+
+        impulses, positions, collider_ids = self.collect_collider_impulses(state)
+        if collider_ids.shape[0] == 0:
+            return
+
+        wp.launch(
+            _collect_deformable_collider_particle_forces_kernel,
+            dim=collider_ids.shape[0],
+            inputs=[float(dt), collider_ids, impulses, positions, self._mpm_model.collider, out_particle_f],
+            device=self.model.device,
+        )
+
     @property
     def collider_body_index(self) -> wp.array:
         """Array mapping collider indices to body indices.
@@ -1543,6 +1634,20 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
             temporary_store=self.temporary_store,
         )
 
+        if self._region_lo is not None:
+            cell_size = grid.cell_size
+            fem.interpolate(
+                mask_cells_outside_regions,
+                at=fem.Cells(grid),
+                values={
+                    "half_cell": wp.vec3(0.5 * cell_size[0], 0.5 * cell_size[1], 0.5 * cell_size[2]),
+                    "region_lo": self._region_lo,
+                    "region_hi": self._region_hi,
+                    "active_cells": active_cells,
+                },
+                temporary_store=self.temporary_store,
+            )
+
         partition = fem.ExplicitGeometryPartition(
             grid,
             cell_mask=active_cells,
@@ -1616,27 +1721,75 @@ class SolverImplicitMPM(SolverBase, CouplingInterface):
                 geo_partition = self._create_geometry_partition(
                     grid, positions, self._mpm_model.particle_flags, max_cell_count
                 )
+            domain = fem.Cells(geo_partition)
 
         # Bin particles to grid cells
         with self._timer("Bin particles"):
-            domain = fem.Cells(geo_partition)
-
+            measures = self._mpm_model.particle_volume
+            # Compaction only pays (and only has a bounded capacity) when regions leave most
+            # particles outside the active partition.
+            compact = self._max_active_particles > 0 and self._region_lo is not None
             if self.gimp:
                 particle_locations = self._particle_grid_locations_gimp(
                     domain, positions, self._mpm_model.particle_radius
                 )
             else:
                 particle_locations = self._particle_grid_locations(domain, positions)
+                if compact:
+                    particle_locations, measures = self._compact_active_particles(particle_locations, measures)
 
             pic = fem.PicQuadrature(
                 domain=domain,
                 positions=particle_locations,
-                measures=self._mpm_model.particle_volume,
+                measures=measures,
                 temporary_store=self.temporary_store,
                 use_domain_element_indices=True,
             )
 
+            if compact:
+                # PicQuadrature stored indices into the compacted list; integrands index the
+                # full particle arrays through s.qp_index, so map them back to particle ids.
+                wp.launch(
+                    remap_pic_particle_indices,
+                    dim=pic.cell_particle_indices.shape[0],
+                    inputs=[self._active_particle_ids, pic.cell_particle_indices],
+                )
+
         return pic
+
+    def _compact_active_particles(self, particle_locations, measures):
+        """Dense (cell, coords, measure) list of the particles with a valid partition cell.
+
+        Every transfer/advection pass over the quadrature launches one thread per list entry, so
+        the cost of the dormant bulk of a large bed drops to the O(N) flag/scan/scatter here.
+        Scan-based, hence deterministic and graph-capturable.
+        """
+        cell_indices, cell_coords = particle_locations
+        n = cell_indices.shape[0]
+        wp.launch(flag_active_particles, dim=n, inputs=[cell_indices, self._compact_flags])
+        wp.utils.array_scan(self._compact_flags, self._compact_offsets, inclusive=True)
+        wp.launch(
+            compact_active_particles,
+            dim=n,
+            inputs=[
+                cell_indices,
+                cell_coords,
+                measures,
+                self._compact_flags,
+                self._compact_offsets,
+                self._active_particle_ids,
+                self._compact_cells,
+                self._compact_coords,
+                self._compact_measures,
+                self.active_particle_count,
+            ],
+        )
+        wp.launch(
+            clear_compacted_tail,
+            dim=self._compact_cells.shape[0],
+            inputs=[self.active_particle_count, self._compact_cells],
+        )
+        return (self._compact_cells, self._compact_coords), self._compact_measures
 
     def _particle_grid_locations(self, domain: fem.GeometryDomain, positions: wp.array) -> wp.array:
         """Convert particle positions to grid locations."""
@@ -2856,6 +3009,64 @@ def _rewind_mpm_proxy_particles_kernel(
     particle_qd[local_particle] = particle_qd[local_particle] - delta_v
 
 
+@wp.func
+def _deformable_collider_impulse_vertices(
+    collider: Collider,
+    cid: int,
+    pos: wp.vec3,
+):
+    """Closest triangle of deformable collider ``cid`` to ``pos``: (found, particle ids, barycentric weights)."""
+    found = False
+    dst_i = int(-1)
+    dst_j = int(-1)
+    dst_k = int(-1)
+    w = wp.vec3(0.0)
+
+    if cid >= 0 and cid + 1 < collider.collider_particle_offsets.shape[0]:
+        vertex_offset = collider.collider_particle_offsets[cid]
+        vertex_end = collider.collider_particle_offsets[cid + 1]
+        if vertex_end > vertex_offset:
+            mesh = collider.collider_mesh[cid]
+            max_dist = collider.query_max_dist + collider.collider_max_thickness[cid]
+            query = wp.mesh_query_point_no_sign(mesh, pos, max_dist)
+            if query.result:
+                indices = wp.mesh_get(mesh).indices
+                tri = query.face
+                dst_i = collider.collider_particle_ids[vertex_offset + indices[3 * tri + 0]]
+                dst_j = collider.collider_particle_ids[vertex_offset + indices[3 * tri + 1]]
+                dst_k = collider.collider_particle_ids[vertex_offset + indices[3 * tri + 2]]
+                w = wp.vec3(1.0 - query.u - query.v, query.u, query.v)
+                found = True
+
+    return found, dst_i, dst_j, dst_k, w
+
+
+@wp.kernel(enable_backward=False)
+def _collect_deformable_collider_particle_forces_kernel(
+    dt: float,
+    collider_ids: wp.array[int],
+    collider_impulses: wp.array[wp.vec3],
+    collider_impulse_pos: wp.array[wp.vec3],
+    collider: Collider,
+    out_particle_f: wp.array[wp.vec3],
+):
+    i = wp.tid()
+    found, dst_i, dst_j, dst_k, w = _deformable_collider_impulse_vertices(
+        collider, collider_ids[i], collider_impulse_pos[i]
+    )
+    if not found:
+        return
+
+    f = collider_impulses[i] / dt
+    n = out_particle_f.shape[0]
+    if dst_i >= 0 and dst_i < n and w[0] > 0.0:
+        wp.atomic_add(out_particle_f, dst_i, w[0] * f)
+    if dst_j >= 0 and dst_j < n and w[1] > 0.0:
+        wp.atomic_add(out_particle_f, dst_j, w[1] * f)
+    if dst_k >= 0 and dst_k < n and w[2] > 0.0:
+        wp.atomic_add(out_particle_f, dst_k, w[2] * f)
+
+
 @wp.kernel(enable_backward=False)
 def _harvest_mpm_proxy_particle_forces_kernel(
     dt: float,
@@ -2869,36 +3080,16 @@ def _harvest_mpm_proxy_particle_forces_kernel(
     out_particle_f: wp.array[wp.vec3],
 ):
     i = wp.tid()
-    cid = collider_ids[i]
-
-    if cid < 0 or cid + 1 >= collider.collider_particle_offsets.shape[0]:
+    found, dst_i, dst_j, dst_k, w = _deformable_collider_impulse_vertices(
+        collider, collider_ids[i], collider_impulse_pos[i]
+    )
+    if not found:
         return
-
-    vertex_offset = collider.collider_particle_offsets[cid]
-    vertex_end = collider.collider_particle_offsets[cid + 1]
-    if vertex_end <= vertex_offset:
-        return
-
-    mesh = collider.collider_mesh[cid]
-    max_dist = collider.query_max_dist + collider.collider_max_thickness[cid]
-    query = wp.mesh_query_point_no_sign(mesh, collider_impulse_pos[i], max_dist)
-    if not query.result:
-        return
-
-    indices = wp.mesh_get(mesh).indices
-    tri = query.face
-    local_i = indices[3 * tri + 0]
-    local_j = indices[3 * tri + 1]
-    local_k = indices[3 * tri + 2]
-
-    dst_i = collider.collider_particle_ids[vertex_offset + local_i]
-    dst_j = collider.collider_particle_ids[vertex_offset + local_j]
-    dst_k = collider.collider_particle_ids[vertex_offset + local_k]
 
     f = collider_impulses[i] / dt
-    w_j = query.u
-    w_k = query.v
-    w_i = 1.0 - w_j - w_k
+    w_i = w[0]
+    w_j = w[1]
+    w_k = w[2]
 
     if dst_i >= 0 and dst_i < particle_local_to_proxy_global.shape[0]:
         proxy_global_i = particle_local_to_proxy_global[dst_i]
