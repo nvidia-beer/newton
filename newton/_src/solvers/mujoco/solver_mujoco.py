@@ -745,6 +745,80 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             for joint_idx, coef in joint_entries
         ]
 
+    @staticmethod
+    def _parse_mjc_spatial_tendon_wrap_entries(prim, context: dict[str, Any]) -> list[int]:
+        """Parse the site wrap path of a spatial MjcTendon prim.
+
+        Only site targets are supported (``mjc:path`` entries whose prim was imported as a
+        site shape); geom wraps and pulleys are not part of the USD import yet. A tendon
+        whose path has any other target is skipped entirely so it cannot pull along a
+        truncated path.
+
+        Returns:
+            List of Newton shape indices of the wrap sites in authored tendon path order.
+        """
+        tendon_type_attr = prim.GetAttribute("mjc:type")
+        tendon_type = tendon_type_attr.Get() if tendon_type_attr else None
+        if tendon_type is None or str(tendon_type).lower() != "spatial":
+            return []
+
+        result = context.get("result") or {}
+        path_shape_map = result.get("path_shape_map") or {}
+
+        path_rel = prim.GetRelationship("mjc:path")
+        path_targets = list(path_rel.GetTargets()) if path_rel else []
+        if len(path_targets) == 0:
+            return []
+
+        indices_attr = prim.GetAttribute("mjc:path:indices")
+        authored_indices = indices_attr.Get() if indices_attr else None
+        indices = list(authored_indices) if authored_indices is not None and len(authored_indices) > 0 else None
+        if indices is None:
+            indices = list(range(len(path_targets)))
+
+        site_shapes: list[int] = []
+        for path_idx in indices:
+            path_idx_int = int(path_idx)
+            if path_idx_int < 0 or path_idx_int >= len(path_targets):
+                warnings.warn(
+                    f"MjcTendon {prim.GetPath()} has out-of-range mjc:path:indices entry {path_idx_int}. "
+                    "Skipping the tendon.",
+                    stacklevel=2,
+                )
+                return []
+            site_path = str(path_targets[path_idx_int])
+            shape_idx = path_shape_map.get(site_path)
+            if shape_idx is None:
+                warnings.warn(
+                    f"MjcTendon {prim.GetPath()} references {site_path}, which was not imported as a site "
+                    "(only site wraps are supported from USD). Skipping the tendon.",
+                    stacklevel=2,
+                )
+                return []
+            site_shapes.append(int(shape_idx))
+
+        if len(site_shapes) < 2:
+            warnings.warn(
+                f"MjcTendon {prim.GetPath()} is spatial but has fewer than two sites. Skipping the tendon.",
+                stacklevel=2,
+            )
+            return []
+        return site_shapes
+
+    @staticmethod
+    def _expand_mjc_tendon_wrap_rows(prim, context: dict[str, Any]) -> Iterable[dict[str, Any]]:
+        """Expand one spatial MjcTendon prim into 0..N mujoco:tendon_wrap site rows."""
+        site_shapes = SolverMuJoCo._parse_mjc_spatial_tendon_wrap_entries(prim, context)
+        return [
+            {
+                "mujoco:tendon_wrap_type": 0,  # site
+                "mujoco:tendon_wrap_shape": shape_idx,
+                "mujoco:tendon_wrap_sidesite": -1,
+                "mujoco:tendon_wrap_prm": 0.0,
+            }
+            for shape_idx in site_shapes
+        ]
+
     @override
     @classmethod
     def register_custom_attributes(cls, builder: ModelBuilder) -> None:
@@ -806,6 +880,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             ModelBuilder.CustomFrequency(
                 name="tendon_wrap",
                 namespace="mujoco",
+                usd_prim_filter=cls._is_mjc_tendon_prim,
+                usd_entry_expander=cls._expand_mjc_tendon_wrap_rows,
             )
         )
         # endregion custom frequencies
@@ -2152,6 +2228,21 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             joint_entries = cls._parse_mjc_fixed_tendon_joint_entries(context["prim"], context_builder)
             return len(joint_entries)
 
+        def resolve_tendon_type(value: Any, _context: dict[str, Any]) -> int:
+            return 1 if value is not None and str(value).lower() == "spatial" else 0
+
+        def resolve_tendon_wrap_adr(_: Any, context: dict[str, Any]) -> int:
+            context_builder = resolve_context_builder(context)
+            wrap_attr = context_builder.custom_attributes.get("mujoco:tendon_wrap_shape")
+            if wrap_attr is None or not isinstance(wrap_attr.values, list):
+                return 0
+            return len(wrap_attr.values)
+
+        def resolve_tendon_wrap_num(_: Any, context: dict[str, Any]) -> int:
+            wrap_context = dict(context)
+            wrap_context["builder"] = resolve_context_builder(context)
+            return len(cls._parse_mjc_spatial_tendon_wrap_entries(context["prim"], wrap_context))
+
         builder.add_custom_attribute(
             ModelBuilder.CustomAttribute(
                 name="tendon_limited",
@@ -2342,6 +2433,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
 
         # --- Spatial tendon attributes ---
         # Tendon type distinguishes fixed (0) from spatial (1) tendons.
+        # From USD the MjcTendon ``mjc:type`` token ("fixed" | "spatial") selects the type;
+        # the MJCF importer sets it directly from the <fixed>/<spatial> tag.
         builder.add_custom_attribute(
             ModelBuilder.CustomAttribute(
                 name="tendon_type",
@@ -2349,6 +2442,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 dtype=wp.int32,
                 default=0,
                 namespace="mujoco",
+                usd_attribute_name="mjc:type",
+                usd_value_transformer=resolve_tendon_type,
             )
         )
         # Addressing into wrap path arrays (one per tendon, used by spatial tendons)
@@ -2360,6 +2455,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 default=0,
                 namespace="mujoco",
                 references="mujoco:tendon_wrap",
+                usd_attribute_name="*",
+                usd_value_transformer=resolve_tendon_wrap_adr,
             )
         )
         builder.add_custom_attribute(
@@ -2369,6 +2466,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 dtype=wp.int32,
                 default=0,
                 namespace="mujoco",
+                usd_attribute_name="*",
+                usd_value_transformer=resolve_tendon_wrap_num,
             )
         )
 
