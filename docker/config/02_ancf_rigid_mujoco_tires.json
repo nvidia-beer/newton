@@ -1,0 +1,75 @@
+{
+    "description": "4 ANCF FEM tires on MuJoCo rigid spindles (single-wheel test rigs: slide_x with a no-slip lin_motor, free slide_z carrying the spindle). run-examples.sh asks which vehicle USD to load (default: Sherp); the spindle is that vehicle's own wheel body (mass, inertia, hub / axle shapes from the vehicle USD) and the tire is the vehicle's default tire unless --tire-asset overrides. Material as the vehicle baseline of 03_vehicle_ancf_tires (E=50 MPa, nu 0.45, rho 700, alpha-damp 0.15); thickness null = the tire asset's recommendation. kn / kd / pcg-iters null = the tire asset's recommendation. substeps=10 / nr=2 as validated 2026-09-09.",
+    "example": "ancf_rigid_mujoco_tires",
+    "args": {
+        "viewer": "gl",
+        "num-frames": 300,
+        "headless": false,
+        "diag-period": 120,
+        "drop-clearance": 0.1,
+        "vehicle-asset": null,
+        "tire-asset": null,
+        "substeps": 10,
+        "nr-iters": 2,
+        "pcg-iters": 10,
+        "kn": null,
+        "kd": null,
+        "mu": 0.9,
+        "f-load": 0.0,
+        "fast-math": true,
+        "shell-tires": [
+            {
+                "E": 50000000.0,
+                "nu": 0.45,
+                "rho": 700.0,
+                "alpha-damp": 0.15,
+                "pressure": 30000.0,
+                "thickness": null,
+                "position": [
+                    0.0,
+                    0.0,
+                    0.0
+                ]
+            },
+            {
+                "E": 50000000.0,
+                "nu": 0.45,
+                "rho": 700.0,
+                "alpha-damp": 0.15,
+                "pressure": 30000.0,
+                "thickness": null,
+                "position": [
+                    1.2,
+                    0.0,
+                    0.0
+                ]
+            },
+            {
+                "E": 50000000.0,
+                "nu": 0.45,
+                "rho": 700.0,
+                "alpha-damp": 0.15,
+                "pressure": 30000.0,
+                "thickness": null,
+                "position": [
+                    2.4,
+                    0.0,
+                    0.0
+                ]
+            },
+            {
+                "E": 50000000.0,
+                "nu": 0.45,
+                "rho": 700.0,
+                "alpha-damp": 0.15,
+                "pressure": 30000.0,
+                "thickness": null,
+                "position": [
+                    3.6,
+                    0.0,
+                    0.0
+                ]
+            }
+        ]
+    }
+}

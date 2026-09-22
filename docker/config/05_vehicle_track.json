@@ -1,0 +1,39 @@
+{
+    "description": "A vehicle USD on 4 ANCF FEM tires manoeuvring around a closed rocky corridor baked by third_party/newton-terrain-tool (--terrain: test_01_oval_easy / test_02_fourier_medium / test_03_fourier_hard / superjeep_track). run-examples.sh asks which vehicle USD to load (default: the Sherp; see 03_vehicle_ancf_tires); skid-steered vehicles get a pure-pursuit driver built with wheelbase = half track so its steer output is the turn command. Heightmap = rigid ANCF terrain contact on the full grid + a hidden block-mean hfield at --mujoco-terrain-cell (0.5 m) for the MuJoCo rigid parts (0.5 m block mean kept for this example; the vendored mujoco_warp collects up to MJ_MAXHFPRISM = 128 hfield prisms per geom, so the field example collides with the fine grid); route metadata (centerline, borders, spawn, checkpoints) drives the UI. The vehicle spawns at the origin heading +x and the terrain is shifted under it. Driver behind the TrackDriver interface (--driver manual | pure_pursuit); sliders take over when moved. Cruise speed 3 m/s = the speed above which the wheels leave the ground on this terrain: the centreline's rock component (4 m detrended) is 0.18 m (p95) at a 2.7 m dominant wavelength, v_hop = sqrt(g lam^2 / (4 pi^2 a)) = 3.2 m/s; a-lat 2.5 keeps the curvature cap on. max-wheel-speed null = the vehicle asset's rated top speed (Sherp 12.3 rad/s = 40 km/h); the wheel-speed ramp is capped at the traction limit mu g / r_roll. (9 m/s with a-lat 0 ran the tracker flat out and had the car airborne between rocks.) kn / kd / pcg-iters null = tire asset recommendation.",
+    "example": "vehicle_track",
+    "args": {
+        "viewer": "gl",
+        "num-frames": 1200,
+        "headless": false,
+        "vehicle-asset": null,
+        "tire-asset": null,
+        "terrain": "test_03_fourier_hard",
+        "mujoco-terrain-cell": 0.5,
+        "driver": "pure_pursuit",
+        "speed": 3.0,
+        "a-lat": 2.5,
+        "max-wheel-speed": null,
+        "wheel-speed": 0.0,
+        "steer-angle": 0.0,
+        "diag-period": 60,
+        "kn": null,
+        "kd": null,
+        "mu": 0.9,
+        "substeps": 10,
+        "nr-iters": 2,
+        "pcg-iters": 10,
+        "gs-iters": 1,
+        "ride-drop": 0.03,
+        "fast-math": true,
+        "shell-tires": [
+            {
+                "E": 50000000.0,
+                "nu": 0.45,
+                "rho": 700.0,
+                "alpha-damp": 0.15,
+                "pressure": 30000.0,
+                "thickness": null
+            }
+        ]
+    }
+}

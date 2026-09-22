@@ -176,6 +176,60 @@ RESOLVE_CMD=(python3 "$HELPER" resolve --config "$CONFIG_DIR/$EXAMPLE.json")
 [ "$EDIT" -eq 1 ] && RESOLVE_CMD+=(--edit)
 for s in "${SETS[@]}"; do RESOLVE_CMD+=(--set "$s"); done
 
+# ─── Vehicle prompt: configs with a "vehicle-asset" key run any vehicle USD ──
+# (newton/examples/ancf/assets/*_vehicle.usd*, baked by newton-tire-tool). Ask which one
+# unless --set vehicle-asset=... / a raw --vehicle-asset was given; default: the Sherp.
+# The tire follows the vehicle (defaultTireAsset in the vehicle USD) unless overridden.
+HAS_VEHICLE_KEY=$(python3 -c "import json; d=json.load(open('$CONFIG_DIR/$EXAMPLE.json')); print(int('vehicle-asset' in d.get('args', {})))")
+VEHICLE_GIVEN=0
+for s in "${SETS[@]}"; do [[ "$s" == vehicle-asset=* ]] && VEHICLE_GIVEN=1; done
+for r in "${RAW_ARGS[@]}"; do [[ "$r" == --vehicle-asset* ]] && VEHICLE_GIVEN=1; done
+if [ "$HAS_VEHICLE_KEY" = "1" ] && [ "$VEHICLE_GIVEN" -eq 0 ]; then
+    mapfile -t VEHICLES < <(cd "$NEWTON_DIR/newton/examples/ancf/assets" && ls *_vehicle.usd* 2>/dev/null)
+    if [ "${#VEHICLES[@]}" -eq 0 ]; then
+        echo "Error: no vehicle assets (*_vehicle.usd*) in newton/examples/ancf/assets — run newton-tire-tool/scripts/regenerate_all.sh" >&2
+        exit 1
+    fi
+    VDEFAULT=1
+    for i in "${!VEHICLES[@]}"; do [ "${VEHICLES[$i]}" = "sherp_vehicle.usdc" ] && VDEFAULT=$((i+1)); done
+    echo "Vehicle (USD asset):"
+    for i in "${!VEHICLES[@]}"; do printf "  %3d) %s\n" $((i+1)) "${VEHICLES[$i]}"; done
+    read -p "Select vehicle (1-${#VEHICLES[@]}, Enter for ${VDEFAULT}=${VEHICLES[$((VDEFAULT-1))]}): " vchoice
+    vchoice="${vchoice:-$VDEFAULT}"
+    if ! [[ "$vchoice" =~ ^[0-9]+$ ]] || [ "$vchoice" -lt 1 ] || [ "$vchoice" -gt "${#VEHICLES[@]}" ]; then
+        echo "Error: invalid vehicle choice." >&2
+        exit 1
+    fi
+    RESOLVE_CMD+=(--set "vehicle-asset=${VEHICLES[$((vchoice-1))]}")
+    echo ""
+fi
+
+# ─── Tire prompt: tire-only configs (a "tire-asset" key, no vehicle) run any ANCF tire USD ──
+# (newton/examples/ancf/assets/*_tire.usda). Default: the super-jeep tire (the validated one; the Sherp bake is not stable yet). Skipped when given.
+HAS_TIRE_KEY=$(python3 -c "import json; a=json.load(open('$CONFIG_DIR/$EXAMPLE.json')).get('args', {}); print(int('tire-asset' in a and 'vehicle-asset' not in a))")
+TIRE_GIVEN=0
+for s in "${SETS[@]}"; do [[ "$s" == tire-asset=* ]] && TIRE_GIVEN=1; done
+for r in "${RAW_ARGS[@]}"; do [[ "$r" == --tire-asset* ]] && TIRE_GIVEN=1; done
+if [ "$HAS_TIRE_KEY" = "1" ] && [ "$TIRE_GIVEN" -eq 0 ]; then
+    mapfile -t TIRES < <(cd "$NEWTON_DIR/newton/examples/ancf/assets" && ls *_tire.usda 2>/dev/null)
+    if [ "${#TIRES[@]}" -eq 0 ]; then
+        echo "Error: no tire assets (*_tire.usda) in newton/examples/ancf/assets — run newton-tire-tool/scripts/regenerate_all.sh" >&2
+        exit 1
+    fi
+    TDEFAULT=1
+    for i in "${!TIRES[@]}"; do [ "${TIRES[$i]}" = "superjeep_tire.usda" ] && TDEFAULT=$((i+1)); done
+    echo "Tire (ANCF USD asset):"
+    for i in "${!TIRES[@]}"; do printf "  %3d) %s\n" $((i+1)) "${TIRES[$i]}"; done
+    read -p "Select tire (1-${#TIRES[@]}, Enter for ${TDEFAULT}=${TIRES[$((TDEFAULT-1))]}): " tchoice
+    tchoice="${tchoice:-$TDEFAULT}"
+    if ! [[ "$tchoice" =~ ^[0-9]+$ ]] || [ "$tchoice" -lt 1 ] || [ "$tchoice" -gt "${#TIRES[@]}" ]; then
+        echo "Error: invalid tire choice." >&2
+        exit 1
+    fi
+    RESOLVE_CMD+=(--set "tire-asset=${TIRES[$((tchoice-1))]}")
+    echo ""
+fi
+
 RESOLVED=$("${RESOLVE_CMD[@]}")
 # Raw args (after '--') go last and win per argparse's last-value rule.
 RAW_STR=""

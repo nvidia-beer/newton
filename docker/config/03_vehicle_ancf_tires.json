@@ -1,0 +1,33 @@
+{
+    "description": "A vehicle USD (--vehicle-asset) on 4 inflatable ANCF FEM tires (--tire-asset) on flat ground: MuJoCo rigid vehicle <-> ANCF bead coupling. run-examples.sh asks which vehicle USD to load (default: the Sherp); the tire follows the vehicle (defaultTireAsset in the vehicle USD) unless tire-asset is set. Vehicles: superjeep_vehicle.usdc (Chrono double wishbone; rim bottom-out stops only, the FEM tires carry ~1490 kg/corner; validated 2026-09-09 at kn=20k, E=50 MPa, alpha-damp 0.15, thickness 0.01: settles at h=0.42 m, 14-17 kN/corner) or sherp_vehicle.usdc + sherp_ancf_tire.usda (rigid hull, fixed axles, skid steer). kn null = the tire asset's recommendation (scaled with node area); kd null = kn x 42/20000; pcg-iters 10 = the locked solver budget (substeps 10 / nr 2 / pcg 10) in every config, whatever the tire asset's pcgIters says. thickness null = the tire asset's recommendation (superjeep_tire: the validated uniform 0.01; Sherp: its baked bands). Steer / speed limits, camera and the CTIS panel come from the vehicle asset.",
+    "example": "vehicle_ancf_tires",
+    "args": {
+        "viewer": "gl",
+        "num-frames": 600,
+        "headless": false,
+        "vehicle-asset": null,
+        "tire-asset": null,
+        "diag-period": 5,
+        "wheel-speed": 0.0,
+        "steer-angle": 0.0,
+        "kn": null,
+        "kd": null,
+        "mu": 0.9,
+        "substeps": 10,
+        "nr-iters": 2,
+        "pcg-iters": 10,
+        "gs-iters": 1,
+        "ride-drop": 0.03,
+        "fast-math": true,
+        "shell-tires": [
+            {
+                "E": 50000000.0,
+                "nu": 0.45,
+                "rho": 700.0,
+                "alpha-damp": 0.15,
+                "pressure": 30000.0,
+                "thickness": null
+            }
+        ]
+    }
+}

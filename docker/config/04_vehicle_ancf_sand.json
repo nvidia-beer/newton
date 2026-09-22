@@ -1,0 +1,43 @@
+{
+    "description": "A vehicle USD on 4 ANCF FEM tires driving on implicit-MPM sand (scenario 3 + SolverImplicitMPM). run-examples.sh asks which vehicle USD to load (default: the Sherp; see 03_vehicle_ancf_tires). Sand bed 12x6x0.4 m, voxel 0.05, 2 ppc/axis, the whole bed simulated every step; only the 4 tire meshes are MPM colliders; sand reaction enters the tread nodes via node_f_ext_persistent. For the x10 Sherp a bed of 6 3 0.25 at voxel 0.035 is the same relative size. --sand-size 4 3 0.3 for a quick stability check. kn / kd / pcg-iters null = tire asset recommendation; thickness null = the tire asset's shellThickness (Sherp 8 mm, jeep 10 mm) else its bands; the pressure is clamped into the vehicle's CTIS envelope (Sherp: 2.1 psi).",
+    "example": "vehicle_ancf_sand",
+    "args": {
+        "viewer": "gl",
+        "num-frames": 600,
+        "headless": false,
+        "vehicle-asset": null,
+        "tire-asset": null,
+        "diag-period": 30,
+        "wheel-speed": 0.0,
+        "steer-angle": 0.0,
+        "kn": null,
+        "kd": null,
+        "mu": 0.9,
+        "substeps": 10,
+        "nr-iters": 2,
+        "pcg-iters": 10,
+        "gs-iters": 1,
+        "ride-drop": 0.03,
+        "fast-math": true,
+        "sand-size": [
+            12.0,
+            6.0,
+            0.4
+        ],
+        "sand-voxel": 0.05,
+        "sand-ppc": 2,
+        "sand-rho": 1500.0,
+        "sand-friction": 0.68,
+        "mpm-iters": 25,
+        "shell-tires": [
+            {
+                "E": 50000000.0,
+                "nu": 0.45,
+                "rho": 700.0,
+                "alpha-damp": 0.15,
+                "pressure": 30000.0,
+                "thickness": null
+            }
+        ]
+    }
+}

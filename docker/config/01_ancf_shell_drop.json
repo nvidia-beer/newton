@@ -1,0 +1,82 @@
+{
+    "description": "ANCF3423 shell tire(s) dropped onto rigid ground. run-examples.sh asks which ANCF tire USD to load (default: sherp_ancf_tire.usda \u2014 the Sherp's carcass + 26 flat-topped lugs at x10 from its STL). Each tire entry is independent \u2014 position and material are per tire; the mesh and its per-section thickness come from the asset (E null = the asset's baked orthotropic material). Global solver params apply to all tires; pcg-iters null = the tire asset's recommendation (10, the locked budget, for every baked tire).",
+    "example": "ancf_shell_drop",
+    "args": {
+        "viewer": "gl",
+        "num-frames": 300,
+        "headless": false,
+        "n-envs": 1,
+        "tire-asset": null,
+        "substeps": 15,
+        "nr-iters": 2,
+        "pcg-iters": 10,
+        "kn": 2000.0,
+        "kd": 2.0,
+        "shell-tires": [
+            {
+                "_material": "Reference \u2014 the asset's baked orthotropic 3-section material (Polaris recipe)",
+                "name": "reference",
+                "active": true,
+                "position": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "pressure": 110000.0,
+                "E": null,
+                "nu": null,
+                "rho": null,
+                "max-gauge-pressure": 30000.0,
+                "gauge-rate": 2000.0
+            },
+            {
+                "_material": "Soft tire \u2014 50% stiffness, lower pressure, lighter compound",
+                "name": "soft",
+                "active": true,
+                "position": [
+                    1.2,
+                    0.0,
+                    0.0
+                ],
+                "pressure": 80000.0,
+                "E": 3000000.0,
+                "nu": 0.35,
+                "rho": 900.0,
+                "max-gauge-pressure": 15000.0,
+                "gauge-rate": 1000.0
+            },
+            {
+                "_material": "Stiff race tire \u2014 high pressure, dense compound",
+                "name": "race",
+                "active": true,
+                "position": [
+                    2.4,
+                    0.0,
+                    0.0
+                ],
+                "pressure": 200000.0,
+                "E": 2000000.0,
+                "nu": 0.28,
+                "rho": 1300.0,
+                "max-gauge-pressure": 50000.0,
+                "gauge-rate": 3000.0
+            },
+            {
+                "_material": "Ultra-soft balloon \u2014 very low stiffness",
+                "name": "balloon",
+                "active": true,
+                "position": [
+                    3.6,
+                    0.0,
+                    0.0
+                ],
+                "pressure": 30000.0,
+                "E": 1000000.0,
+                "nu": 0.45,
+                "rho": 700.0,
+                "max-gauge-pressure": 8000.0,
+                "gauge-rate": 500.0
+            }
+        ]
+    }
+}

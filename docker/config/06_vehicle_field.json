@@ -1,0 +1,36 @@
+{
+    "description": "A vehicle USD on 4 ANCF FEM tires driven by hand over a newton-terrain-tool boulder field (--terrain field_01_boulders | field_02_hills_boulders). run-examples.sh asks which vehicle USD to load (default: the Sherp; see 03_vehicle_ancf_tires). Rigid parts collide with the fine 0.25 m grid (vendored mujoco_warp: 128 hfield prisms per geom). The terrain relief changes live from the UI: stage w (heights = w * I_N) slider / buttons rescale the ANCF contact grid, the MuJoCo collider and the rendered mesh, then the vehicle is re-dropped onto the rocks (lift = highest rock under the tire footprints and hull). Driving = the base example's steer / throttle sliders + CTIS panel, or the arrow keys (UP/DOWN throttle, LEFT/RIGHT steer, SPACE stop). 'Reset vehicle' restores the at-rest snapshot at the origin. Start at stage 0.4. kn / kd / pcg-iters null = tire asset recommendation.",
+    "example": "vehicle_field",
+    "args": {
+        "viewer": "gl",
+        "num-frames": 1200,
+        "headless": false,
+        "vehicle-asset": null,
+        "tire-asset": null,
+        "terrain": "field_01_boulders",
+        "difficulty": 0.4,
+        "mujoco-terrain-cell": 0.25,
+        "wheel-speed": 0.0,
+        "steer-angle": 0.0,
+        "diag-period": 60,
+        "kn": null,
+        "kd": null,
+        "mu": 0.9,
+        "substeps": 10,
+        "nr-iters": 2,
+        "pcg-iters": 10,
+        "gs-iters": 1,
+        "ride-drop": 0.03,
+        "fast-math": true,
+        "shell-tires": [
+            {
+                "E": 50000000.0,
+                "nu": 0.45,
+                "rho": 700.0,
+                "alpha-damp": 0.15,
+                "pressure": 30000.0,
+                "thickness": null
+            }
+        ]
+    }
+}
