@@ -19,6 +19,9 @@ import sys
 from types import ModuleType
 
 from ._src.solvers import (
+    ANCFShellModel,
+    SolverANCFShell,
+    SolverANCFShellRigid,
     SolverBase,
     SolverFeatherstone,
     SolverImplicitMPM,
@@ -30,6 +33,12 @@ from ._src.solvers import (
     SolverStyle3D,
     SolverVBD,
     SolverXPBD,
+    SpindleAsset,
+    TerrainSCM,
+    TireAssetMeta,
+    ancf_material_from_engineering,
+    isotropic_ancf_material,
+    load_ancf_tire_usd,
     style3d,
 )
 from ._src.solvers import coupled as _coupled
@@ -51,7 +60,10 @@ sys.modules[f"{__name__}.experimental"] = experimental
 sys.modules[f"{__name__}.experimental.coupled"] = _coupled
 
 __all__ = [
+    "ANCFShellModel",
     "InterfaceCouplerGS",
+    "SolverANCFShell",
+    "SolverANCFShellRigid",
     "SolverBase",
     "SolverFeatherstone",
     "SolverImplicitMPM",
@@ -64,6 +76,12 @@ __all__ = [
     "SolverStyle3D",
     "SolverVBD",
     "SolverXPBD",
+    "SpindleAsset",
+    "TerrainSCM",
+    "TireAssetMeta",
+    "ancf_material_from_engineering",
     "experimental",
+    "isotropic_ancf_material",
+    "load_ancf_tire_usd",
     "style3d",
 ]

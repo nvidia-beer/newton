@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.ancf_shell.solver_ancf_shell import SolverANCFShell
+from .solver_ancf_shell import SolverANCFShell
 
 
 @wp.kernel
@@ -69,8 +69,8 @@ def _staging_to_xfrc_wheel(
     Single-threaded (dim = 1).  mujoco_warp's xfrc layout is force first:
     [0:3] = force, [3:6] = torque.  ``torque_alpha`` defaults to 0 because the
     explicit, one-substep-lagged torque path into the axle/kingpin hinges is
-    unstable at vehicle loads (measured 2026-09-09); wheel spin then follows the
-    axle actuator kinematically.
+    unstable at vehicle loads; wheel spin then follows the axle actuator
+    kinematically.
     """
     w = staging[0]
     f_zu = wp.vec3(w[5], w[3], w[4] + tare_fz)
@@ -128,8 +128,8 @@ class SolverANCFShellRigid(SolverANCFShell):
         self._spindle_mj_arr: list[int] = []
         self._world_idx_per_tire: list[int] = []
         self._lateral_offset_per_tire: list[float] = []
-        self._bead_idx_per_tire: list[wp.array] = []
-        self._xfrc_stg_per_tire: list[wp.array] = []
+        self._bead_idx_per_tire: list[wp.array[wp.int32] | None] = []
+        self._xfrc_stg_per_tire: list[wp.array[wp.spatial_vector] | None] = []
         self._tare_fz_per_tire: list[float] = []
 
     def setup_wheel(
@@ -172,7 +172,9 @@ class SolverANCFShellRigid(SolverANCFShell):
         self._xfrc_stg_per_tire[tire_idx] = wp.zeros(1, dtype=wp.spatial_vector, device=device)
         self._tare_fz_per_tire[tire_idx] = float(tare_fz)
 
-    def accumulate_wheel_wrenches(self, xfrc_applied: wp.array2d, xpos: wp.array2d, device: str = "cuda:0") -> None:
+    def accumulate_wheel_wrenches(
+        self, xfrc_applied: wp.array2d[wp.spatial_vector], xpos: wp.array2d[wp.vec3], device: str = "cuda:0"
+    ) -> None:
         """Sum each tyre's external load and add it to ``xfrc_applied`` on its spindle.
 
         Call after the ANCF step and before MuJoCo ``step_dynamics``.  Does not

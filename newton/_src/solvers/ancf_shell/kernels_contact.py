@@ -3,14 +3,14 @@
 """
 Ground-plane penalty contact for ANCF shell nodes.
 
-Phase-1 contact model: flat rigid plane at z = ground_z.
-Each node whose position penetrates the plane receives a normal penalty
-force and a Coulomb friction force (regularised with tanh).
+Flat rigid plane at height ``ground_z`` (Newton is Y-up, so the plane is y = ground_z).
+Each node whose position penetrates the plane receives a normal penalty force and a
+regularised (tanh) Coulomb friction force.
 
-Contact stiffness K_c adds a diagonal contribution to K_eff (conservative
-approximation: only the ∂f/∂x normal term, ignoring the friction Jacobian).
-This is sufficient for moderate contact forces; a full contact Jacobian can
-be added in a later phase.
+The contact tangent is added to K_eff as a per-DOF diagonal: the normal stiffness and
+damping term plus the diagonal of the friction Jacobian, both converted from velocity to
+displacement derivatives with the HHT factor c_v (see :func:`_contact_tangent_diag`).
+Heightfield / soil terrain contact lives in :mod:`terrain_scm`.
 """
 
 import warp as wp
@@ -164,98 +164,3 @@ def apply_ground_contact_batched(
     wp.atomic_add(K_contact_diag, dof_base + 0, k[0])
     wp.atomic_add(K_contact_diag, dof_base + 1, k[1])
     wp.atomic_add(K_contact_diag, dof_base + 2, k[2])
-
-
-@wp.kernel
-def apply_rim_contact(
-    node_x: wp.array[wp.vec3],
-    node_xd: wp.array[wp.vec3],
-    hub_y: wp.array[float],  # shape (1,) — single env
-    hub_z: wp.array[float],  # shape (1,)
-    rim_radius: float,
-    kn: float,
-    kd: float,
-    global_f: wp.array[float],
-    K_contact_diag: wp.array[float],
-):
-    """dim = n_nodes.  Radial penalty contact with a cylinder of radius rim_radius.
-
-    The cylinder axis is the ANCF X-axis (axle direction) passing through
-    (*, hub_y[0], hub_z[0]).  Pushes nodes outward when d < rim_radius.
-    """
-    i = wp.tid()
-    p = node_x[i]
-    v = node_xd[i]
-    ry = p[1] - hub_y[0]
-    rz = p[2] - hub_z[0]
-    d = wp.sqrt(ry * ry + rz * rz)
-    pen = rim_radius - d
-    if pen <= 0.0 or d < 1.0e-9:
-        return
-    ny = ry / d
-    nz = rz / d
-    vr = v[1] * ny + v[2] * nz  # radial velocity (positive = outward)
-    fn = kn * pen + kd * wp.max(-vr, 0.0)  # penalty + damping (inward velocity)
-    base = i * 6
-    wp.atomic_add(global_f, base + 1, fn * ny)
-    wp.atomic_add(global_f, base + 2, fn * nz)
-    wp.atomic_add(K_contact_diag, base + 1, kn * ny * ny)
-    wp.atomic_add(K_contact_diag, base + 2, kn * nz * nz)
-
-
-@wp.kernel
-def apply_rim_contact_batched(
-    node_x: wp.array[wp.vec3],
-    node_xd: wp.array[wp.vec3],
-    hub_y: wp.array[float],  # shape (N,)
-    hub_z: wp.array[float],  # shape (N,)
-    rim_radius: float,
-    kn: float,
-    kd: float,
-    global_f: wp.array[float],
-    K_contact_diag: wp.array[float],
-    n_nodes: int,
-):
-    """dim = N*n_nodes.  Per-env cylindrical rim contact."""
-    tid = wp.tid()
-    env = tid // n_nodes
-    i = tid % n_nodes
-    dof_base = env * n_nodes * 6 + i * 6
-    p = node_x[tid]
-    v = node_xd[tid]
-    ry = p[1] - hub_y[env]
-    rz = p[2] - hub_z[env]
-    d = wp.sqrt(ry * ry + rz * rz)
-    pen = rim_radius - d
-    if pen <= 0.0 or d < 1.0e-9:
-        return
-    ny = ry / d
-    nz = rz / d
-    vr = v[1] * ny + v[2] * nz
-    fn = kn * pen + kd * wp.max(-vr, 0.0)
-    wp.atomic_add(global_f, dof_base + 1, fn * ny)
-    wp.atomic_add(global_f, dof_base + 2, fn * nz)
-    wp.atomic_add(K_contact_diag, dof_base + 1, kn * ny * ny)
-    wp.atomic_add(K_contact_diag, dof_base + 2, kn * nz * nz)
-
-
-@wp.kernel
-def add_diag_to_bsr_values(
-    K_diag: wp.array[float],
-    bsr_offsets: wp.array[wp.int32],  # CSR row pointers
-    bsr_columns: wp.array[wp.int32],  # CSR column indices
-    bsr_values: wp.array[float],  # CSR values (1×1 blocks)
-):
-    """Add a diagonal vector to the matching diagonal entries of a scalar CSR matrix.
-
-    One thread per DOF row i.  Scans the row to find the diagonal entry (col==i)
-    and atomically adds K_diag[i] to it.
-    """
-    i = wp.tid()
-    row_start = bsr_offsets[i]
-    row_end = bsr_offsets[i + 1]
-    diag_val = K_diag[i]
-    for ptr in range(row_start, row_end):
-        if bsr_columns[ptr] == i:
-            wp.atomic_add(bsr_values, ptr, diag_val)
-            break

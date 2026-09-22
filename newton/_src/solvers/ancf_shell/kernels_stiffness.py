@@ -29,7 +29,8 @@ EAS (Enhanced Assumed Strain) + β-transform locking remedies
   - ANS ε_zz: replaced via bilinear interpolation from 4 corner tying points.
   - ANS γ_13, γ_23: replaced via bilinear interpolation from 4 mid-edge tying points.
   - All strains are transformed from natural to material frame via β.
-  - EAS α is warm-started and updated by one Newton step per element per call.
+  - EAS α is warm-started and updated by one Newton step per element per call in the
+    single-element kernel; the batched (N-env) kernels run ANS + β-transform only (α ≡ 0).
 """
 
 import warp as wp
@@ -61,7 +62,6 @@ from .kernels_element import (  # noqa: E402
     _jacobian,
     _matmul33,
     _shape,
-    _w2,
 )
 
 
@@ -426,10 +426,8 @@ def compute_element_forces_stiffness(
     # === Gauss integration: 2x2 in-plane × n_gp_z through-thickness ===
     for gi in range(2):
         xi = _gp2(gi)
-        w_xi = _w2(gi)
         for gj in range(2):
             eta = _gp2(gj)
-            w_eta = _w2(gj)
 
             w_A = 0.5 * (1.0 - eta)
             w_C = 0.5 * (1.0 + eta)
@@ -438,8 +436,7 @@ def compute_element_forces_stiffness(
 
             for gk in range(n_gp_z):
                 zeta = _gpz(gk, n_gp_z)
-                w_zeta = _gpw(gk, n_gp_z)
-                w = w_xi * w_eta * w_zeta
+                w = _gpw(gk, n_gp_z)  # in-plane 2-point Gauss weights are 1
 
                 N = _shape(xi, eta)
                 dNxi = _dshape_dxi(eta)
@@ -872,31 +869,6 @@ def compute_element_forces_stiffness(
 
 
 @wp.kernel
-def _zero_eas_and_accum_batched(
-    elem_eas_alpha: wp.array2d[float],  # (Nne, 5)
-    elem_HE: wp.array2d[float],  # (Nne, 5)
-    elem_KA: wp.array2d[float],  # (Nne, 15)
-):
-    """dim = Nne.  Zero EAS alpha and HE/KA accumulators before GP kernel.
-
-    KNOWN ISSUE (audit 2026-09-09, AUDIT_ANCF_JEEP.md §1.1): zeroing alpha
-    here every NR iteration discards the update written by
-    ``_eas_solve_damping_batched``, so the enhanced strain is always 0 and the
-    batched element effectively runs without EAS.  Removing the reset was
-    tried and made ancf_rigid_mujoco_tires explode: the EAS modes are built in
-    the global rather than the natural frame (§1.7) and the 5x5 elimination has
-    no pivoting, so enabling it as-is injects clamped ±0.1 strain.  Keep alpha
-    at 0 until §1.7 is fixed; then drop the alpha reset.
-    """
-    e = wp.tid()
-    for i in range(5):
-        elem_eas_alpha[e, i] = float(0.0)
-        elem_HE[e, i] = float(0.0)
-    for i in range(15):
-        elem_KA[e, i] = float(0.0)
-
-
-@wp.kernel
 def compute_element_forces_stiffness_batched_gp(
     # Current state — flat [N*n_nodes]
     node_x: wp.array[wp.vec3],
@@ -913,37 +885,24 @@ def compute_element_forces_stiffness_batched_gp(
     # Outputs — flat first-dim [N*n_elems]
     elem_f: wp.array2d[float],
     elem_K: wp.array3d[float],
-    gp_bd: wp.array3d[float],  # (Nne*n_gp_total, 24, 3)
-    gp_bs0: wp.array2d[float],  # (Nne*n_gp_total, 24)
-    gp_b13: wp.array2d[float],  # (Nne*n_gp_total, 24)
-    gp_b23: wp.array2d[float],  # (Nne*n_gp_total, 24)
+    # B rows per element with the Gauss point innermost: the GP threads of an element are
+    # consecutive tids, and compute_element_K_from_B reads one contiguous block per element.
+    gp_bd: wp.array3d[float],  # (Nne, 72, n_gp_total): [e, k*3+c, gp]
+    gp_bs0: wp.array3d[float],  # (Nne, 24, n_gp_total)
+    gp_b13: wp.array3d[float],  # (Nne, 24, n_gp_total)
+    gp_b23: wp.array3d[float],  # (Nne, 24, n_gp_total)
     gp_w: wp.array[float],  # (Nne*n_gp_total,) GP quadrature weight * det_J0
-    # EAS + fiber — flat first-dim [N*n_elems] / shared
-    elem_eas_alpha: wp.array2d[float],
+    # fiber angle — shared
     elem_fiber_cos: wp.array[float],
     elem_fiber_sin: wp.array[float],
-    # EAS accumulators — atomic accumulation targets
-    elem_HE: wp.array2d[float],  # (Nne, 5)
-    elem_KA: wp.array2d[float],  # (Nne, 15)
     # Batch params
     n_elems_per_env: int,
     n_nodes_per_env: int,
     n_gp_total: int,  # = 4 * n_gp_z (total GP count per element)
     n_gp_z: int,  # through-thickness points: 3 (fast) or 5 (accurate)
-    # Rest-configuration Jacobian inverses + EAS T0 basis — precomputed once
-    # by compute_rest_jacobians (see its docstring); shared across envs (like
-    # elem_h/elem_fiber_cos above), indexed by local element index e, NOT
-    # e_global.  Depends only on rest config + fiber angle, never the current
-    # deformed state — and never on which env, since the rest mesh is shared.
-    elem_det_J0c: wp.array[float],
-    elem_T0c0_d: wp.array[wp.vec3],
-    elem_T0c0_s: wp.array[wp.vec3],
-    elem_T0c1_d: wp.array[wp.vec3],
-    elem_T0c1_s: wp.array[wp.vec3],
-    elem_T0c2_d: wp.array[wp.vec3],
-    elem_T0c2_s: wp.array[wp.vec3],
-    elem_T0c3_d: wp.array[wp.vec3],
-    elem_T0c3_s: wp.array[wp.vec3],
+    # Rest-configuration Jacobian inverses at the ANS tying points — precomputed once by
+    # compute_rest_jacobians (see its docstring); shared across envs (like elem_h /
+    # elem_fiber_cos above), indexed by the local element index e, NOT e_global.
     elem_J0inv_a: wp.array[wp.mat33],
     elem_J0inv_b: wp.array[wp.mat33],
     elem_J0inv_cc: wp.array[wp.mat33],
@@ -953,7 +912,14 @@ def compute_element_forces_stiffness_batched_gp(
     elem_J0inv_tC: wp.array[wp.mat33],
     elem_J0inv_tD: wp.array[wp.mat33],
 ):
-    """dim = N * n_elems_per_env * n_gp_total. One thread per (element, Gauss point)."""
+    """dim = N * n_elems_per_env * n_gp_total. One thread per (element, Gauss point).
+
+    ANS + beta-transform element without EAS: the batched path runs with the enhanced-strain
+    parameters frozen at zero (the EAS modes are built in the global frame, AUDIT_ANCF_JEEP
+    2026-09-09 §1.7, and enabling them made the rig examples diverge), so the enhancement
+    and its 5x5 static-condensation update are not computed here. ``compute_element_forces_stiffness``
+    (the N = 1 path) keeps them.
+    """
     tid = wp.tid()
     e_global = tid // n_gp_total
     gp_flat = tid % n_gp_total
@@ -1005,24 +971,8 @@ def compute_element_forces_stiffness_batched_gp(
     cos_t = elem_fiber_cos[e]
     sin_t = elem_fiber_sin[e]
 
-    alpha0 = elem_eas_alpha[e_global, 0]
-    alpha1 = elem_eas_alpha[e_global, 1]
-    alpha2 = elem_eas_alpha[e_global, 2]
-    alpha3 = elem_eas_alpha[e_global, 3]
-    alpha4 = elem_eas_alpha[e_global, 4]
-
-    # --- rest-config Jacobian inverses + EAS T0 basis: precomputed once by
-    # compute_rest_jacobians (depends only on rest config + fiber angle),
-    # shared across envs and across every GP-thread of this same element. ---
-    det_J0c = elem_det_J0c[e]
-    T0c0_d = elem_T0c0_d[e]
-    T0c0_s = elem_T0c0_s[e]
-    T0c1_d = elem_T0c1_d[e]
-    T0c1_s = elem_T0c1_s[e]
-    T0c2_d = elem_T0c2_d[e]
-    T0c2_s = elem_T0c2_s[e]
-    T0c3_d = elem_T0c3_d[e]
-    T0c3_s = elem_T0c3_s[e]
+    # --- rest-config Jacobian inverses at the tying points: precomputed once by
+    # compute_rest_jacobians, shared across envs and across every GP-thread of this element. ---
     J0inv_a = elem_J0inv_a[e]
     J0inv_b = elem_J0inv_b[e]
     J0inv_cc = elem_J0inv_cc[e]
@@ -1094,12 +1044,9 @@ def compute_element_forces_stiffness_batched_gp(
 
     # === Single GP body — no loop, coordinates decoded from tid ===
     xi = _gp2(gi)
-    w_xi = _w2(gi)
     eta = _gp2(gj)
-    w_eta = _w2(gj)
     zeta = _gpz(gk, n_gp_z)
-    w_zeta = _gpw(gk, n_gp_z)
-    w = w_xi * w_eta * w_zeta
+    w = _gpw(gk, n_gp_z)  # in-plane 2-point Gauss weights are 1
 
     w_A = 0.5 * (1.0 - eta)
     w_C = 0.5 * (1.0 + eta)
@@ -1145,25 +1092,6 @@ def compute_element_forces_stiffness_batched_gp(
     e_d = _beta_transform_diag(e_diag_nat, e_shear_nat, beta_gp)
     e_s = _beta_transform_shear(e_diag_nat, e_shear_nat, beta_gp)
 
-    eas_scale = det_J0c / wp.max(det_J0, 1.0e-20)
-    eas_xi_s = eas_scale * xi
-    eas_eta_s = eas_scale * eta
-    eas_zeta_s = eas_scale * zeta
-    e_d = (
-        e_d
-        + alpha0 * eas_xi_s * T0c0_d
-        + alpha1 * eas_eta_s * T0c1_d
-        + alpha2 * eas_zeta_s * T0c2_d
-        + (alpha3 * eas_xi_s + alpha4 * eas_eta_s) * T0c3_d
-    )
-    e_s = (
-        e_s
-        + alpha0 * eas_xi_s * T0c0_s
-        + alpha1 * eas_eta_s * T0c1_s
-        + alpha2 * eas_zeta_s * T0c2_s
-        + (alpha3 * eas_xi_s + alpha4 * eas_eta_s) * T0c3_s
-    )
-
     S11 = C11 * e_d[0] + C12 * e_d[1] + C13 * e_d[2]
     S22 = C12 * e_d[0] + C22 * e_d[1] + C23 * e_d[2]
     S33 = C13 * e_d[0] + C23 * e_d[1] + C33 * e_d[2]
@@ -1173,74 +1101,6 @@ def compute_element_forces_stiffness_batched_gp(
 
     S_d = wp.vec3(S11, S22, S33)
     S_s = wp.vec3(S12_2, S13_2, S23_2)
-
-    G0_d = eas_xi_s * T0c0_d
-    G0_s = eas_xi_s * T0c0_s
-    G1_d = eas_eta_s * T0c1_d
-    G1_s = eas_eta_s * T0c1_s
-    G2_d = eas_zeta_s * T0c2_d
-    G2_s = eas_zeta_s * T0c2_s
-    G3_d = eas_xi_s * T0c3_d
-    G3_s = eas_xi_s * T0c3_s
-    G4_d = eas_eta_s * T0c3_d
-    G4_s = eas_eta_s * T0c3_s
-
-    # HE atomic accumulation
-    wp.atomic_add(elem_HE, e_global, 0, (wp.dot(G0_d, S_d) + wp.dot(G0_s, S_s)) * w_detJ0)
-    wp.atomic_add(elem_HE, e_global, 1, (wp.dot(G1_d, S_d) + wp.dot(G1_s, S_s)) * w_detJ0)
-    wp.atomic_add(elem_HE, e_global, 2, (wp.dot(G2_d, S_d) + wp.dot(G2_s, S_s)) * w_detJ0)
-    wp.atomic_add(elem_HE, e_global, 3, (wp.dot(G3_d, S_d) + wp.dot(G3_s, S_s)) * w_detJ0)
-    wp.atomic_add(elem_HE, e_global, 4, (wp.dot(G4_d, S_d) + wp.dot(G4_s, S_s)) * w_detJ0)
-
-    CG0_d = wp.vec3(
-        C11 * G0_d[0] + C12 * G0_d[1] + C13 * G0_d[2],
-        C12 * G0_d[0] + C22 * G0_d[1] + C23 * G0_d[2],
-        C13 * G0_d[0] + C23 * G0_d[1] + C33 * G0_d[2],
-    )
-    CG0_s = wp.vec3(G12 * G0_s[0], G13 * G0_s[1], G23 * G0_s[2])
-    CG1_d = wp.vec3(
-        C11 * G1_d[0] + C12 * G1_d[1] + C13 * G1_d[2],
-        C12 * G1_d[0] + C22 * G1_d[1] + C23 * G1_d[2],
-        C13 * G1_d[0] + C23 * G1_d[1] + C33 * G1_d[2],
-    )
-    CG1_s = wp.vec3(G12 * G1_s[0], G13 * G1_s[1], G23 * G1_s[2])
-    CG2_d = wp.vec3(
-        C11 * G2_d[0] + C12 * G2_d[1] + C13 * G2_d[2],
-        C12 * G2_d[0] + C22 * G2_d[1] + C23 * G2_d[2],
-        C13 * G2_d[0] + C23 * G2_d[1] + C33 * G2_d[2],
-    )
-    CG2_s = wp.vec3(G12 * G2_s[0], G13 * G2_s[1], G23 * G2_s[2])
-    CG3_d = wp.vec3(
-        C11 * G3_d[0] + C12 * G3_d[1] + C13 * G3_d[2],
-        C12 * G3_d[0] + C22 * G3_d[1] + C23 * G3_d[2],
-        C13 * G3_d[0] + C23 * G3_d[1] + C33 * G3_d[2],
-    )
-    CG3_s = wp.vec3(G12 * G3_s[0], G13 * G3_s[1], G23 * G3_s[2])
-    CG4_d = wp.vec3(
-        C11 * G4_d[0] + C12 * G4_d[1] + C13 * G4_d[2],
-        C12 * G4_d[0] + C22 * G4_d[1] + C23 * G4_d[2],
-        C13 * G4_d[0] + C23 * G4_d[1] + C33 * G4_d[2],
-    )
-    CG4_s = wp.vec3(G12 * G4_s[0], G13 * G4_s[1], G23 * G4_s[2])
-
-    w_dJ = w_detJ0
-    # KA atomic accumulation — flat index mapping: 00→0,01→1,02→2,03→3,04→4,
-    #   11→5,12→6,13→7,14→8, 22→9,23→10,24→11, 33→12,34→13, 44→14
-    wp.atomic_add(elem_KA, e_global, 0, (wp.dot(G0_d, CG0_d) + wp.dot(G0_s, CG0_s)) * w_dJ)
-    wp.atomic_add(elem_KA, e_global, 1, (wp.dot(G0_d, CG1_d) + wp.dot(G0_s, CG1_s)) * w_dJ)
-    wp.atomic_add(elem_KA, e_global, 2, (wp.dot(G0_d, CG2_d) + wp.dot(G0_s, CG2_s)) * w_dJ)
-    wp.atomic_add(elem_KA, e_global, 3, (wp.dot(G0_d, CG3_d) + wp.dot(G0_s, CG3_s)) * w_dJ)
-    wp.atomic_add(elem_KA, e_global, 4, (wp.dot(G0_d, CG4_d) + wp.dot(G0_s, CG4_s)) * w_dJ)
-    wp.atomic_add(elem_KA, e_global, 5, (wp.dot(G1_d, CG1_d) + wp.dot(G1_s, CG1_s)) * w_dJ)
-    wp.atomic_add(elem_KA, e_global, 6, (wp.dot(G1_d, CG2_d) + wp.dot(G1_s, CG2_s)) * w_dJ)
-    wp.atomic_add(elem_KA, e_global, 7, (wp.dot(G1_d, CG3_d) + wp.dot(G1_s, CG3_s)) * w_dJ)
-    wp.atomic_add(elem_KA, e_global, 8, (wp.dot(G1_d, CG4_d) + wp.dot(G1_s, CG4_s)) * w_dJ)
-    wp.atomic_add(elem_KA, e_global, 9, (wp.dot(G2_d, CG2_d) + wp.dot(G2_s, CG2_s)) * w_dJ)
-    wp.atomic_add(elem_KA, e_global, 10, (wp.dot(G2_d, CG3_d) + wp.dot(G2_s, CG3_s)) * w_dJ)
-    wp.atomic_add(elem_KA, e_global, 11, (wp.dot(G2_d, CG4_d) + wp.dot(G2_s, CG4_s)) * w_dJ)
-    wp.atomic_add(elem_KA, e_global, 12, (wp.dot(G3_d, CG3_d) + wp.dot(G3_s, CG3_s)) * w_dJ)
-    wp.atomic_add(elem_KA, e_global, 13, (wp.dot(G3_d, CG4_d) + wp.dot(G3_s, CG4_s)) * w_dJ)
-    wp.atomic_add(elem_KA, e_global, 14, (wp.dot(G4_d, CG4_d) + wp.dot(G4_s, CG4_s)) * w_dJ)
 
     # === Phase 1: compute B-rows for all 24 DOFs, store to tid slot ===
     for node_k in range(4):
@@ -1291,12 +1151,12 @@ def compute_element_forces_stiffness_batched_gp(
                 b_s_mat = _beta_transform_shear(b_d_nat, b_s_nat, beta_gp)
 
                 # Store to this thread's tid slot (each GP has its own row)
-                gp_bd[tid, k, 0] = b_d_mat[0]
-                gp_bd[tid, k, 1] = b_d_mat[1]
-                gp_bd[tid, k, 2] = b_d_mat[2]
-                gp_bs0[tid, k] = b_s_mat[0]
-                gp_b13[tid, k] = b_s_mat[1]
-                gp_b23[tid, k] = b_s_mat[2]
+                gp_bd[e_global, k * 3 + 0, gp_flat] = b_d_mat[0]
+                gp_bd[e_global, k * 3 + 1, gp_flat] = b_d_mat[1]
+                gp_bd[e_global, k * 3 + 2, gp_flat] = b_d_mat[2]
+                gp_bs0[e_global, k, gp_flat] = b_s_mat[0]
+                gp_b13[e_global, k, gp_flat] = b_s_mat[1]
+                gp_b23[e_global, k, gp_flat] = b_s_mat[2]
 
                 # Force contribution — atomic add across GP threads for same element
                 fk = (
@@ -1312,26 +1172,37 @@ def compute_element_forces_stiffness_batched_gp(
 
 @wp.kernel
 def compute_element_K_from_B(
-    gp_bd: wp.array3d[float],  # (Nne*n_gp_total, 24, 3)
-    gp_bs0: wp.array2d[float],  # (Nne*n_gp_total, 24)
-    gp_b13: wp.array2d[float],  # (Nne*n_gp_total, 24)
-    gp_b23: wp.array2d[float],  # (Nne*n_gp_total, 24)
+    gp_bd: wp.array3d[float],  # (Nne, 72, n_gp_total): [e, k*3+c, gp]
+    gp_bs0: wp.array3d[float],  # (Nne, 24, n_gp_total)
+    gp_b13: wp.array3d[float],  # (Nne, 24, n_gp_total)
+    gp_b23: wp.array3d[float],  # (Nne, 24, n_gp_total)
     gp_w: wp.array[float],  # (Nne*n_gp_total,)
     elem_mat: wp.array2d[float],  # (Nne, n_mat)
     elem_K: wp.array3d[float],  # (Nne, 24, 24) — written directly (no atomic)
     n_gp_total: int,
 ):
-    """dim = Nne*576. One thread per (element, k, j) K entry. No atomics.
+    """dim = Nne*36. One thread per (element, 3x3 tile of the upper triangle of K). No atomics.
 
-    Eliminates the 6912-atomic-per-element contention in Phase 2 by giving
-    each K[e,k,j] its own thread that loops over GPs sequentially.
-    SM fill: 0.6x (old thread-per-GP) → 27x (460K threads).
+    K = sum_gp w * B^T C B is symmetric, so only the 36 tiles with tile_row <= tile_col are
+    computed and each result is written to K[k, j] and K[j, k].  A thread loads the 3 k-rows
+    and 3 j-rows of B once per Gauss point for 9 entries (a thread-per-entry layout re-reads
+    B for every entry).  Every entry of elem_K is assigned, so the caller must not (and need
+    not) zero it beforehand.
     """
+    # Tile-fastest mapping: the 36 tiles of one element are adjacent threads, so the
+    # element's B rows are served from L1; an element-fastest mapping loses that reuse.
     tid = wp.tid()
-    e_global = tid // 576
-    kj = tid % 576
-    k = kj // 24
-    j = kj % 24
+    e_global = tid // 36
+    tile = tid % 36
+    # Enumerate the upper-triangular 3x3 tiles: row ti has 8 - ti tiles (tj = ti .. 7).
+    ti = int(0)
+    rem = tile
+    while rem >= 8 - ti:
+        rem -= 8 - ti
+        ti += 1
+    tj = ti + rem
+    k0 = ti * 3
+    j0 = tj * 3
 
     C11 = elem_mat[e_global, 0]
     C22 = elem_mat[e_global, 1]
@@ -1343,43 +1214,45 @@ def compute_element_K_from_B(
     G13 = elem_mat[e_global, 7]
     G12 = elem_mat[e_global, 8]
 
-    acc = float(0.0)
+    acc = wp.mat33(0.0)
     gp_base = e_global * n_gp_total
     for gp in range(n_gp_total):
-        gp_tid = gp_base + gp
-        w = gp_w[gp_tid]
+        g = gp_base + gp
+        w = gp_w[g]
 
-        bdk0 = gp_bd[gp_tid, k, 0]
-        bdk1 = gp_bd[gp_tid, k, 1]
-        bdk2 = gp_bd[gp_tid, k, 2]
-        bsk0 = gp_bs0[gp_tid, k]
-        b13k = gp_b13[gp_tid, k]
-        b23k = gp_b23[gp_tid, k]
+        # C * B for the 3 j-rows: normal part (3) and shear part (3, diagonal G).
+        cbn = wp.mat33(0.0)
+        cbs = wp.mat33(0.0)
+        for b in range(3):
+            j = j0 + b
+            bdj0 = gp_bd[e_global, j * 3 + 0, gp]
+            bdj1 = gp_bd[e_global, j * 3 + 1, gp]
+            bdj2 = gp_bd[e_global, j * 3 + 2, gp]
+            cbn[b, 0] = C11 * bdj0 + C12 * bdj1 + C13 * bdj2
+            cbn[b, 1] = C12 * bdj0 + C22 * bdj1 + C23 * bdj2
+            cbn[b, 2] = C13 * bdj0 + C23 * bdj1 + C33 * bdj2
+            cbs[b, 0] = G12 * gp_bs0[e_global, j, gp]
+            cbs[b, 1] = G13 * gp_b13[e_global, j, gp]
+            cbs[b, 2] = G23 * gp_b23[e_global, j, gp]
 
-        bdj0 = gp_bd[gp_tid, j, 0]
-        bdj1 = gp_bd[gp_tid, j, 1]
-        bdj2 = gp_bd[gp_tid, j, 2]
-        bsj0 = gp_bs0[gp_tid, j]
-        b13j = gp_b13[gp_tid, j]
-        b23j = gp_b23[gp_tid, j]
+        for a in range(3):
+            k = k0 + a
+            bdk = wp.vec3(
+                gp_bd[e_global, k * 3 + 0, gp], gp_bd[e_global, k * 3 + 1, gp], gp_bd[e_global, k * 3 + 2, gp]
+            )
+            bsk = wp.vec3(gp_bs0[e_global, k, gp], gp_b13[e_global, k, gp], gp_b23[e_global, k, gp])
+            for b in range(3):
+                acc[a, b] = acc[a, b] + (wp.dot(bdk, cbn[b]) + wp.dot(bsk, cbs[b])) * w
 
-        cbj0 = C11 * bdj0 + C12 * bdj1 + C13 * bdj2
-        cbj1 = C12 * bdj0 + C22 * bdj1 + C23 * bdj2
-        cbj2 = C13 * bdj0 + C23 * bdj1 + C33 * bdj2
-        cbj3 = G12 * bsj0
-        cbj4 = G13 * b13j
-        cbj5 = G23 * b23j
-
-        acc = acc + (bdk0 * cbj0 + bdk1 * cbj1 + bdk2 * cbj2 + bsk0 * cbj3 + b13k * cbj4 + b23k * cbj5) * w
-
-    elem_K[e_global, k, j] = acc
+    for a in range(3):
+        for b in range(3):
+            v = acc[a, b]
+            elem_K[e_global, k0 + a, j0 + b] = v
+            elem_K[e_global, j0 + b, k0 + a] = v
 
 
 @wp.kernel
-def _eas_solve_damping_batched(
-    elem_HE: wp.array2d[float],  # (Nne, 5) — accumulated per GP
-    elem_KA: wp.array2d[float],  # (Nne, 15) — accumulated per GP
-    elem_eas_alpha: wp.array2d[float],  # (Nne, 5) — in=0, out=updated
+def _rayleigh_damping_batched(
     elem_mat: wp.array2d[float],  # (Nne, 11) for alpha_damp
     node_xd: wp.array[wp.vec3],
     node_Dd: wp.array[wp.vec3],
@@ -1389,98 +1262,11 @@ def _eas_solve_damping_batched(
     n_elems_per_env: int,
     n_nodes_per_env: int,
 ):
-    """dim = Nne.  EAS Newton step + Rayleigh damping after GP accumulation."""
+    """dim = Nne.  Stiffness-proportional Rayleigh damping ``f += alpha_damp K_t v`` after the K assembly."""
     e_global = wp.tid()
     env = e_global // n_elems_per_env
     e = e_global % n_elems_per_env
     node_off = env * n_nodes_per_env
-
-    # Read EAS accumulators
-    HE0 = elem_HE[e_global, 0]
-    HE1 = elem_HE[e_global, 1]
-    HE2 = elem_HE[e_global, 2]
-    HE3 = elem_HE[e_global, 3]
-    HE4 = elem_HE[e_global, 4]
-    KA00 = elem_KA[e_global, 0]
-    KA01 = elem_KA[e_global, 1]
-    KA02 = elem_KA[e_global, 2]
-    KA03 = elem_KA[e_global, 3]
-    KA04 = elem_KA[e_global, 4]
-    KA11 = elem_KA[e_global, 5]
-    KA12 = elem_KA[e_global, 6]
-    KA13 = elem_KA[e_global, 7]
-    KA14 = elem_KA[e_global, 8]
-    KA22 = elem_KA[e_global, 9]
-    KA23 = elem_KA[e_global, 10]
-    KA24 = elem_KA[e_global, 11]
-    KA33 = elem_KA[e_global, 12]
-    KA34 = elem_KA[e_global, 13]
-    KA44 = elem_KA[e_global, 14]
-
-    alpha0 = elem_eas_alpha[e_global, 0]
-    alpha1 = elem_eas_alpha[e_global, 1]
-    alpha2 = elem_eas_alpha[e_global, 2]
-    alpha3 = elem_eas_alpha[e_global, 3]
-    alpha4 = elem_eas_alpha[e_global, 4]
-
-    # === EAS one Newton step: solve K_alpha · Δα = HE ===
-    # Forward elimination (Gaussian, exploiting symmetry)
-    inv00 = float(1.0) / wp.max(KA00, 1.0e-30)
-    m10 = KA01 * inv00
-    m20 = KA02 * inv00
-    m30 = KA03 * inv00
-    m40 = KA04 * inv00
-    KA11 = KA11 - m10 * KA01
-    KA12 = KA12 - m10 * KA02
-    KA13 = KA13 - m10 * KA03
-    KA14 = KA14 - m10 * KA04
-    HE1 = HE1 - m10 * HE0
-    KA22 = KA22 - m20 * KA02
-    KA23 = KA23 - m20 * KA03
-    KA24 = KA24 - m20 * KA04
-    HE2 = HE2 - m20 * HE0
-    KA33 = KA33 - m30 * KA03
-    KA34 = KA34 - m30 * KA04
-    HE3 = HE3 - m30 * HE0
-    KA44 = KA44 - m40 * KA04
-    HE4 = HE4 - m40 * HE0
-    inv11 = float(1.0) / wp.max(KA11, 1.0e-30)
-    m21 = KA12 * inv11
-    m31 = KA13 * inv11
-    m41 = KA14 * inv11
-    KA22 = KA22 - m21 * KA12
-    KA23 = KA23 - m21 * KA13
-    KA24 = KA24 - m21 * KA14
-    HE2 = HE2 - m21 * HE1
-    KA33 = KA33 - m31 * KA13
-    KA34 = KA34 - m31 * KA14
-    HE3 = HE3 - m31 * HE1
-    KA44 = KA44 - m41 * KA14
-    HE4 = HE4 - m41 * HE1
-    inv22 = float(1.0) / wp.max(KA22, 1.0e-30)
-    m32 = KA23 * inv22
-    m42 = KA24 * inv22
-    KA33 = KA33 - m32 * KA23
-    KA34 = KA34 - m32 * KA24
-    HE3 = HE3 - m32 * HE2
-    KA44 = KA44 - m42 * KA24
-    HE4 = HE4 - m42 * HE2
-    inv33 = float(1.0) / wp.max(KA33, 1.0e-30)
-    m43 = KA34 * inv33
-    KA44 = KA44 - m43 * KA34
-    HE4 = HE4 - m43 * HE3
-    da4 = HE4 / wp.max(KA44, 1.0e-30)
-    da3 = (HE3 - KA34 * da4) * inv33
-    da2 = (HE2 - KA24 * da4 - KA23 * da3) * inv22
-    da1 = (HE1 - KA14 * da4 - KA13 * da3 - KA12 * da2) * inv11
-    da0 = (HE0 - KA04 * da4 - KA03 * da3 - KA02 * da2 - KA01 * da1) * inv00
-
-    _EAS_MAX = float(1.0e-1)
-    elem_eas_alpha[e_global, 0] = wp.clamp(alpha0 - da0, -_EAS_MAX, _EAS_MAX)
-    elem_eas_alpha[e_global, 1] = wp.clamp(alpha1 - da1, -_EAS_MAX, _EAS_MAX)
-    elem_eas_alpha[e_global, 2] = wp.clamp(alpha2 - da2, -_EAS_MAX, _EAS_MAX)
-    elem_eas_alpha[e_global, 3] = wp.clamp(alpha3 - da3, -_EAS_MAX, _EAS_MAX)
-    elem_eas_alpha[e_global, 4] = wp.clamp(alpha4 - da4, -_EAS_MAX, _EAS_MAX)
 
     # Stiffness-proportional Rayleigh damping: f_damp = alpha_damp * K_t * v
     na0 = elem_nodes[e, 0]

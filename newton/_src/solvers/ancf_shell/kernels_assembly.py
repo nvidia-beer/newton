@@ -6,17 +6,18 @@ Scatter element-level forces and stiffness blocks into global arrays.
 Global DOF layout: flat float array of length n_nodes * 6.
     DOF index = node_i * 6 + sub   (sub 0-5: px,py,pz,Dx,Dy,Dz)
 
-Global stiffness: sparse BSR matrix with 6×6 blocks, one block per
-    (node_i, node_j) pair that appears in any element.  Built via
-    warp.sparse.bsr_set_from_triplets which sums duplicate (row,col) entries.
+Global stiffness: 6×6 node-block CSR, one block per (node_i, node_j) pair that
+    appears in any element (see `build_block_structure`).
 
 Graph-capture path
 ------------------
 Since the mesh never changes, K_eff has a fixed sparsity pattern every step.
-`build_scatter_map` (CPU, one-time) maps each element (row, col) triplet to
-its absolute index in BsrMatrix.values.  `scatter_elem_to_bsr` then zeros
-and fills K_eff.values in-place without any memory allocation — the only path
-that can be captured as a CUDA graph.
+`assemble_sparse_stiffness` (one-time, at init) builds a scalar CSR via
+warp.sparse.bsr_set_from_triplets only to fix that pattern; `build_block_structure`
+derives the node-block CSR and the element->block scatter map from it.
+`zero_bsr_values` + `scatter_elem_to_blk_batched` + `add_diag_to_blk_values_batched`
+then refill the blocked values in place without any memory allocation — the only
+path that can be captured as a CUDA graph.
 """
 
 import numpy as np
@@ -184,6 +185,31 @@ def cavity_gas_law(
 
 
 @wp.kernel
+def cavity_gas_law_circuit(
+    Kgas: wp.array[float],  # (N,) m·R·T per tire; the circuit holds their sum
+    V: wp.array[float],  # (N,) enclosed volume per tire
+    pbuild: wp.array[float],  # (N,) build pressure (rest shape)
+    p_out: wp.array[float],  # (N,) absolute pressure, the same for every tire
+    gauge_out: wp.array[float],  # (N,) gauge load = p − p_build
+    n_envs: int,
+):
+    """dim = 1.  Ideal gas in ONE cavity: all N tires are joined by an air line, so
+    p = Σ K_gas / Σ V.  A tire squeezed by the ground pushes its air into the other
+    three instead of stiffening on its own (SHERP's pneumocirculating suspension)."""
+    k_sum = float(0.0)
+    v_sum = float(0.0)
+    for e in range(n_envs):
+        k_sum += Kgas[e]
+        v_sum += V[e]
+    p = float(0.0)
+    if v_sum > 1.0e-9:
+        p = k_sum / v_sum
+    for e in range(n_envs):
+        p_out[e] = p
+        gauge_out[e] = p - pbuild[e]
+
+
+@wp.kernel
 def compute_pressure_force_stiffness(
     node_x: wp.array[wp.vec3],  # (n_nodes,) deformed positions
     elem_nodes: wp.array2d[wp.int32],  # (n_elem, 4)
@@ -202,29 +228,6 @@ def compute_pressure_force_stiffness(
 
 
 @wp.kernel
-def compute_pressure_force_stiffness_batched(
-    node_x: wp.array[wp.vec3],  # (N*n_nodes,) deformed
-    elem_nodes: wp.array2d[wp.int32],  # (n_elems, 4) — shared topology
-    psign: wp.array[float],  # (n_elems,) — shared orientation
-    pressure: wp.array[float],  # (N,) per-env gauge pressure [Pa]
-    elem_fp: wp.array2d[float],  # (N*n_elems, 24)   zeroed by caller
-    n_elems: int,
-    n_nodes: int,
-):
-    """dim = N*n_elems.  Per-env follower pressure force."""
-    tid = wp.tid()
-    env = tid // n_elems
-    e = tid % n_elems
-    p = pressure[env] * psign[e]
-    nb = env * n_nodes
-    x0 = node_x[nb + elem_nodes[e, 0]]
-    x1 = node_x[nb + elem_nodes[e, 1]]
-    x2 = node_x[nb + elem_nodes[e, 2]]
-    x3 = node_x[nb + elem_nodes[e, 3]]
-    _pressure_element(x0, x1, x2, x3, p, tid, elem_fp)
-
-
-@wp.kernel
 def compute_pressure_force_stiffness_batched_gp(
     node_x: wp.array[wp.vec3],
     elem_nodes: wp.array2d[wp.int32],
@@ -236,8 +239,9 @@ def compute_pressure_force_stiffness_batched_gp(
 ):
     """dim = N*n_elems*4.  One thread per (element, Gauss point).
 
-    Same physics as compute_pressure_force_stiffness_batched, one thread per
-    in-plane Gauss point; forces accumulate via atomic_add.
+    Per-env follower pressure force; same physics as the single-env
+    compute_pressure_force_stiffness with one thread per in-plane Gauss point,
+    forces accumulate via atomic_add.
     """
     tid = wp.tid()
     e_global = tid // 4
@@ -350,8 +354,8 @@ def extract_coo_triplets(
 
 
 def assemble_sparse_stiffness(
-    elem_nodes: wp.array,
-    elem_K: wp.array,
+    elem_nodes: wp.array2d[wp.int32],
+    elem_K: wp.array3d[float],
     n_nodes: int,
     device: str,
 ) -> wps.BsrMatrix:
@@ -372,12 +376,8 @@ def assemble_sparse_stiffness(
 
 
 # ---------------------------------------------------------------------------
-# Effective stiffness K_eff = M/beta/dt^2 + (1+alpha)*K_t
-# (updated in-place without allocation — see below)
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Graph-capture path: in-place K_eff update without memory allocation
+# Graph-capture path: in-place K_eff = M/beta/dt^2 + (1+alpha)*K_t update
+# without memory allocation
 # ---------------------------------------------------------------------------
 
 
@@ -388,69 +388,9 @@ def zero_bsr_values(values: wp.array[float]):
     values[i] = float(0.0)
 
 
-@wp.kernel
-def scatter_elem_to_bsr(
-    elem_K: wp.array3d[float],  # (n_elem, 24, 24)
-    scatter_map: wp.array2d[wp.int32],  # (n_elem, 576)
-    scale: float,
-    out_vals: wp.array[float],  # BsrMatrix.values (nnz,)
-):
-    """Atomically add scale * elem_K into BSR values using a precomputed scatter map.
-
-    One thread per element.  scatter_map[e, k*24+j] holds the absolute index
-    into out_vals for global DOF pair (row_k, col_j); -1 means absent (impossible
-    for a well-formed mesh but guarded for safety).
-    """
-    e = wp.tid()
-    for k in range(24):
-        for j in range(24):
-            idx = scatter_map[e, k * 24 + j]
-            if idx >= 0:
-                wp.atomic_add(out_vals, idx, scale * elem_K[e, k, j])
-
-
-def build_scatter_map(
-    elem_nodes_wp: wp.array,
-    K_eff: wps.BsrMatrix,
-    device,
-) -> wp.array:
-    """Build element→BSR-values scatter map (CPU numpy, one-time in __init__).
-
-    Returns an int32 Warp array of shape (n_elem, 576) where entry [e, k*24+j]
-    is the absolute index into K_eff.values for global DOF pair
-    (elem_nodes[e, k//6]*6 + k%6,  elem_nodes[e, j//6]*6 + j%6).
-
-    M and K share the same sparsity (both assembled from the same mesh), so a
-    single scatter_map works for both.
-    """
-    offsets = K_eff.offsets.numpy()  # (n_dof + 1,)
-    columns = K_eff.columns.numpy()  # (nnz,)
-    elem_nodes = elem_nodes_wp.numpy()  # (n_elem, 4)
-    n_elem = elem_nodes.shape[0]
-
-    scatter = np.full((n_elem, 576), -1, dtype=np.int32)
-    for e in range(n_elem):
-        nodes = elem_nodes[e]
-        for k_loc in range(24):
-            node_k = k_loc // 6
-            sk = k_loc % 6
-            row = int(nodes[node_k]) * 6 + sk
-            rs, re = int(offsets[row]), int(offsets[row + 1])
-            row_cols = columns[rs:re]
-            for j_loc in range(24):
-                node_j = j_loc // 6
-                sj = j_loc % 6
-                col = int(nodes[node_j]) * 6 + sj
-                pos = int(np.searchsorted(row_cols, col))
-                if pos < len(row_cols) and row_cols[pos] == col:
-                    scatter[e, k_loc * 24 + j_loc] = rs + pos
-
-    return wp.array(scatter, dtype=wp.int32, device=device)
-
-
 # ---------------------------------------------------------------------------
 # N-env batched variants (flat arrays: env * per_env + local index)
-# Reference / topology arrays (elem_nodes, scatter_map) are shared across envs.
+# Reference / topology arrays (elem_nodes, blk_scatter_map) are shared across envs.
 # ---------------------------------------------------------------------------
 
 
@@ -474,16 +414,75 @@ def scatter_forces_batched(
             wp.atomic_add(global_f, base + s, elem_f[tid, node_local * 6 + s])
 
 
+# ---------------------------------------------------------------------------
+# Blocked (6x6 per node pair) storage of K_eff — used by the PCG path.
+# Node-block CSR: blk_offsets (n_nodes+1,), blk_columns (nnzb,) shared across envs;
+# values flat (N * nnzb * 36,), block b of env e at e*nnz + b*36, row-major 6x6.
+# Every node pair of an element receives a full 6x6 block, so this layout holds
+# exactly the real non-zeros (no triplet-capacity padding) and the SpMV reads one
+# column index per 36 values instead of one per value.
+# ---------------------------------------------------------------------------
+
+
+def build_block_structure(
+    elem_nodes_wp: wp.array2d[wp.int32],
+    K_eff: wps.BsrMatrix,
+    n_nodes: int,
+    device,
+) -> tuple[wp.array[wp.int32], wp.array[wp.int32], wp.array2d[wp.int32], int]:
+    """Derive the node-block CSR and the element->block scatter map from the scalar CSR.
+
+    Returns ``(blk_offsets, blk_columns, blk_scatter_map, nnzb)`` where
+    ``blk_scatter_map[e, a*4 + b]`` is the block index of node pair
+    ``(elem_nodes[e, a], elem_nodes[e, b])``.
+    """
+    offsets = K_eff.offsets.numpy()  # (n_dof + 1,)
+    columns = K_eff.columns.numpy()  # capacity-sized; valid up to offsets[-1]
+    elem_nodes = elem_nodes_wp.numpy()
+
+    blk_offsets = np.zeros(n_nodes + 1, dtype=np.int32)
+    blk_cols: list[np.ndarray] = []
+    for a in range(n_nodes):
+        rs, re = int(offsets[6 * a]), int(offsets[6 * a + 1])
+        nb = np.unique(columns[rs:re] // 6)
+        blk_cols.append(nb.astype(np.int32))
+        blk_offsets[a + 1] = blk_offsets[a] + len(nb)
+    blk_columns = np.concatenate(blk_cols) if blk_cols else np.zeros(0, dtype=np.int32)
+    nnzb = int(blk_offsets[-1])
+
+    n_elem = elem_nodes.shape[0]
+    scatter = np.full((n_elem, 16), -1, dtype=np.int32)
+    for e in range(n_elem):
+        nodes = elem_nodes[e]
+        for a in range(4):
+            row = int(nodes[a])
+            rs, re = int(blk_offsets[row]), int(blk_offsets[row + 1])
+            row_cols = blk_columns[rs:re]
+            for b in range(4):
+                pos = int(np.searchsorted(row_cols, int(nodes[b])))
+                if pos < len(row_cols) and row_cols[pos] == nodes[b]:
+                    scatter[e, a * 4 + b] = rs + pos
+    if np.any(scatter < 0):
+        raise RuntimeError("build_block_structure: element node pair missing from the assembled sparsity")
+
+    return (
+        wp.array(blk_offsets, dtype=wp.int32, device=device),
+        wp.array(blk_columns, dtype=wp.int32, device=device),
+        wp.array(scatter, dtype=wp.int32, device=device),
+        nnzb,
+    )
+
+
 @wp.kernel
-def scatter_elem_to_bsr_batched(
+def scatter_elem_to_blk_batched(
     elem_K: wp.array3d[float],  # (N*n_elems, 24, 24)
-    scatter_map: wp.array2d[wp.int32],  # (n_elems, 576) — shared
+    blk_scatter_map: wp.array2d[wp.int32],  # (n_elems, 16) — shared
     scale: float,
-    out_vals: wp.array[float],  # (N*nnz,) flat
+    out_vals: wp.array[float],  # (N*nnz,) flat, nnz = nnzb*36
     n_elems: int,
     nnz: int,
 ):
-    """dim = N*n_elems*24.  One thread per (env, element, K-row k)."""
+    """dim = N*n_elems*24.  One thread per (env, element, K-row k); blocked layout."""
     tid = wp.tid()
     n_per_env = n_elems * 24
     env = tid // n_per_env
@@ -491,30 +490,30 @@ def scatter_elem_to_bsr_batched(
     e = e_row // 24
     k = e_row % 24
     e_global = env * n_elems + e
-    base = env * nnz
+    base = env * nnz + (k % 6) * 6
+    a4 = (k // 6) * 4
     for j in range(24):
-        idx = scatter_map[e, k * 24 + j]
-        if idx >= 0:
-            wp.atomic_add(out_vals, base + idx, scale * elem_K[e_global, k, j])
+        blk = blk_scatter_map[e, a4 + j // 6]
+        wp.atomic_add(out_vals, base + blk * 36 + (j % 6), scale * elem_K[e_global, k, j])
 
 
 @wp.kernel
-def add_diag_to_bsr_values_batched(
+def add_diag_to_blk_values_batched(
     K_diag: wp.array[float],  # (N*n_dof,)
-    bsr_offsets: wp.array[wp.int32],  # (n_dof+1,) — shared
-    bsr_columns: wp.array[wp.int32],  # (nnz,)     — shared
-    bsr_vals: wp.array[float],  # (N*nnz,) flat
+    blk_offsets: wp.array[wp.int32],  # (n_nodes+1,) — shared
+    blk_columns: wp.array[wp.int32],  # (nnzb,) — shared
+    vals: wp.array[float],  # (N*nnz,) flat
     n_dof: int,
     nnz: int,
 ):
-    """dim = N*n_dof.  env = tid // n_dof;  i = tid % n_dof."""
+    """dim = N*n_dof.  Add K_diag onto the diagonal of the blocked matrix."""
     tid = wp.tid()
     env = tid // n_dof
     i = tid % n_dof
-    base = env * nnz
+    node = i // 6
+    s = i % 6
     diag_val = K_diag[tid]
-    for ptr in range(bsr_offsets[i], bsr_offsets[i + 1]):
-        if bsr_columns[ptr] == i:
-            wp.atomic_add(bsr_vals, base + ptr, diag_val)
-            break
+    for b in range(blk_offsets[node], blk_offsets[node + 1]):
+        if blk_columns[b] == node:
+            wp.atomic_add(vals, env * nnz + b * 36 + s * 7, diag_val)
             break

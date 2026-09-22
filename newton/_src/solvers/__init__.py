@@ -1,7 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-from .ancf_shell import SolverANCFShell
+from .ancf_shell import (
+    ANCFShellModel,
+    SolverANCFShell,
+    SolverANCFShellRigid,
+    SpindleAsset,
+    TerrainSCM,
+    TireAssetMeta,
+    ancf_material_from_engineering,
+    isotropic_ancf_material,
+    load_ancf_tire_usd,
+)
 from .featherstone import SolverFeatherstone
 from .flags import SolverNotifyFlags
 from .implicit_mpm import SolverImplicitMPM
@@ -15,7 +25,9 @@ from .vbd import SolverVBD
 from .xpbd import SolverXPBD
 
 __all__ = [
+    "ANCFShellModel",
     "SolverANCFShell",
+    "SolverANCFShellRigid",
     "SolverBase",
     "SolverFeatherstone",
     "SolverImplicitMPM",
@@ -28,4 +40,10 @@ __all__ = [
     "SolverStyle3D",
     "SolverVBD",
     "SolverXPBD",
+    "SpindleAsset",
+    "TerrainSCM",
+    "TireAssetMeta",
+    "ancf_material_from_engineering",
+    "isotropic_ancf_material",
+    "load_ancf_tire_usd",
 ]

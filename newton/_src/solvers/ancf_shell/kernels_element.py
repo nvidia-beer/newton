@@ -44,12 +44,6 @@ def _gp2(i: int) -> float:
 
 
 @wp.func
-def _w2(i: int) -> float:
-    """In-plane 2-point Gauss weights (both = 1.0)."""
-    return float(1.0)
-
-
-@wp.func
 def _gp5z(i: int) -> float:
     """Through-thickness 5-point Gauss-Legendre abscissae on [-1,1]."""
     if i == 0:
@@ -230,52 +224,6 @@ def _gl_shear(F: wp.mat33) -> wp.vec3:
         F[0, 0] * F[0, 1] + F[1, 0] * F[1, 1] + F[2, 0] * F[2, 1],  # 2·E12
         F[0, 0] * F[0, 2] + F[1, 0] * F[1, 2] + F[2, 0] * F[2, 2],  # 2·E13
         F[0, 1] * F[0, 2] + F[1, 1] * F[1, 2] + F[2, 1] * F[2, 2],  # 2·E23
-    )
-
-
-# ---------------------------------------------------------------------------
-# Orthotropic stress S = C·e  (2nd Piola-Kirchhoff, Voigt)
-# Material is read from a flat float array: [C11,C22,C33,C12,C13,C23,G23,G13,G12,rho,alpha]
-# ---------------------------------------------------------------------------
-
-
-@wp.func
-def _stress(
-    e_diag: wp.vec3,
-    e_shear: wp.vec3,
-    C11: float,
-    C22: float,
-    C33: float,
-    C12: float,
-    C13: float,
-    C23: float,
-    G23: float,
-    G13: float,
-    G12: float,
-) -> wp.mat33:
-    """Return S packed as 3×3: diag=[S11,S22,S33], off=[2S12,2S13,2S23] in rows 0..2.
-
-    We return a mat33 to avoid needing a vec6 type:
-        row 0 → [S11,  S22,  S33 ]
-        row 1 → [2S12, 2S13, 2S23]
-    (row 2 unused)
-    """
-    S11 = C11 * e_diag[0] + C12 * e_diag[1] + C13 * e_diag[2]
-    S22 = C12 * e_diag[0] + C22 * e_diag[1] + C23 * e_diag[2]
-    S33 = C13 * e_diag[0] + C23 * e_diag[1] + C33 * e_diag[2]
-    S12_2 = G12 * e_shear[0]
-    S13_2 = G13 * e_shear[1]
-    S23_2 = G23 * e_shear[2]
-    return wp.mat33(
-        S11,
-        S22,
-        S33,
-        S12_2,
-        S13_2,
-        S23_2,
-        0.0,
-        0.0,
-        0.0,
     )
 
 
@@ -656,18 +604,9 @@ def _beta_transform_shear(e_d: wp.vec3, e_s: wp.vec3, b: wp.mat33) -> wp.vec3:
 
 
 # ---------------------------------------------------------------------------
-# One Gauss-point contribution to elem_f and elem_K
-# ---------------------------------------------------------------------------
-# Each GP accumulates 24 force scalars and 24×24 stiffness scalars.
-# The loops are unrolled by iterating (node a, is_grad a, dir a) for k, and
-# (node b, is_grad b, dir b) for j.  Re-computing g/B per (k,j) pair avoids
-# needing 24-element local arrays.
-
-# compute_element_forces_stiffness lives in kernels_stiffness.py (separate
-# compile unit so the lumped-mass kernel here doesn't block its compilation).
-
-# ---------------------------------------------------------------------------
 # Lumped mass kernel  (replaces the old consistent-mass 24×24 kernel)
+# The element force/stiffness kernels live in kernels_stiffness.py (separate
+# compile unit so the lumped-mass kernel here doesn't block their compilation).
 # ---------------------------------------------------------------------------
 
 
@@ -713,14 +652,11 @@ def compute_lumped_mass(
     m_elem = float(0.0)
     for gi in range(2):
         xi = _gp2(gi)
-        w_xi = _w2(gi)
         for gj in range(2):
             eta = _gp2(gj)
-            w_eta = _w2(gj)
             for gk in range(5):
                 zeta = _gp5z(gk)
-                w_z = _gp5w(gk)
-                w = w_xi * w_eta * w_z
+                w = _gp5w(gk)  # in-plane 2-point Gauss weights are 1
                 N = _shape(xi, eta)
                 dNxi = _dshape_dxi(eta)
                 dNeta = _dshape_deta(xi)

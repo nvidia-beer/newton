@@ -3,41 +3,40 @@
 
 """ANCF3423 shell element solver package.
 
-- 3-section orthotropic Polaris materials (bead / sidewall / tread)
-- 71-point Polaris cross-section profile
-- Full ANS (ε_zz at corners, γ_13/γ_23 at mid-edges) + EAS (5 modes)
-- BSR sparse K_eff with scatter_map for graph-capture-safe in-place updates
-- Penalty ground contact (kn=2e6, kd=13, mu=0.9) inside the solver
-- Diagonal-preconditioned PCG with custom SpMV kernel (no wps.bsr_mv)
+- Tire mesh geometry loaded from USD assets baked by ``newton-tire-tool``
+  (``third_party/newton-tire-tool/``) — see :func:`load_ancf_tire_usd`
+- Full ANS (ε_zz at corners, γ_13/γ_23 at mid-edges) + β-transform; EAS (5 modes) in the
+  single-tire element kernel only, the batched N-env kernels run with α ≡ 0
+- K_eff in 6x6 node-block CSR, refilled in place (graph-capture safe)
+- Penalty ground contact (kn=2e6, kd=13, mu=0.9) inside the solver; optional
+  heightfield / soil terrain via :class:`TerrainSCM`
+- 6x6 block-Jacobi PCG with a fused SpMV kernel
 - N-env batched mode: flat [N*per_env] arrays, shared sparsity, PcgSolverBatched
+- :class:`SolverANCFShellRigid` couples each tire to a rigid spindle body
 """
 
 from .model_ancf_shell import (
     ANCFMaterial,
     ANCFShellModel,
+    SpindleAsset,
+    TireAssetMeta,
     ancf_material_from_engineering,
-    build_ancf_parabolic_mesh,
-    build_ancf_tire_mesh,
     isotropic_ancf_material,
-    polaris_bead_material,
-    polaris_sidewall_material,
-    polaris_tread_material,
+    load_ancf_tire_usd,
 )
 from .solver_ancf_shell import SolverANCFShell
-
-# Backward-compat alias
-ANCFModel = ANCFShellModel
+from .solver_ancf_shell_rigid import SolverANCFShellRigid
+from .terrain_scm import TerrainSCM
 
 __all__ = [
     "ANCFMaterial",
-    "ANCFModel",
     "ANCFShellModel",
     "SolverANCFShell",
+    "SolverANCFShellRigid",
+    "SpindleAsset",
+    "TerrainSCM",
+    "TireAssetMeta",
     "ancf_material_from_engineering",
-    "build_ancf_parabolic_mesh",
-    "build_ancf_tire_mesh",
     "isotropic_ancf_material",
-    "polaris_bead_material",
-    "polaris_sidewall_material",
-    "polaris_tread_material",
+    "load_ancf_tire_usd",
 ]

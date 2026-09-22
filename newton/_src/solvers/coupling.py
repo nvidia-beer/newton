@@ -166,7 +166,7 @@ class InterfaceCouplerGS:
         ancf_solver: A :class:`~newton.solvers.SolverANCFShell` instance.
         n_iters: Number of GS coupling iterations per substep.
             ``1`` is equivalent to the explicit scheme.  ``2`` eliminates the
-            leading-order lag and is sufficient for FEDA-class loads.
+            leading-order lag and is sufficient for the ~1.5 t/corner vehicle examples.
         tol: Convergence tolerance for spindle position change [m].  ``0.0``
             (default) disables early exit, avoiding any GPU→CPU sync per substep.
     """
@@ -377,7 +377,7 @@ class InterfaceCouplerGS:
             # extrapolate again).
             self.gs_iter = k
 
-            # ── restore ANCF to t_n (1 kernel, not 7 copies) ──────────────
+            # ── restore ANCF to t_n (1 kernel, not 8 copies) ──────────────
             self._unpack_ancf(self._ancf_cur)
 
             # ── restore extra read-write arrays (if any) ──────────────────
