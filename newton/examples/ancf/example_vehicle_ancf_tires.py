@@ -2,25 +2,28 @@
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
-"""FEDA double-wishbone vehicle on 4 inflatable ANCF FEM tires.
+"""A vehicle USD asset on 4 inflatable ANCF FEM tires (--vehicle-asset / --tire-asset).
 
-Combines two examples:
+Combines:
 
-  double_wishbone            (7) - FEDA (FED Alpha) vehicle mechanics: full
-                                   double-wishbone suspension, TSDA air-spring
-                                   approximations.  Ported from Chrono FEDA_Full.
+  a vehicle USD asset            - the rigid vehicle (baked by newton-tire-tool: e.g. the
+                                   Chrono double-wishbone super jeep, or the Sherp rigid
+                                   hull with fixed axles), loaded by _vehicle_usd.VehicleUSD.
   ancf_rigid_mujoco_tires    (2) - the MuJoCo <-> ANCF coupling: bead-node
                                    Dirichlet prescription from the spindle pose,
                                    reaction wrench fed back through xfrc_applied.
 
-The rigid wheels of (7) are removed: the FEM tires are the only ground support.
+The vehicle has no rigid wheels: the FEM tires are the only ground support. Everything
+vehicle-specific (spindle / axle / steer names, limits, camera, CTIS panel) is read from the
+vehicle asset by _vehicle_usd.VehicleUSD; nothing here names a vehicle.
 
 Architecture
 ------------
-  Rigid car    - SolverMuJoCo (Z-up, feda_rims_only.xml, 1 MuJoCo world)
-  FEM tires x4 - SolverANCFShellRigid (Y-up, n_envs=4, batched)
+  Rigid vehicle - SolverMuJoCo (Z-up, add_usd of the vehicle asset, 1 MuJoCo world)
+  FEM tires x4  - SolverANCFShellRigid (Y-up, n_envs=4, batched)
 
-Coupling per substep (default --gs-iters 2, newton.solvers.InterfaceCouplerGS):
+Coupling per substep (--gs-iters; the code default is 2 via newton.solvers.InterfaceCouplerGS,
+the docker configs ship gs-iters 1):
   1. step_kinematics -> xpos / xquat / cvel on GPU
   2. prescribe ANCF bead nodes from the spindle pose and velocity  (rigid -> soft)
   3. ANCF NR+PCG step (captured CUDA graph)
@@ -37,7 +40,7 @@ Coordinate systems
   Z-up -> Y-up : (x,y,z) -> (y, z, x)
   Y-up -> Z-up : (x,y,z) -> (z, x, y)
 
-Command: python -m newton.examples double_wishbone_ancf_tires
+Command: python -m newton.examples vehicle_ancf_tires
 """
 
 from __future__ import annotations
@@ -52,51 +55,44 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton._src.solvers.ancf_shell import (
-    build_ancf_tire_mesh,
-    isotropic_ancf_material,
+from newton.examples.ancf._ancf_viz import (
+    _ancf_yup_to_zu,
+    _build_ring_lines,
+    _gather_zu,
+    bead_row_indices,
+    material_row,
+    quad_triangles,
+    ring_segments,
 )
-from newton._src.solvers.ancf_shell.solver_ancf_shell_rigid import SolverANCFShellRigid as SolverANCFShell
+from newton.examples.ancf._vehicle_usd import VehicleUSD, find_body
+from newton.solvers import SolverANCFShellRigid, isotropic_ancf_material, load_ancf_tire_usd
 
-# ── Vehicle geometry (FEDA 335/65R22.5) ──────────────────────────────────────
-_WB_H = 1.651  # half-wheelbase [m]
-_TR_H = 0.97663  # half-track [m]
-_R_OUTER = 0.499  # tread crown radius [m]
-_R_INNER = 0.286  # bead seat radius [m]
-_WIDTH = 0.335  # bead-to-bead width [m]
+_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 
-# Spindle world positions in FEDA Z-up: (x_fwd, y_lat, z_up)
-_SPINDLE_ZU = np.array(
-    [
-        [_WB_H, -_TR_H, _R_OUTER],  # front right
-        [_WB_H, +_TR_H, _R_OUTER],  # front left
-        [-_WB_H, -_TR_H, _R_OUTER],  # rear right
-        [-_WB_H, +_TR_H, _R_OUTER],  # rear left
-    ],
-    dtype=np.float32,
-)
 
-_SPINDLE_NAMES = ("spindle_fl", "spindle_fr", "spindle_rl", "spindle_rr")
-_AXLE_NAMES = ("axle_fl", "axle_fr", "axle_rl", "axle_rr")
+def _asset_path(name: str) -> str:
+    return name if os.path.isabs(name) else os.path.join(_ASSETS_DIR, name)
+
+
+# Kept under the old name for the sand / track / field examples.
+_find_body = find_body
+
 _N_TIRES = 4
 
-# MuJoCo is right-handed and this MJCF steers at +X, so +X is forward, +Z is up and
-# +Y is the vehicle's LEFT (ISO 8855).  The FEDA MJCF nonetheless names its -Y bodies
-# "_fl"/"_rl", which is inverted; the arrays above follow the MJCF order, so index 0 is
-# the front RIGHT corner.  Steering is parallel (both kingpins take the same angle), so
-# the swap only ever affected display names — not the dynamics.
-# UI/diag order is the driver's FL, FR, RL, RR; each entry maps to its tire index.
-_WHEEL_ORDER = (("FL", 1), ("FR", 0), ("RL", 3), ("RR", 2))
+# Vehicle frame: +X forward, +Z up, +Y = the vehicle's LEFT (ISO 8855, right-hand rule), so
+# the asset's spindle order FL, FR, RL, RR has index 0 at +Y (see docker/ANCF_FINDINGS.md for
+# the 2026-09-14 L/R mirror fix). UI/diag order is the driver's FL, FR, RL, RR; each entry
+# maps to its tire index.
+_WHEEL_ORDER = (("FL", 0), ("FR", 1), ("RL", 2), ("RR", 3))
 
 # ── Tire mesh defaults ────────────────────────────────────────────────────────
-_N_CIRC = 16
-# sec_divs[0] is the number of bead rows PER SIDE; the bead rings are the only
-# thing resisting axial (spindle-axis) motion of the casing.  2 rows per side =
-# 4 rings, 64 pinned nodes.
-_SEC_DIVS = (2, 2, 3)
+# Mesh topology (n_circ/section_divs) is baked into the vehicle's tire_asset
+# (newton-tire-tool) — see TireAssetMeta.n_bead_rows, the number of bead rows
+# PER SIDE. The bead rings are the only thing resisting axial (spindle-axis)
+# motion of the casing. 2 rows per side = 4 rings, 64 pinned nodes.
 _H_SHELL = 0.010  # [m]
 
-# ── Shell material (locked values, TASK_ANCF_JEEP.md) ─────────────────────────
+# ── Shell material (locked values, docker/ANCF_FINDINGS.md) ───────────────────
 _E_TIRE = 5.0e7  # [Pa]
 _NU_TIRE = 0.45
 _RHO_TIRE = 700.0  # [kg/m^3]
@@ -110,28 +106,9 @@ _PRESSURE = 30_000.0  # [Pa]
 # (nominal - build), so build must be BELOW _PRESSURE or the tire is uninflated.
 _BUILD_PRESSURE = 0.0
 
-# ── CTIS envelope: Icelandic super jeep ───────────────────────────────────────
-# Þórhallsson, "Automatic Control and User Interface for Central Tire Inflation
-# System", MSc thesis, Reykjavík University, 2015 (docker/MSc.pdf):
-#   §3.2  setpoint range 0.5-35 psi (0.5-10 psi covers off-road use on its own)
-#   §1    typical off-road snow driving 2-8 psi; ~1 psi or less in extreme cases,
-#         and the Arctic Trucks footprint study runs 20 psi down to 3 psi
-#   §3.4  driver must retrim 2 -> 10 psi in 4 s while moving, i.e. 2 psi/s
-#   §3.6  setpoint resolution 0.5 psi below 5 psi, 1 psi above (table 3.1)
-# All readings are shown in psi, as the thesis requires.
-_PSI = 6894.757  # [Pa/psi]
-_CTIS_MIN_PSI = 0.5
-_CTIS_MAX_PSI = 35.0
-_CTIS_RATE_PSI_S = 2.0  # [psi/s]
-# Reference levels: deep snow, soft snow, trail, gravel, highway.
-_CTIS_PRESETS = ((2.0, "snow"), (5.0, "trail"), (10.0, "gravel"), (20.0, "road"), (35.0, "hwy"))
+# CTIS panel envelope: from the vehicle asset (see _vehicle_usd.VehicleUSD.ctis_envelope).
 
-# ── FEDA masses (rim collapsed into spindle) ──────────────────────────────────
-_M_SPINDLE = 13.08  # [kg]
-_M_RIM = 18.80  # [kg]
-_M_RIGID = _M_SPINDLE + _M_RIM  # 31.88 kg per corner
-
-# ── Solver budget (locked, TASK_ANCF_JEEP.md) ─────────────────────────────────
+# ── Solver budget (locked, docker/ANCF_FINDINGS.md) ───────────────────────────
 # Verified 2026-09-09 to settle and drive; nr=8/pcg=100 and pcg=200 gave the
 # same trajectories, so more iterations buy nothing here.
 _SIM_SUBSTEPS = 10
@@ -153,33 +130,14 @@ _MU = 0.9
 _TORQUE_ALPHA = 0.0
 
 _GRAVITY = 9.81
-_MAX_STEER = 0.47947  # ±27.5° [rad]
-_MAX_SPEED = 20.0  # [rad/s]
 _WHEEL_SPEED_RATE = 0.2  # [rad/s per frame] max speed change per step() call
 
 # Initial chassis lowering [m] so the tires start pre-compressed and can carry
 # the TSDA preload on frame 0: ~F/(N_contact*kn) = 15.5e3/(24*20e3) ~ 3 cm.
 _RIDE_DROP = 0.030
 
-_MJCF_PATH = os.path.join(os.path.dirname(__file__), "assets", "feda_rims_only.xml")
-
 
 # ── Warp kernels ──────────────────────────────────────────────────────────────
-
-
-@wp.kernel
-def _drive_feda(
-    steer_dofs: wp.array[wp.int32],  # kingpin hinge DOFs (FL, FR) — kinematic steering
-    cmd: wp.array[wp.float32],  # [0] steer_angle [rad], [1] wheel_speed [rad/s]
-    throttle_dofs: wp.array[wp.int32],
-    joint_target_pos: wp.array[wp.float32],
-    joint_target_vel: wp.array[wp.float32],
-):
-    """dim=N_TIRES.  Write steering position and wheel-speed targets from a device buffer."""
-    tid = wp.tid()
-    if tid < steer_dofs.shape[0]:
-        joint_target_pos[steer_dofs[tid]] = cmd[0]
-    joint_target_vel[throttle_dofs[tid]] = cmd[1]
 
 
 @wp.kernel
@@ -263,52 +221,30 @@ def _prescribe_beads_gpu_dw(
     node_Dd[global_idx] = dd_new
 
 
-@wp.kernel
-def _ancf_yup_to_zu(src: wp.array[wp.vec3], dst: wp.array[wp.vec3]):
-    """ANCF Y-up -> Z-up for particle rendering: (x,y,z) -> (z,x,y)."""
-    i = wp.tid()
-    p = src[i]
-    dst[i] = wp.vec3(p[2], p[0], p[1])
-
-
-@wp.kernel
-def _gather_zu(src: wp.array[wp.vec3], indices: wp.array[wp.int32], dst: wp.array[wp.vec3]):
-    """Gather indexed positions already in Z-up."""
-    i = wp.tid()
-    dst[i] = src[indices[i]]
+_CONTACT_SPIKE_STRIDE = 4
+"""Draw every Nth node's spike so a wide contact patch reads as a sparse outline, not a dense forest."""
 
 
 @wp.kernel
 def _gather_contact_spikes(
     node_x: wp.array[wp.vec3],  # ANCF Y-up, all envs flat
+    n_nodes: int,  # nodes per tire, for the per-tire local index
     ground_y: float,
     vis_scale: float,
     line_starts: wp.array[wp.vec3],  # Z-up output
     line_ends: wp.array[wp.vec3],  # Z-up output
 ):
-    """GPU-only contact visualization: a spike of height pen*vis_scale per penetrating node."""
+    """GPU-only contact visualization: a spike of height pen*vis_scale per sampled penetrating node."""
     i = wp.tid()
     p = node_x[i]
-    pen = ground_y - p[1]
     base = wp.vec3(p[2], p[0], ground_y)
     line_starts[i] = base
-    if pen > 0.0:
+    local = i % n_nodes
+    pen = ground_y - p[1]
+    if pen > 0.0 and local % _CONTACT_SPIKE_STRIDE == 0:
         line_ends[i] = wp.vec3(base[0], base[1], base[2] + pen * vis_scale)
     else:
         line_ends[i] = base
-
-
-@wp.kernel
-def _build_ring_lines(
-    bead_pos_zu: wp.array[wp.vec3],
-    seg_s: wp.array[wp.int32],
-    seg_e: wp.array[wp.int32],
-    line_starts: wp.array[wp.vec3],
-    line_ends: wp.array[wp.vec3],
-):
-    i = wp.tid()
-    line_starts[i] = bead_pos_zu[seg_s[i]]
-    line_ends[i] = bead_pos_zu[seg_e[i]]
 
 
 @wp.kernel
@@ -324,36 +260,34 @@ def _fill_spindle_positions_dw(
     out[tid] = xpos[0, spindle_mj_arr[env]]
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-
-def _find_dof(builder: newton.ModelBuilder, joint_name: str) -> int:
-    """Return qd DOF index for the joint whose last path segment matches joint_name."""
-    for j, label in enumerate(builder.joint_label):
-        if label.split("/")[-1] == joint_name:
-            return int(builder.joint_qd_start[j])
-    raise KeyError(f"joint '{joint_name}' not found in builder")
-
-
-def _find_body(model: newton.Model, body_name: str) -> int:
-    """Return Newton body index whose last path segment matches body_name."""
-    for j, label in enumerate(model.body_label):
-        if label.split("/")[-1] == body_name:
-            return j
-    raise KeyError(f"body '{body_name}' not found in model")
-
-
 # ── Example class ─────────────────────────────────────────────────────────────
 
 
 class Example:
-    """FEDA double-wishbone rigid car + 4 ANCF FEM tires."""
+    """A vehicle USD asset (--vehicle-asset) on 4 ANCF FEM tires (--tire-asset)."""
+
+    # MuJoCo contact budget (flat plane: rims + arms on one plane). Terrain subclasses raise it.
+    _NCONMAX = 128
+    _NJMAX = 500
 
     def __init__(self, viewer=None, args=None):
         device = "cuda:0"
         if getattr(args, "fast_math", False):
             wp.config.fast_math = True
         wp.init()
+
+        # Vehicle and tire are USD assets (--vehicle-asset / --tire-asset, baked by newton-tire-tool;
+        # see _vehicle_usd.py). A subclass may construct self.vehicle before calling this __init__.
+        if getattr(self, "vehicle", None) is None:
+            vehicle_asset = getattr(args, "vehicle_asset", None)
+            if not vehicle_asset:
+                raise ValueError("--vehicle-asset is required (a vehicle USD baked by newton-tire-tool)")
+            self.vehicle = VehicleUSD(_asset_path(vehicle_asset))
+        # The tire defaults to the one the vehicle asset was built for.
+        if not getattr(args, "tire_asset", None):
+            if not self.vehicle.default_tire_asset:
+                raise ValueError("--tire-asset is required (the vehicle asset names no default tire)")
+            args.tire_asset = self.vehicle.default_tire_asset
 
         self._frame = 0
         self._t = 0.0
@@ -367,15 +301,21 @@ class Example:
         # ── Solver params ─────────────────────────────────────────────────────
         substeps = int(getattr(args, "substeps", _SIM_SUBSTEPS))
         nr_iters = int(getattr(args, "nr_iters", _NR_ITERS))
-        pcg_iters = int(getattr(args, "pcg_iters", _PCG_ITERS))
-        kn = float(getattr(args, "kn", _KN))
-        kd = float(getattr(args, "kd", _KD))
+        # kn and the PCG budget default to the tire asset's recommendation (resolved after the
+        # tire is loaded below); the CLI / JSON override when given.
+        pcg_arg = getattr(args, "pcg_iters", None)
+        kn_arg = getattr(args, "kn", None)
+        kd_arg = getattr(args, "kd", None)
         mu = float(getattr(args, "mu", _MU))
         sim_dt = _FRAME_DT / substeps
         self._substeps = substeps
         self._sim_dt = sim_dt
 
         # ── Tire material (shell-tires JSON array or flat CLI args) ──────────
+        # Geometry (dimensions, n-circ, sec-divs) is fixed at bake time — see
+        # third_party/newton-tire-tool/scripts/bake_tire.py. Only material +
+        # thickness + pressure are still runtime-overridable (applied to the
+        # loaded mesh below).
         shell_tires = getattr(args, "shell_tires", None)
         if shell_tires:
             if isinstance(shell_tires, str):
@@ -384,11 +324,10 @@ class Example:
             e_tire = float(t0.get("E", _E_TIRE))
             nu_tire = float(t0.get("nu", _NU_TIRE))
             rho_tire = float(t0.get("rho", _RHO_TIRE))
-            h_shell = float(t0.get("thickness", _H_SHELL))
+            h_cfg = t0.get("thickness", _H_SHELL)
+            h_shell = None if h_cfg is None else float(h_cfg)  # None: the asset's shellThickness, else its bands
             alpha_d = float(t0.get("alpha-damp", _ALPHA_D))
             pressure = float(t0.get("pressure", _PRESSURE))
-            sec_divs = tuple(int(x) for x in t0.get("sec-divs", list(_SEC_DIVS)))
-            n_circ = int(t0.get("n-circ", _N_CIRC))
         else:
             e_tire = float(getattr(args, "e_tire", _E_TIRE))
             nu_tire = float(getattr(args, "nu_tire", _NU_TIRE))
@@ -396,50 +335,48 @@ class Example:
             h_shell = float(getattr(args, "h_shell", _H_SHELL))
             alpha_d = float(getattr(args, "alpha_d", _ALPHA_D))
             pressure = float(getattr(args, "pressure", _PRESSURE))
-            sec_divs = _SEC_DIVS
-            n_circ = _N_CIRC
         thick_gp = int(getattr(args, "thickness_gp", 3))
 
         mat = isotropic_ancf_material(E=e_tire, nu=nu_tire, rho=rho_tire, alpha_damp=alpha_d)
 
         # ── ANCF tire mesh (Y-up: axle along X, tread at Y=0) ────────────────
-        self.ancf_model = build_ancf_tire_mesh(
-            R_outer=_R_OUTER,
-            R_inner=_R_INNER,
-            width=_WIDTH,
-            n_circ=n_circ,
-            section_divs=sec_divs,
-            section_mats=(mat, mat, mat),
-            section_h=(h_shell, h_shell, h_shell),
-            pressure=pressure,
-            device=device,
-        )
+        self.ancf_model, tire_meta = load_ancf_tire_usd(_asset_path(args.tire_asset), device=device)
+        # Dimensions / limits from the vehicle USD and the tire USD.
+        self.spec = self.vehicle.spec(args.tire_asset, tire_meta)
+        n_elems = self.ancf_model.n_elems
+        self.ancf_model.elem_mat = wp.array(np.tile(material_row(mat), (n_elems, 1)), dtype=float, device=device)
+        if h_shell is None and tire_meta.shell_thickness is not None:
+            h_shell = float(tire_meta.shell_thickness)  # the asset's validated uniform thickness
+        if h_shell is None:
+            h_shell = float(self.ancf_model.elem_h.numpy().mean())  # for the lumped mass estimates below
+        else:
+            self.ancf_model.elem_h = wp.array(np.full(n_elems, h_shell, dtype=np.float32), device=device)
+        self._tire_meta = tire_meta
+        self._e_tire = e_tire
+        pcg_iters = int(pcg_arg) if pcg_arg is not None else int(tire_meta.pcg_iters or _PCG_ITERS)
+        kn = float(kn_arg) if kn_arg is not None else float(tire_meta.contact_kn or _KN)
+        kd = float(kd_arg) if kd_arg is not None else kn * (_KD / _KN)  # same damping ratio as the baseline
 
-        n_ax_divs = 2 * sum(sec_divs)
+        n_circ = tire_meta.n_circ
+        n_bead_rows = tire_meta.n_bead_rows
+        n_ax_divs = n_elems // n_circ
         n_bead_per_ring = n_circ
-        n_bead = 2 * sec_divs[0] * n_bead_per_ring
+        n_bead = 2 * n_bead_rows * n_bead_per_ring
         n_nodes = self.ancf_model.n_nodes
         x0_np = self.ancf_model.node_x0.numpy()
         d0_np = self.ancf_model.node_D0.numpy()
         d0_np_tiled = np.tile(d0_np, (_N_TIRES, 1)).astype(np.float32)
 
-        m_tire = rho_tire * h_shell * (2.0 * math.pi * _R_OUTER * _WIDTH + 2.0 * math.pi * (_R_OUTER**2 - _R_INNER**2))
+        r_outer, r_inner, width = self.spec.tire_R_outer, self.spec.tire_R_inner, self.spec.tire_width
+        m_tire = rho_tire * h_shell * (2.0 * math.pi * r_outer * width + 2.0 * math.pi * (r_outer**2 - r_inner**2))
         fz_tare = m_tire * _GRAVITY
 
         self._n_bead = n_bead
         self._n_nodes = n_nodes
         self._fz_tare = fz_tare
 
-        # ── Bead ring node indices: sec_divs[0] rows pinned per side ─────────
-        n_bead_rows = sec_divs[0]
-        left_rows = [
-            np.arange(k * n_bead_per_ring, (k + 1) * n_bead_per_ring, dtype=np.int32) for k in range(n_bead_rows)
-        ]
-        right_rows = [
-            np.arange((n_ax_divs - k) * n_bead_per_ring, (n_ax_divs - k + 1) * n_bead_per_ring, dtype=np.int32)
-            for k in range(n_bead_rows)
-        ]
-        bead_np = np.concatenate(left_rows + right_rows)
+        # ── Bead ring node indices: n_bead_rows rows pinned per side ─────────
+        bead_np = bead_row_indices(n_bead_per_ring, n_bead_rows, n_ax_divs)
         assert len(bead_np) == n_bead, f"expected {n_bead} bead nodes, got {len(bead_np)}"
 
         self._bead_idx = wp.array(bead_np, dtype=wp.int32, device=device)
@@ -456,12 +393,12 @@ class Example:
         # ── ANCF solver (Y-up, gravity along -Y) ─────────────────────────────
         ancf_builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
         ancf_newton_model = ancf_builder.finalize(device=device)
-        self.ancf_solver = SolverANCFShell(
+        self.ancf_solver = SolverANCFShellRigid(
             model=ancf_newton_model,
             ancf_model=self.ancf_model,
             n_tires=_N_TIRES,
             torque_alpha=float(getattr(args, "torque_alpha", _TORQUE_ALPHA)),
-            ground_z=0.0,
+            ground_z=float(getattr(args, "ground_z", 0.0)),
             kn=kn,
             kd=kd,
             mu=mu,
@@ -470,11 +407,14 @@ class Example:
             thickness_gp=thick_gp,
         )
 
-        # Place each ANCF tire at its spindle's position.
+        # Place each ANCF tire at its spindle's position, the whole vehicle (built by
+        # self.vehicle.build below) lifted by world_z_offset for terrain examples.
         # Spindle (x_fwd, y_lat, z_up) in Z-up -> ANCF (y_lat, z_up, x_fwd).
+        z_off = float(getattr(args, "world_z_offset", 0.0))
+        spindle_zu = self.vehicle.spindle_positions_zu()
         world_x = np.concatenate(
             [
-                x0_np + np.array([_SPINDLE_ZU[e, 1], _SPINDLE_ZU[e, 2], _SPINDLE_ZU[e, 0]], dtype=np.float32)
+                x0_np + np.array([spindle_zu[e, 1], spindle_zu[e, 2] + z_off, spindle_zu[e, 0]], dtype=np.float32)
                 for e in range(_N_TIRES)
             ],
             axis=0,
@@ -487,26 +427,36 @@ class Example:
         self.ancf_solver._fix_dirichlet_in_batched = True
         self.ancf_solver.debug_residuals = bool(getattr(args, "debug_residuals", False))
 
-        # CTIS: set_cavity takes per-env sequences, so each tire holds its own K_gas.
+        # CTIS (see _ctis.py; per-tire valves or one air line, from the vehicle asset).
         # Start already inflated — the ramp is a realistic 2 psi/s, so filling from the
         # build pressure would leave the jeep on flat tires for seconds and would not
-        # reproduce the settled baseline (h=0.42 m, 14-17 kN/corner).
-        self._pressure = pressure
+        # reproduce the settled baseline (h=0.42 m, 14-17 kN/corner). The scenario's
+        # pressure is clamped into the vehicle's CTIS envelope: 30 kPa is inside the
+        # jeep's 0.5-35 psi but 2x the Sherp's 2.1 psi ceiling, which its slider could
+        # not reach for minutes at the Sherp's fill rate.
         self._build_pressure = float(getattr(args, "build_pressure", _BUILD_PRESSURE))
-        self._pressure_all = pressure  # "all tires" slider position
-        self._pressure_targets = [pressure] * _N_TIRES
-        self._pressure_currents = [pressure] * _N_TIRES
-        self.ancf_solver.set_cavity(self._pressure_currents, [self._build_pressure] * _N_TIRES)
+        self.ctis = None
+        if pressure > 0.0:
+            # (unit label, Pa per unit, min, max, ramp rate [unit/s], presets, title); one host
+            # copy of elem_h for the hoop-strain cap.
+            envelope = self.vehicle.ctis_envelope(self._e_tire, self.ancf_model.elem_h.numpy(), self._tire_meta)
+            _unit, per_unit, p_min, p_max, _rate, _presets, _title = envelope
+            pressure = min(max(pressure, p_min * per_unit), p_max * per_unit)
+            self.ctis = self.vehicle.make_ctis(self.ancf_solver, _N_TIRES, pressure, self._build_pressure, envelope)
+        else:
+            self.ancf_solver.set_cavity([0.0] * _N_TIRES, [self._build_pressure] * _N_TIRES)
 
         # ── MuJoCo car builder (Z-up, 1 world) ───────────────────────────────
         car = newton.ModelBuilder()
         newton.solvers.SolverMuJoCo.register_custom_attributes(car)
         car.default_shape_cfg.mu = mu
-        car.add_mjcf(_MJCF_PATH, up_axis="Z")  # ground plane is in the MJCF worldbody
+        # The rigid vehicle (spindle bodies named by the asset, chassis free joint first).
+        half_bead = float(np.abs(self._bead_rest_np[:, 0]).max())  # bead ring axial half-width
+        self.vehicle.build(car, z_off, self._tire_meta.spindle, self.spec.tire_R_inner, half_bead)
+        self._on_car_builder(car)
 
-        steer_names = ("upright_fl_steer", "upright_fr_steer")
-        self._steer_qd_dof_arr = wp.array([_find_dof(car, n) for n in steer_names], dtype=wp.int32, device=device)
-        self._axle_qd_dof_arr = wp.array([_find_dof(car, n) for n in _AXLE_NAMES], dtype=wp.int32, device=device)
+        # Resolve the DOF indices _launch_drive writes to.
+        self.vehicle.setup_drive(car, device)
         # Steer/throttle commands ride on a 2-element device buffer so GUI changes
         # do not invalidate a captured graph.
         self._cmd_host = np.zeros(2, dtype=np.float32)
@@ -520,11 +470,7 @@ class Example:
             mass=[0.0] * (_N_TIRES * n_nodes),
             radius=[0.001] * (_N_TIRES * n_nodes),
         )
-        en_np = self.ancf_model.elem_nodes.numpy()
-        tris = np.empty((len(en_np) * 2, 3), dtype=np.int32)
-        tris[0::2] = en_np[:, [0, 1, 2]]
-        tris[1::2] = en_np[:, [0, 2, 3]]
-        all_tris = np.concatenate([tris + e * n_nodes for e in range(_N_TIRES)], axis=0)
+        all_tris = quad_triangles(self.ancf_model.elem_nodes.numpy(), n_nodes, _N_TIRES)
         car.add_triangles(i=all_tris[:, 0].tolist(), j=all_tris[:, 1].tolist(), k=all_tris[:, 2].tolist())
 
         self.model = car.finalize(device=device)
@@ -535,8 +481,17 @@ class Example:
         # Pre-compress the tires so they can carry the TSDA preload on frame 0.
         ride_drop = float(getattr(args, "ride_drop", _RIDE_DROP))
         if ride_drop != 0.0:
+            # The chassis free joint: [0:3] = position. Look it up by body rather than assuming it
+            # is joint 0 (the USD importer orders joints depth-first from the articulation root).
+            chassis = _find_body(self.model, "chassis")
+            j_child = self.model.joint_child.numpy()
+            j_type = self.model.joint_type.numpy()
+            free = [j for j in range(len(j_child)) if j_child[j] == chassis and j_type[j] == int(newton.JointType.FREE)]
+            if len(free) != 1:
+                raise ValueError(f"expected one free joint on body 'chassis', found {len(free)}")
+            q0 = int(self.model.joint_q_start.numpy()[free[0]])
             jq = self.model.joint_q.numpy()
-            jq[2] -= ride_drop  # chassis freejoint: [0:3]=pos, [3:7]=quat
+            jq[q0 + 2] -= ride_drop
             self.model.joint_q.assign(jq)
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
@@ -549,8 +504,8 @@ class Example:
             integrator="implicitfast",
             iterations=50,
             ls_iterations=10,
-            njmax=500,
-            nconmax=128,
+            njmax=self._NJMAX,
+            nconmax=self._NCONMAX,
             # Must be 1: InterfaceCouplerGS rewinds state_0 to t_n between GS
             # iterations and step_kinematics only pushes state_0 into mjData
             # when update_data_interval > 0.
@@ -564,7 +519,7 @@ class Example:
         # ── Spindle names -> MuJoCo body indices; register per-wheel coupling ──
         btow = self.solver.mjc_body_to_newton.numpy()[0]
         spindle_mj_list = []
-        for name in _SPINDLE_NAMES:
+        for name in self.vehicle.spindle_bodies:
             nidx = _find_body(self.model, name)
             m = np.where(btow == nidx)[0]
             assert len(m), f"spindle '{name}' (newton={nidx}) not in MuJoCo body map"
@@ -581,7 +536,8 @@ class Example:
                 device=device,
             )
         print(
-            f"[DW] mjcf={os.path.basename(_MJCF_PATH)}  spindle_mj={spindle_mj_list}  "
+            f"[DW] vehicle={self.vehicle.name} ({self.vehicle.kind}, {self.vehicle.steering} steer)"
+            f"  tire={os.path.basename(self.spec.tire_asset)}  spindle_mj={spindle_mj_list}  "
             f"m_tire={m_tire:.3f} kg  torque_alpha={self.ancf_solver.torque_alpha:.3g}  "
             f"substeps={substeps} nr={nr_iters} pcg={pcg_iters}"
         )
@@ -592,12 +548,7 @@ class Example:
         self._target_wheel_speed = self.wheel_speed
 
         # ── Visualization buffers (bead rings, spokes, contact spikes) ───────
-        N_r = n_bead_per_ring
-        n_rings = 2 * sec_divs[0]
-        seg_s_1 = np.array([i + k * N_r for k in range(n_rings) for i in range(N_r)], dtype=np.int32)
-        seg_e_1 = np.array([(i + 1) % N_r + k * N_r for k in range(n_rings) for i in range(N_r)], dtype=np.int32)
-        seg_s_all = np.concatenate([seg_s_1 + e * n_bead for e in range(_N_TIRES)])
-        seg_e_all = np.concatenate([seg_e_1 + e * n_bead for e in range(_N_TIRES)])
+        seg_s_all, seg_e_all = ring_segments(n_bead_per_ring, n_bead_rows, n_bead, _N_TIRES)
         n_segs = len(seg_s_all)
         self._bead_pos_zu = wp.zeros(_N_TIRES * n_bead, dtype=wp.vec3, device=device)
         self._spoke_start_zu = wp.zeros(_N_TIRES * n_bead, dtype=wp.vec3, device=device)
@@ -657,7 +608,19 @@ class Example:
 
         if viewer is not None:
             viewer.set_model(self.model)
-            viewer.set_camera(pos=wp.vec3(-12.0, -18.0, 9.0), pitch=-22.0, yaw=48.0)
+            viewer.set_camera(
+                pos=wp.vec3(*self.spec.camera_pos), pitch=self.spec.camera_pitch, yaw=self.spec.camera_yaw
+            )
+
+    def _on_car_builder(self, car: newton.ModelBuilder) -> None:
+        """Subclass hook: the vehicle is built, ``self.ancf_solver`` exists and nothing is captured yet.
+
+        Add world shapes (terrain) here and attach anything the ANCF solver must bake into its graph.
+        """
+
+    def _launch_drive(self) -> None:
+        """Write ``self.cmd`` ([0] steer, [1] wheel speed) into the joint targets (graph-safe)."""
+        self.vehicle.launch_drive(self.cmd, self.control.joint_target_q, self.control.joint_target_qd)
 
     # ── Graph capture ─────────────────────────────────────────────────────────
 
@@ -754,19 +717,13 @@ class Example:
         wp.synchronize_device(dev)
         _restore()
 
-        def _one_substep():
-            self.solver.step_kinematics(self.state_0, self.state_rigid, self.control, None, dt)
-            self._prescribe_beads(inv_dt=1.0 / dt, vel_predict_dt=dt)
+        def _ancf_step():
             ancf.step(None, None, None, None, dt)
-            self._prescribe_beads()
-            self._accumulate_wrenches()
-            self.solver.step_dynamics(self.state_rigid)
-            self._copy_rigid_to_state0()
 
         try:
             wp.capture_begin(device=dev)
             for _ in range(self._substeps):
-                _one_substep()
+                self._one_substep(self.solver.step_kinematics, _ancf_step, self.solver.step_dynamics)
             self._substep_graph = wp.capture_end(device=dev)
             print(f"[DW] frame graph captured ({self._substeps} substeps, 1 launch/frame)")
         except Exception as e:
@@ -838,6 +795,20 @@ class Example:
         wp.copy(self.state_0.joint_q, self.state_rigid.joint_q)
         wp.copy(self.state_0.joint_qd, self.state_rigid.joint_qd)
 
+    def _one_substep(self, kin_fn, ancf_step_fn, dyn_fn) -> None:
+        """One explicit coupled substep (kinematics -> beads -> ANCF -> beads -> wrench -> dynamics).
+
+        ``kin_fn`` / ``dyn_fn`` take the ``step_kinematics`` / ``step_dynamics`` arguments; under
+        capture they are the direct solver calls, in the fallback loop the graph launches.
+        """
+        kin_fn(self.state_0, self.state_rigid, self.control, None, self._sim_dt)
+        self._prescribe_beads(inv_dt=1.0 / self._sim_dt, vel_predict_dt=self._sim_dt)
+        ancf_step_fn()
+        self._prescribe_beads()
+        self._accumulate_wrenches()
+        dyn_fn(self.state_rigid)
+        self._copy_rigid_to_state0()
+
     # ── Simulation ─────────────────────────────────────────────────────────────
 
     def simulate(self) -> None:
@@ -860,33 +831,15 @@ class Example:
             wp.capture_launch(self._substep_graph)
             return
 
-        ancf = self.ancf_solver
         for _ in range(self._substeps):
-            self._gs_kinematics_fn(self.state_0, self.state_rigid, self.control, None, self._sim_dt)
-            self._prescribe_beads(inv_dt=1.0 / self._sim_dt, vel_predict_dt=self._sim_dt)
-            ancf.graph_step()
-            self._prescribe_beads()
-            self._accumulate_wrenches()
-            self._gs_dynamics_fn(self.state_rigid)
-            self._copy_rigid_to_state0()
+            self._one_substep(self._gs_kinematics_fn, self.ancf_solver.graph_step, self._gs_dynamics_fn)
 
     def _update_controls(self) -> None:
         """Upload steer/throttle commands for this frame (2 floats over the bus)."""
         self._cmd_host[0] = self.steer_angle
         self._cmd_host[1] = self.wheel_speed
         self.cmd.assign(self._cmd_host)
-        wp.launch(
-            _drive_feda,
-            dim=_N_TIRES,
-            inputs=[
-                self._steer_qd_dof_arr,
-                self.cmd,
-                self._axle_qd_dof_arr,
-                self.control.joint_target_q,
-                self.control.joint_target_qd,
-            ],
-            device="cuda:0",
-        )
+        self._launch_drive()
 
     def _update_viz_buffers(self) -> None:
         dev = "cuda:0"
@@ -916,15 +869,9 @@ class Example:
         )
 
     def step(self) -> None:
-        # CTIS pressure ramp toward the per-tire GUI targets; build stays fixed.
-        if self._pressure > 0.0 and self._pressure_currents != self._pressure_targets:
-            rate = _CTIS_RATE_PSI_S * _PSI * _FRAME_DT  # [Pa per frame]
-            for e in range(_N_TIRES):
-                d = self._pressure_targets[e] - self._pressure_currents[e]
-                if d == 0.0:
-                    continue
-                self._pressure_currents[e] += min(abs(d), rate) * (1.0 if d > 0.0 else -1.0)
-            self.ancf_solver.set_cavity(self._pressure_currents, [self._build_pressure] * _N_TIRES)
+        # CTIS air amounts ramp toward the GUI setpoints; build stays fixed.
+        if self.ctis is not None:
+            self.ctis.step(_FRAME_DT)
 
         # Ramp wheel speed toward the target.
         d = self._target_wheel_speed - self.wheel_speed
@@ -957,6 +904,8 @@ class Example:
         smj = self._spindle_mj_arr.numpy()
         nn = self._n_nodes
         rest_np = self._bead_rest_np
+        if self.ctis is not None:
+            self.ctis.read_live()
 
         print(f"\n[{self._frame:4d}] t={self._t:.2f}s  fps={fps:.1f}")
         if self.ancf_solver.debug_residuals:
@@ -973,7 +922,7 @@ class Example:
             qx, qy, qz, qw = float(qm[1]), float(qm[2]), float(qm[3]), float(qm[0])
             u = np.array([qx, qy, qz])
 
-            def rot(r_mj):
+            def rot(r_mj, qw=qw, u=u):
                 return (
                     r_mj * (qw * qw - u @ u)
                     + 2.0 * (r_mj @ u)[..., None] * u
@@ -989,54 +938,22 @@ class Example:
             crown_drift_mm = float(np.linalg.norm(x_e[self._crown_idx] - np.array([cp[1], cp[2], cp[0]]))) * 1e3
             self._gui_fz[e] = fz
             self._gui_drift[e] = drift_mm
+            p_txt = ""
+            if self.ctis is not None:
+                p_txt = f"  p={self.ctis.live_p[e]:.0f}Pa V/V0={self.ctis.live_v_ratio[e]:.3f}"
             print(
                 f"  {label}: {'NaN!' if any_nan else 'ok  '}"
                 f"  hub=({hub[0]:.3f},{hub[1]:.3f},{hub[2]:.3f})"
-                f"  drift={drift_mm:.2f}mm  crown_drift={crown_drift_mm:.1f}mm  Fz={fz:+.0f}N"
+                f"  drift={drift_mm:.2f}mm  crown_drift={crown_drift_mm:.1f}mm  Fz={fz:+.0f}N{p_txt}"
             )
 
     # ── GUI ────────────────────────────────────────────────────────────────────
 
     def gui(self, ui) -> None:
-        ui.text("FEDA Double-Wishbone + ANCF Tires")
-        ui.separator()
+        self.vehicle.gui_drive(ui, self)  # title + steer/throttle sliders + derived speed readouts
 
-        changed, val = ui.slider_float("steer [rad]", self.steer_angle, -_MAX_STEER, _MAX_STEER)
-        if changed:
-            self.steer_angle = float(val)
-        changed, val = ui.slider_float("throttle [rad/s]", self._target_wheel_speed, -_MAX_SPEED, _MAX_SPEED)
-        if changed:
-            self._target_wheel_speed = float(val)
-
-        ui.separator()
-        ui.text(f"forward speed ~ {self.wheel_speed * _R_OUTER:+.2f} m/s")
-        if abs(self.steer_angle) > 1e-3:
-            ui.text(f"turn radius   ~ {(2.0 * _WB_H) / math.tan(abs(self.steer_angle)):.2f} m")
-        else:
-            ui.text("turn radius   ~ straight")
-
-        if self._pressure > 0.0:
-            ui.separator()
-            ui.text(f"CTIS setpoint [psi]   super jeep {_CTIS_MIN_PSI:g} - {_CTIS_MAX_PSI:g}")
-            changed, val = ui.slider_float("all tires", self._pressure_all / _PSI, _CTIS_MIN_PSI, _CTIS_MAX_PSI)
-            if changed:
-                self._pressure_all = float(val) * _PSI
-                self._pressure_targets = [self._pressure_all] * _N_TIRES
-            for i, (psi, name) in enumerate(_CTIS_PRESETS):
-                if i:
-                    ui.same_line()
-                if ui.button(f"{psi:g} {name}"):
-                    self._pressure_all = psi * _PSI
-                    self._pressure_targets = [self._pressure_all] * _N_TIRES
-            for label, e in _WHEEL_ORDER:
-                cur = self._pressure_targets[e] / _PSI
-                changed, val = ui.slider_float(label, cur, _CTIS_MIN_PSI, _CTIS_MAX_PSI)
-                if changed:
-                    self._pressure_targets[e] = float(val) * _PSI
-            # Shell load is the gauge value (nominal - build); set_cavity holds absolute.
-            for label, e in _WHEEL_ORDER:
-                gauge = self._pressure_currents[e] - self._build_pressure
-                ui.text(f"  {label} {gauge / _PSI:5.2f} psi   ({self._pressure_currents[e]:7.0f} Pa abs)")
+        if self.ctis is not None:
+            self.ctis.gui(ui, _WHEEL_ORDER)
 
         ui.separator()
         ui.text("Live")
@@ -1056,7 +973,14 @@ class Example:
         wp.launch(
             _gather_contact_spikes,
             dim=_N_TIRES * self._n_nodes,
-            inputs=[self.ancf_solver.node_x, 0.0, self._contact_vis_scale, self._contact_line_s, self._contact_line_e],
+            inputs=[
+                self.ancf_solver.node_x,
+                self._n_nodes,
+                0.0,
+                self._contact_vis_scale,
+                self._contact_line_s,
+                self._contact_line_e,
+            ],
             device="cuda:0",
         )
         self.viewer.log_lines("contact_spikes", self._contact_line_s, self._contact_line_e, colors=(0.0, 1.0, 1.0))
@@ -1099,7 +1023,7 @@ class Example:
             max_drift = float(np.max(np.linalg.norm(x_e[self._bead_idx_np] - expected, axis=1)))
             assert max_drift < 1e-3, f"FAIL tire {e}: bead drift {max_drift * 1e3:.2f} mm > 1 mm"
             fz = abs(float(stg_per_wheel[e][4]))
-            fz_exp = _M_RIGID * _GRAVITY
+            fz_exp = self.spec.rigid_corner_mass * _GRAVITY
             rel = abs(fz - fz_exp) / max(fz_exp, 1.0)
             assert rel < 0.50, f"FAIL tire {e}: F_z={fz:.1f} N  expected~{fz_exp:.1f} N  err={rel * 100:.1f}% > 50%"
 
@@ -1111,34 +1035,84 @@ class Example:
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
+        parser.add_argument(
+            "--vehicle-asset",
+            type=str,
+            default=None,
+            help="Vehicle USD (assets/ name or absolute path, baked by newton-tire-tool): articulated "
+            "(e.g. the super jeep) or rigid hull (e.g. the Sherp). Required.",
+        )
+        parser.add_argument(
+            "--tire-asset",
+            type=str,
+            default=None,
+            help="Baked ANCF tire USD (assets/ name or absolute path); default: the vehicle asset's defaultTireAsset.",
+        )
         parser.add_argument("--wheel-speed", type=float, default=0.0, help="Throttle angular speed [rad/s].")
         parser.add_argument(
-            "--steer-angle", type=float, default=0.0, help=f"Steering [rad], range ±{_MAX_STEER:.5f} (±27.5°)."
+            "--steer-angle", type=float, default=0.0, help="Steering [rad] (within the vehicle asset's maxSteer)."
         )
         parser.add_argument("--substeps", type=int, default=_SIM_SUBSTEPS, help="Substeps per frame.")
         parser.add_argument("--nr-iters", type=int, default=_NR_ITERS, help="Newton-Raphson iterations per substep.")
-        parser.add_argument("--pcg-iters", type=int, default=_PCG_ITERS, help="PCG iterations per NR step.")
-        parser.add_argument("--kn", type=float, default=_KN, help="Contact normal stiffness [N/m].")
-        parser.add_argument("--kd", type=float, default=_KD, help="Contact damping [N·s/m].")
+        parser.add_argument(
+            "--pcg-iters",
+            type=int,
+            default=None,
+            help="PCG iterations per NR step (default: the tire asset's recommendation).",
+        )
+        parser.add_argument(
+            "--kn",
+            type=float,
+            default=None,
+            help="Contact normal stiffness [N/m] (default: the tire asset's recommendation).",
+        )
+        parser.add_argument(
+            "--kd",
+            type=float,
+            default=None,
+            help="Contact damping [N·s/m] (default: kn x 42/20000, the baseline ratio).",
+        )
         parser.add_argument("--mu", type=float, default=_MU, help="Friction coefficient.")
+        parser.add_argument(
+            "--ground-z",
+            type=float,
+            default=0.0,
+            help="Height of the analytic ANCF ground plane [m]; far below the tires disables it.",
+        )
+        parser.add_argument(
+            "--world-z-offset",
+            type=float,
+            default=0.0,
+            help="Lift the whole vehicle (chassis, suspension, its ground plane) and the tires by this height [m].",
+        )
         parser.add_argument(
             "--shell-tires",
             type=str,
             default=None,
             help="JSON array of per-tire configs (same format as ancf_rigid_mujoco_tires); "
-            "first entry used for all 4 tires, overrides the flat --e-tire etc. args.",
+            "first entry used for all 4 tires, overrides the flat --e-tire / --nu-tire / --rho-tire / "
+            "--h-shell / --pressure args. Geometry keys (n-circ, sec-divs) are not read — mesh topology "
+            "comes from the baked tire asset (newton-tire-tool).",
         )
-        parser.add_argument("--pressure", type=float, default=_PRESSURE, help="Nominal cavity pressure [Pa].")
+        parser.add_argument(
+            "--pressure", type=float, default=_PRESSURE, help="Nominal cavity pressure [Pa] (without --shell-tires)."
+        )
         parser.add_argument(
             "--build-pressure",
             type=float,
             default=_BUILD_PRESSURE,
             help="Pressure the rest shape was meshed at [Pa]; the shell sees pressure - build_pressure.",
         )
-        parser.add_argument("--e-tire", type=float, default=_E_TIRE, help="Shell Young's modulus [Pa].")
-        parser.add_argument("--nu-tire", type=float, default=_NU_TIRE, help="Poisson ratio.")
-        parser.add_argument("--rho-tire", type=float, default=_RHO_TIRE, help="Density [kg/m^3].")
-        parser.add_argument("--h-shell", type=float, default=_H_SHELL, help="Shell thickness [m].")
+        parser.add_argument(
+            "--e-tire", type=float, default=_E_TIRE, help="Shell Young's modulus [Pa] (without --shell-tires)."
+        )
+        parser.add_argument("--nu-tire", type=float, default=_NU_TIRE, help="Poisson ratio (without --shell-tires).")
+        parser.add_argument(
+            "--rho-tire", type=float, default=_RHO_TIRE, help="Density [kg/m^3] (without --shell-tires)."
+        )
+        parser.add_argument(
+            "--h-shell", type=float, default=_H_SHELL, help="Shell thickness [m] (without --shell-tires)."
+        )
         parser.add_argument(
             "--thickness-gp", type=int, default=3, choices=[3, 5], help="Through-thickness Gauss points."
         )

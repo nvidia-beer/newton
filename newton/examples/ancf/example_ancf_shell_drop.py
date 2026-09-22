@@ -3,37 +3,67 @@
 ###########################################################################
 # Example ANCF Shell Drop
 #
-# A Polaris ANCF3423 shell tire (40×12 elements, orthotropic 3-section
-# material, 71-point Polaris cross-section profile) is dropped from 1 m
-# onto a rigid ground plane and bounces elastically.
+# ANCF3423 shell tire(s) loaded from a baked USD asset (--tire-asset; e.g. the
+# Polaris 3-section orthotropic profile or the lugged Sherp carcass) dropped
+# from 1 m onto a rigid ground plane. Sealed-gas cavity per tire with a CTIS
+# slider; --n-envs batches independent tires in one solver instance.
 #
 # Solver: SolverANCFShell — implicit HHT-alpha (α=-0.2, β=0.36, γ=0.7)
 #   - 5-point through-thickness Gauss quadrature
 #   - ANS transverse-shear + ANS ε_zz correction
 #   - EAS (5 modes per element) locking remedy
-#   - Penalty ground contact: kn=2e6 N/m, kd=13 N·s/m, μ=0.9
-#   - Full BSR sparse K_eff with in-place scatter_map update
+#   - Penalty ground contact: defaults kn=2e3 N/m, kd=2.0 N·s/m, μ=0.9
+#     (--kn / --kd; kn scales as kn_chrono x (dt_chrono/dt)^2)
+#   - Node-block CSR K_eff updated in place (graph-capture safe)
 #   - Diagonal-preconditioned PCG (custom SpMV, graph-capture safe)
 #
-# Materials: Polaris 3-section orthotropic (bead / sidewall / tread)
-#   The reference (uninflated) geometry IS the inflated shape — elastic
-#   forces restore the tire to its Polaris profile.
+# Materials: the asset's baked per-section material ("E": null) or an isotropic
+#   override per tire. The reference (uninflated) geometry IS the inflated
+#   shape — elastic forces restore the tire to its baked profile.
 #
-# Command: uv run -m newton.examples ancf.example_ancf_shell_drop
+# Command: python -m newton.examples ancf_shell_drop
 ###########################################################################
 
 import json
+import os
 
 import numpy as np
 import warp as wp
 
 import newton
 import newton.examples
-from newton._src.solvers.ancf_shell import (
-    SolverANCFShell,
-    build_ancf_tire_mesh,
-    isotropic_ancf_material,
-)
+from newton.examples.ancf._ancf_viz import material_row, quad_triangles
+from newton.solvers import SolverANCFShell, isotropic_ancf_material, load_ancf_tire_usd
+
+# Baked by third_party/newton-tire-tool/scripts/bake_tire.py — the tire mesh
+# (node grid, quad connectivity, section thickness/material layout) is
+# authored offline; this example only loads it.
+
+
+@wp.kernel
+def _gather_contact_spikes(
+    node_x: wp.array[wp.vec3],  # ANCF Y-up, all envs flat
+    ground_y: float,
+    vis_scale: float,
+    line_starts: wp.array[wp.vec3],
+    line_ends: wp.array[wp.vec3],
+):
+    """GPU-only contact visualization: a spike of height pen*vis_scale per penetrating node.
+
+    The model here is built Y-up (``up_axis=newton.Axis.Y``), so unlike the
+    Z-up viewers used by ``example_ancf_rigid_mujoco_tires`` /
+    ``example_vehicle_ancf_tires``, no axis conversion is needed.
+    """
+    i = wp.tid()
+    p = node_x[i]
+    pen = ground_y - p[1]
+    base = wp.vec3(p[0], ground_y, p[2])
+    if pen > 0.0:
+        line_starts[i] = base
+        line_ends[i] = wp.vec3(base[0], base[1] + pen * vis_scale, base[2])
+    else:
+        line_starts[i] = base
+        line_ends[i] = base
 
 
 class Example:
@@ -48,52 +78,68 @@ class Example:
         self.sim_time = 0.0
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
-        self.sim_substeps = int(getattr(args, "substeps", 5))
+        self.sim_substeps = int(args.substeps)
         self.sim_dt = self.frame_dt / self.sim_substeps
+        self._diag_period = int(args.diag_period)
 
         device = "cuda:0"
 
         # ----------------------------------------------------------------
-        # Parse per-tire config from "tires" JSON array (if provided).
-        # Falls back to a single default Polaris tire when absent.
+        # Parse per-tire config from the --shell-tires JSON array (if provided).
+        # Falls back to a single tire with the asset's material when absent.
         # ----------------------------------------------------------------
-        tires_raw = getattr(args, "shell_tires", None)
+        tires_raw = args.shell_tires
         if isinstance(tires_raw, str):
             tires_raw = json.loads(tires_raw)
         if tires_raw:
             tire_cfgs = [t for t in tires_raw if t.get("active", True)]
         else:
-            # Default: one Polaris tire at the origin
-            tire_cfgs = [{"name": "polaris_ref", "position": [0.0, 0.0, 0.0]}]
+            # Default: one tire at the origin with the asset's baked material
+            tire_cfgs = [{"name": "reference", "position": [0.0, 0.0, 0.0]}]
+
+        # --n-envs above the number of configured tires replicates them (cycling the
+        # materials) 1 m apart along X — the batched-solver workload for profiling.
+        n_envs_arg = int(args.n_envs or 1)
+        if n_envs_arg > len(tire_cfgs):
+            base_cfgs = tire_cfgs
+            tire_cfgs = []
+            for i in range(n_envs_arg):
+                c = dict(base_cfgs[i % len(base_cfgs)])
+                c["position"] = [float(i), 0.0, 0.0]
+                c["name"] = f"{c.get('name', 'tire')}_{i}"
+                tire_cfgs.append(c)
 
         n_envs = len(tire_cfgs)
 
         # ----------------------------------------------------------------
-        # Build shared tire geometry (topology + reference positions).
-        # All tires share the same Polaris profile; materials differ.
+        # Load shared tire geometry (topology + reference positions) from the
+        # baked USD asset. All tires in a run share this same mesh; materials
+        # differ (below). The mesh is fixed at bake time — see
+        # third_party/newton-tire-tool/scripts/bake_tire.py (Polaris/parabolic
+        # profiles) or bake_sherp_ancf_tire.py (profile extracted from a real
+        # tire STL). --tire-asset selects a filename under assets/, or an
+        # absolute path.
         # ----------------------------------------------------------------
-        R_outer = 0.329
-        n_circ = int(tire_cfgs[0].get("n-circ", getattr(args, "n_circ", 20)))
-
-        self.ancf_model = build_ancf_tire_mesh(
-            R_outer=R_outer,
-            R_inner=0.13,
-            width=0.23,
-            n_circ=n_circ,
-            section_divs=(1, 2, 3),
-            pressure=float(tire_cfgs[0].get("pressure", 110e3)),
-            device=device,
+        tire_asset_arg = args.tire_asset
+        if not tire_asset_arg:
+            raise ValueError("--tire-asset is required (an ANCF tire USD baked by newton-tire-tool)")
+        tire_asset_path = (
+            tire_asset_arg
+            if os.path.isabs(tire_asset_arg)
+            else os.path.join(os.path.dirname(__file__), "assets", tire_asset_arg)
         )
+        self.ancf_model, tire_meta = load_ancf_tire_usd(tire_asset_path, device=device)
+        R_outer = tire_meta.R_outer
 
         ne = self.ancf_model.n_elems
         n_nodes = self.ancf_model.n_nodes
 
         # ----------------------------------------------------------------
         # Build per-tire elem_mat arrays, concatenate → [N*n_elems, 11].
-        # "E": null  →  use Polaris 3-section orthotropic preset.
+        # "E": null  →  the asset's baked per-section material.
         # "E": float →  use isotropic_ancf_material(E, nu, rho).
         # ----------------------------------------------------------------
-        base_mat_np = self.ancf_model.elem_mat.numpy()  # (n_elems, 11) Polaris default
+        base_mat_np = self.ancf_model.elem_mat.numpy()  # (n_elems, 11) the asset's material
 
         per_env_mats = []
         for cfg in tire_cfgs:
@@ -107,25 +153,9 @@ class Example:
                     nu=float(nu) if nu is not None else 0.3,
                     rho=float(rho) if rho is not None else 1100.0,
                 )
-                row = np.array(
-                    [
-                        mat.C11,
-                        mat.C22,
-                        mat.C33,
-                        mat.C12,
-                        mat.C13,
-                        mat.C23,
-                        mat.G23,
-                        mat.G13,
-                        mat.G12,
-                        mat.rho,
-                        mat.alpha_damp,
-                    ],
-                    dtype=np.float32,
-                )
-                per_env_mats.append(np.tile(row, (ne, 1)))
+                per_env_mats.append(np.tile(material_row(mat), (ne, 1)))
             else:
-                # Polaris orthotropic preset (copy base, optionally scale rho)
+                # Baked material (copy base, optionally override rho)
                 env_mat = base_mat_np.copy()
                 if rho is not None:
                     env_mat[:, 9] = float(rho)
@@ -162,11 +192,7 @@ class Example:
         )
 
         # Two triangles per quad element; tile node indices per tire.
-        en = self.ancf_model.elem_nodes.numpy()  # (n_elems, 4)
-        tris_one = np.empty((len(en) * 2, 3), dtype=np.int32)
-        tris_one[0::2] = en[:, [0, 1, 2]]
-        tris_one[1::2] = en[:, [0, 2, 3]]
-        tris_all = np.concatenate([tris_one + i * n_nodes for i in range(n_envs)], axis=0)
+        tris_all = quad_triangles(self.ancf_model.elem_nodes.numpy(), n_nodes, n_envs)
         builder.add_triangles(
             i=tris_all[:, 0].tolist(),
             j=tris_all[:, 1].tolist(),
@@ -177,24 +203,26 @@ class Example:
         # ----------------------------------------------------------------
         # Solver
         # ----------------------------------------------------------------
-        kn = float(getattr(args, "kn", 2e3))
-        kd = float(getattr(args, "kd", 2.0))
         self.solver = SolverANCFShell(
             model=self.model,
             ancf_model=self.ancf_model,
             ground_z=0.0,
-            kn=kn,
-            kd=kd,
+            kn=float(args.kn),
+            kd=float(args.kd),
             mu=0.9,
             v_reg=1.0e-3,
-            nr_max_iter=int(getattr(args, "nr_iters", 3)),
-            pcg_max_iter=int(getattr(args, "pcg_iters", 50)),
+            nr_max_iter=int(args.nr_iters),
+            pcg_max_iter=int(args.pcg_iters or tire_meta.pcg_iters or 50),
             n_envs=n_envs,
         )
         # Seed the solver node positions with the dropped/offset world layout.
         self.solver.node_x.assign(world_x)
 
         for i, cfg in enumerate(tire_cfgs):
+            if n_envs > 8 and 4 <= i < n_envs - 2:
+                if i == 4:
+                    print(f"[ANCF] ... {n_envs - 6} more tires ...")
+                continue
             e = world_x[i * n_nodes : (i + 1) * n_nodes]
             print(
                 f"[ANCF] env={i} ({cfg.get('name', '')})  "
@@ -208,9 +236,14 @@ class Example:
         self._n_nodes = n_nodes
         self._n_envs = n_envs
 
+        # ── Contact visualization (spike per penetrating node) ─────────────────
+        self._contact_line_s = wp.zeros(n_envs * n_nodes, dtype=wp.vec3, device=device)
+        self._contact_line_e = wp.zeros(n_envs * n_nodes, dtype=wp.vec3, device=device)
+        self._contact_vis_scale = 100.0  # tune per kn
+
         # ── Combined substep frame graph ──────────────────────────────────────
         # Captures all sim_substeps iterations into ONE CUDA graph launch per frame,
-        # eliminating Python loop overhead (same pattern as ancf_rigid_mujoco_tires).
+        # eliminating Python loop overhead (same pattern as the vehicle examples).
         # Uses solver.step() (unrolled NR+PCG) — graph_step() cannot be nested.
         self._substep_graph = None
         _dev = "cuda:0"
@@ -303,7 +336,8 @@ class Example:
         wp.copy(self.state_0.particle_q, self.solver.node_x)
         self.sim_time += self.frame_dt
 
-        if self._frame % 5 == 0:
+        # Host readback of env-0 only every --diag-period frames.
+        if self._frame % self._diag_period == 0:
             x_np = self.solver.node_x.numpy()
             xd_np = self.solver.node_xd.numpy()
             # Track env-0 (first tire) only
@@ -350,6 +384,13 @@ class Example:
         self.viewer.begin_frame(self.sim_time)
         # All tires render through the standard model pipeline (particles + tris).
         self.viewer.log_state(self.state_0)
+        wp.launch(
+            _gather_contact_spikes,
+            dim=self._n_envs * self._n_nodes,
+            inputs=[self.solver.node_x, 0.0, self._contact_vis_scale, self._contact_line_s, self._contact_line_e],
+            device="cuda:0",
+        )
+        self.viewer.log_lines("contact_spikes", self._contact_line_s, self._contact_line_e, colors=(0.0, 1.0, 1.0))
         self.viewer.end_frame()
 
     def test_final(self):
@@ -363,10 +404,14 @@ class Example:
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
     parser.add_argument(
-        "--n-circ",
-        type=int,
-        default=20,
-        help="Elements around circumference (20=fast/stable, 40=full Polaris reference).",
+        "--tire-asset",
+        type=str,
+        default=None,
+        help=(
+            "Baked ANCF tire USD to load — filename under examples/ancf/assets/ or an absolute "
+            "path. Required; run-examples.sh prompts for it. See "
+            "third_party/newton-tire-tool/scripts/bake_tire.py / bake_sherp_ancf_tire.py."
+        ),
     )
     parser.add_argument(
         "--n-envs",
@@ -387,7 +432,18 @@ if __name__ == "__main__":
         "--kd", type=float, default=2.0, help="Normal contact damping [N·s/m]. Critical damping: 2√(kn·M_node)≈3.8."
     )
     parser.add_argument("--nr-iters", type=int, default=3, help="Newton-Raphson iterations per substep.")
-    parser.add_argument("--pcg-iters", type=int, default=50, help="PCG iterations per NR step.")
+    parser.add_argument(
+        "--diag-period",
+        type=int,
+        default=60,
+        help="Print env-0 height / velocity diagnostics every N frames (host readback).",
+    )
+    parser.add_argument(
+        "--pcg-iters",
+        type=int,
+        default=None,
+        help="PCG iterations per NR step (default: the tire asset's recommendation).",
+    )
     parser.add_argument(
         "--shell-tires",
         type=str,
