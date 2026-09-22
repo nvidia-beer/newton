@@ -1,0 +1,100 @@
+{
+ "format": "newton_terrain_tool.field/2",
+ "kind": "field",
+ "name": "field_01_boulders",
+ "files": {
+  "height_png": "field_01_boulders_height.png",
+  "preview_png": "field_01_boulders_preview.png"
+ },
+ "grid": {
+  "convention": "Z-up, centred on the arena; field[r, c] at x = -hx + c*cell, y = -hy + r*cell; PNG row 0 = y = -hy",
+  "ncol": 401,
+  "nrow": 401,
+  "cell": 0.25,
+  "size": [
+   100.0,
+   100.0
+  ],
+  "hx": 50.0,
+  "hy": 50.0,
+  "max_h": 7.385850429534912,
+  "z_shift": 0.0
+ },
+ "stage": {
+  "rule": "heights(w) = w * height_png * max_h  (I_0 flat, I_N = the PNG)",
+  "difficulty": 1.0,
+  "stages": [
+   0.2,
+   0.4,
+   0.6,
+   0.8,
+   1.0
+  ],
+  "reference": "arXiv:2409.02383 eq. (1)"
+ },
+ "arena": {
+  "half_x": 40.0,
+  "half_y": 40.0,
+  "note": "start / goal sampling rectangle and out-of-bounds test; rocks continue to the grid edge"
+ },
+ "task": {
+  "note": "start and goal are sampled inside the arena at reset; out of the arena = out of bounds",
+  "rollover_angle_deg": 30.0,
+  "time_limit_s": 20.0,
+  "reference": "arXiv:2409.02383 Table II (alpha = 30 deg, T = 15-20 s)"
+ },
+ "vehicle": {
+  "name": "superjeep double wishbone + ANCF tires (example 04)",
+  "wheelbase": 2.756,
+  "track": 1.633,
+  "tire_diameter": 0.998,
+  "belly_clearance": 0.459,
+  "com_height": 0.82,
+  "min_turn_radius": 5.3
+ },
+ "field_config": {
+  "cell": 0.25,
+  "arena_half_x": 40.0,
+  "arena_half_y": 40.0,
+  "margin": 10.0,
+  "max_res": 2048,
+  "topo_amplitude": 4.0,
+  "topo_wavelength": 60.0,
+  "topo_octaves": 3,
+  "base_amplitude": 0.3,
+  "base_wavelength": 15.0,
+  "base_octaves": 3,
+  "rock_radius": [
+   0.3,
+   0.7
+  ],
+  "rock_height_ratio": [
+   0.6,
+   1.2
+  ],
+  "rock_density": 3.5,
+  "rock_stacking": 1.0,
+  "grain_amplitude": 0.03,
+  "difficulty": 1.0,
+  "stages": [
+   0.2,
+   0.4,
+   0.6,
+   0.8,
+   1.0
+  ],
+  "seed": 0
+ },
+ "stats": {
+  "n_rocks": 35000,
+  "arena_cells": 101761,
+  "field_max": 7.38585045184267,
+  "topo_range": 6.196059051156044,
+  "topo_slope_p50": 0.08206566704798446,
+  "topo_slope_max": 0.18985812637772878,
+  "pile_median_arena": 0.46934898355188315,
+  "pile_p95_arena": 0.8021547788964734,
+  "pile_max": 1.3908910493479816,
+  "rock_coverage": 0.9482807755426932
+ }
+}
