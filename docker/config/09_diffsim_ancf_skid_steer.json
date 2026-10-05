@@ -10,13 +10,6 @@
     "telemetry-config": null,
     "report": null
   },
-  "arg_help": {
-    "target-speed": "Requested forward speed [m/s], 0.2–0.9; changing it replays before/after using the fitted response.",
-    "target-yaw-deg": "Requested yaw rate [degrees/s], -3 to 3; positive turns left.",
-    "train": "Collect straight and gentle/strong left/right maneuvers, fit with Warp gradients, then test the learned commands. False runs only the initial comparison until Learn again is pressed.",
-    "telemetry-config": "Source vehicle_telemetry JSON; null uses 07_vehicle_telemetry.json. Physical vehicle/tire settings are reused on flat ground.",
-    "report": "Optional new .json report and sibling observation .csv. These synthetic response fits do not overwrite or recalibrate the source 07 preset."
-  },
   "env": {
     "OPENBLAS_NUM_THREADS": "1"
   }

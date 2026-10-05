@@ -80,6 +80,7 @@ import warp as wp
 import newton.examples
 from newton.examples import _positive_float
 from newton.examples.ancf import _vehicle_config as vehicle_config
+from newton.examples.ancf._vehicle_simulation import resolve_tire_setup
 from newton.examples.ancf._vehicle_usd import VehicleUSD, asset_path
 from newton.examples.ancf.diffsim._ancf_common import PA_PER_PSI
 from newton.examples.ancf.diffsim._tire_calibration import fit_stiffness, read_measurements
@@ -100,47 +101,30 @@ def _telemetry_setup(path: Path):
     if vehicle.kind != "rigid_hull" or vehicle.steering != "skid":
         raise ValueError("Tire preparation currently supports rigid-hull skid-steered vehicles")
     options["tire_asset"] = options["tire_asset"] or vehicle.default_tire_asset
+    mesh, meta = load_ancf_tire_usd(asset_path(options["tire_asset"]), device="cpu")
+    setup = resolve_tire_setup(options, meta, mesh.elem_h.numpy(), vehicle)
     shells = options["shell_tires"]
     if isinstance(shells, str):
         shells = json.loads(shells)
+    # VehicleSimulation uses shared material for all four tires; the first entry's other
+    # keys (rig-only, e.g. "position") pass through to the rig.
     material = {
-        "E": options["e_tire"],
-        "nu": options["nu_tire"],
-        "rho": options["rho_tire"],
-        "alpha-damp": vehicle_config.ALPHA_D,
-        "thickness": options["h_shell"],
-        "pressure": options["pressure"],
+        **(shells[0] if shells else {}),
+        "E": setup.e_tire,
+        "nu": setup.nu_tire,
+        "rho": setup.rho_tire,
+        "alpha-damp": setup.alpha_d,
+        "thickness": setup.thickness,
+        "pressure": setup.pressure,
     }
-    if shells:
-        # VehicleSimulation uses shared material for all four tires.
-        material = {
-            "E": vehicle_config.E_TIRE,
-            "nu": vehicle_config.NU_TIRE,
-            "rho": vehicle_config.RHO_TIRE,
-            "alpha-damp": vehicle_config.ALPHA_D,
-            "thickness": vehicle_config.H_SHELL,
-            "pressure": vehicle_config.PRESSURE,
-            **shells[0],
-        }
-    mesh, meta = load_ancf_tire_usd(asset_path(options["tire_asset"]), device="cpu")
-    thickness = mesh.elem_h.numpy()
-    if material["thickness"] is not None:
-        thickness.fill(float(material["thickness"]))
-    elif meta.shell_thickness is not None:
-        thickness.fill(float(meta.shell_thickness))
-    envelope = vehicle.ctis_envelope(float(material["E"]), thickness, meta)
-    bounds = (max(envelope[2] * envelope[1], 1.0), envelope[3] * envelope[1])
-    requested_pressure = float(material["pressure"])
-    material["pressure"] = min(max(requested_pressure, bounds[0]), bounds[1])
-    if material["pressure"] != requested_pressure:
+    # The optimizer needs a strictly positive lower pressure bound.
+    bounds = (max(setup.envelope[2] * setup.envelope[1], 1.0), setup.envelope[3] * setup.envelope[1])
+    material["pressure"] = min(max(material["pressure"], bounds[0]), bounds[1])
+    if material["pressure"] != setup.requested_pressure:
         print(
-            f"[telemetry preset] Nominal pressure {requested_pressure:g} Pa -> {material['pressure']:g} Pa (vehicle limits)."
+            f"[telemetry preset] Nominal pressure {setup.requested_pressure:g} Pa -> {material['pressure']:g} Pa (vehicle limits)."
         )
-    options["kn"] = options["kn"] if options["kn"] is not None else meta.contact_kn or vehicle_config.KN
-    if options["kd"] is None:
-        options["kd"] = (
-            meta.contact_kd if meta.contact_kd is not None else options["kn"] * vehicle_config.KD / vehicle_config.KN
-        )
+    options["kn"], options["kd"] = setup.kn, setup.kd
     radius = float((mesh.node_x0.numpy()[:, 1:] ** 2).sum(axis=1).max() ** 0.5)
     # The rig performs the same load screen and accounts for shell weight too.
     options["reference_patch_support"] = options["kn"] * float(
@@ -872,7 +856,8 @@ class Example:
         parser.add_argument(
             "--calibration-csv",
             type=Path,
-            help="Static load/pressure/axle-height cases; fits a shared stiffness scale.",
+            help="Static measurements (nominal pressure, additional load, axle height, uncertainty, "
+            "train/validation split); fits a shared stiffness scale.",
         )
         parser.add_argument(
             "--data-source",

@@ -26,7 +26,6 @@ from .kernels_coupled import (
     project,
     rigid_mass,
 )
-from .kernels_gather import make_cavity_reduction
 
 
 @wp.kernel(enable_backward=False)
@@ -60,7 +59,7 @@ def check(
         r = raw[lane] - guess[lane]
         history[lane] = r
         norm = wp.float64(r * r)
-        scaled = wp.abs(r) / (atol + rtol * wp.max(wp.abs(guess[lane]), wp.abs(raw[lane])))
+        scaled = cp._scaled_error(r, guess[lane], raw[lane], atol, rtol)
         corr = wp.float64(0.0)
         for k in range(guess.shape[0]):
             corr += inverse[lane, k] * wp.float64(raw[k] - guess[k])
@@ -238,8 +237,7 @@ class CoupledShellNewton:
         if not np.isfinite(mass).all() or np.linalg.eigvalsh(mass).min() <= 1e-09 or self.model.joint_dof_count > 32:
             self.supported = False
             return
-        self.shell._cavity_reduction = make_cavity_reduction(self.shell.ancf.n_nodes, self.shell.ancf.n_elems, 128)
-        self.shell._stiffness_block_dim = 64
+        self.shell.set_coupled_launch_config()
         self.response = sh.ShellSchurResponse(
             self.shell.blk_offsets.numpy(),
             self.shell.blk_columns.numpy(),
@@ -328,7 +326,7 @@ class CoupledShellNewton:
                 self.shell.lumped_mass_tiled,
                 self.rigid_response.mass,
                 self.model.joint_armature,
-                fem._HHT_GAMMA * dt,
+                fem.HHT_GAMMA * dt,
                 dest,
                 self.aa_weights,
             ],
@@ -352,101 +350,47 @@ class CoupledShellNewton:
             ],
             device=self.device,
         )
-        cv = fem._HHT_GAMMA / (fem._HHT_BETA * dt)
-        self.shell._update_K_eff_inplace_batched((1 + fem._HHT_ALPHA) * (1 + self.shell._alpha_damp * cv))
-        wp.launch(
-            fem._pointwise_scale,
-            dim=self.rigid_response._contact.size,
-            inputs=[
-                self.shell.K_contact_diag,
-                1 + fem._HHT_ALPHA,
-                self.rigid_response._contact,
-            ],
-            device=self.device,
-        )
-        wp.launch(
-            sh.add_diag_to_blk_values_batched,
-            dim=self.rigid_response._contact.size,
-            inputs=[
-                self.rigid_response._contact,
-                self.shell.blk_offsets,
-                self.shell.blk_columns,
-                self.shell.bsr_values_batched,
-                self.response.n,
-                self.shell._nnz,
-            ],
-            device=self.device,
-        )
+        cv, boundary_scale = self.rigid_response.build_tangent(dt)
 
         def basis():
             self.response.update_geometry(self.shell.node_x, self.shell.node_D, self.shell._dirichlet_dof_mask)
-            wp.launch(
-                sh._prepare_systems,
-                dim=self.response.values.size,
-                inputs=[
-                    self.response.offsets,
-                    self.response.columns,
-                    self.shell.bsr_values_batched,
-                    self.shell._dirichlet_dof_mask,
-                    self.response.n,
-                    self.response.nnz,
-                    7,
-                    self.response.values,
-                ],
-                device=self.device,
-            )
-            wp.launch(
-                sh._prepare_rhs,
-                dim=self.response.rhs.size,
-                inputs=[
-                    self.response.offsets,
-                    self.response.columns,
-                    self.shell.bsr_values_batched,
-                    self.shell._dirichlet_dof_mask,
-                    self.boundary,
-                    self.response.n,
-                    self.response.nnz,
-                    7,
-                    (dt + self.shell._alpha_damp) / (1 + self.shell._alpha_damp * cv),
-                    self.response.rhs,
-                ],
-                device=self.device,
-            )
-            wp.launch(
-                force_rhs,
-                dim=(self.shell.n_envs, self.response.n),
-                inputs=[
-                    self.response.rhs,
-                    self.shell.residual,
-                    self.shell._dirichlet_dof_mask,
-                    self.response.n,
-                ],
-                device=self.device,
-            )
-            self.response.pcg.solve(
-                self.response.offsets,
-                self.response.columns,
-                self.response.values,
-                self.response.rhs,
-                self.response.displacement,
-                compute_residual_report=False,
+
+            def add_force():
+                wp.launch(
+                    force_rhs,
+                    dim=(self.shell.n_envs, self.response.n),
+                    inputs=[
+                        self.response.rhs,
+                        self.shell.residual,
+                        self.shell._dirichlet_dof_mask,
+                        self.response.n,
+                    ],
+                    device=self.device,
+                )
+
+            self.response.solve_displacement(
+                self.shell.bsr_values_batched,
+                self.shell._dirichlet_dof_mask,
+                self.boundary,
+                boundary_scale,
+                extra_rhs=add_force,
             )
 
         def free():
             wp.launch(
-                fem._apply_dirichlet_to_bsr,
+                fem.apply_dirichlet_to_bsr,
                 dim=self.shell.bsr_values_batched.size,
                 inputs=[self.shell._dirichlet_nnz_mask, self.shell.bsr_values_batched],
                 device=self.device,
             )
             wp.launch(
-                fem._mask_dof,
+                fem.mask_dof,
                 dim=self.shell.residual.size,
                 inputs=[self.shell._dirichlet_dof_mask, self.shell.residual],
                 device=self.device,
             )
             wp.launch(
-                fem._negate,
+                fem.negate,
                 dim=self.shell.residual.size,
                 inputs=[self.shell.residual, self.shell.neg_R],
                 device=self.device,
@@ -501,7 +445,7 @@ class CoupledShellNewton:
                 *self.views,
                 7,
                 (self.response.n + 127) // 128,
-                dt * fem._HHT_GAMMA * (1 + fem._HHT_ALPHA),
+                dt * fem.HHT_GAMMA * (1 + fem.HHT_ALPHA),
                 self.do_basis,
                 self.projected_flat,
             ],
@@ -595,42 +539,42 @@ class CoupledShellNewton:
 
         def evaluate():
             wp.launch(
-                fem._hht_kinematic,
+                fem.hht_kinematic,
                 dim=self.shell.node_x.size,
                 inputs=[
                     self.shell.x_pred,
                     self.shell.xd_pred,
                     self.shell.node_xdd,
                     dt,
-                    fem._HHT_BETA,
-                    fem._HHT_GAMMA,
+                    fem.HHT_BETA,
+                    fem.HHT_GAMMA,
                 ],
                 outputs=[self.shell.node_x, self.shell.node_xd],
                 device=self.device,
             )
             wp.launch(
-                fem._hht_kinematic,
+                fem.hht_kinematic,
                 dim=self.shell.node_D.size,
                 inputs=[
                     self.shell.D_pred,
                     self.shell.Dd_pred,
                     self.shell.node_Ddd,
                     dt,
-                    fem._HHT_BETA,
-                    fem._HHT_GAMMA,
+                    fem.HHT_BETA,
+                    fem.HHT_GAMMA,
                 ],
                 outputs=[self.shell.node_D, self.shell.node_Dd],
                 device=self.device,
             )
             self.shell._evaluate_forces_batched(dt, assemble_tangent=False)
             wp.launch(
-                fem._flatten_vec3_pair,
+                fem.flatten_vec3_pair,
                 dim=self.shell.node_x.size,
                 inputs=[self.shell.node_xdd, self.shell.node_Ddd, self.shell.a_flat],
                 device=self.device,
             )
             wp.launch(
-                fem._pointwise_mul,
+                fem.pointwise_mul,
                 dim=self.shell.a_flat.size,
                 inputs=[
                     self.shell.lumped_mass_tiled,
@@ -640,7 +584,7 @@ class CoupledShellNewton:
                 device=self.device,
             )
             wp.launch(
-                fem._build_residual,
+                fem.build_residual,
                 dim=self.shell.a_flat.size,
                 inputs=[
                     self.shell.M_a,
@@ -648,7 +592,7 @@ class CoupledShellNewton:
                     self.shell.global_f_int0,
                     self.shell.global_f_ext,
                     self.shell.global_f_ext0,
-                    fem._HHT_ALPHA,
+                    fem.HHT_ALPHA,
                     self.shell.residual,
                 ],
                 device=self.device,
@@ -703,29 +647,29 @@ class CoupledShellNewton:
         wp.copy(self.shell.global_f_int0, self.shell.global_f_int)
         wp.copy(self.shell.global_f_ext0, self.shell.global_f_ext)
         wp.launch(
-            fem._hht_predict,
+            fem.hht_predict,
             dim=self.shell.node_x.size,
             inputs=[
                 self.shell.node_x,
                 self.shell.node_xd,
                 self.shell.node_xdd,
                 dt,
-                fem._HHT_BETA,
-                fem._HHT_GAMMA,
+                fem.HHT_BETA,
+                fem.HHT_GAMMA,
             ],
             outputs=[self.shell.x_pred, self.shell.xd_pred],
             device=self.device,
         )
         wp.launch(
-            fem._hht_predict,
+            fem.hht_predict,
             dim=self.shell.node_D.size,
             inputs=[
                 self.shell.node_D,
                 self.shell.node_Dd,
                 self.shell.node_Ddd,
                 dt,
-                fem._HHT_BETA,
-                fem._HHT_GAMMA,
+                fem.HHT_BETA,
+                fem.HHT_GAMMA,
             ],
             outputs=[self.shell.D_pred, self.shell.Dd_pred],
             device=self.device,
@@ -809,7 +753,7 @@ class CoupledShellNewton:
                         self.shell.node_xdd,
                         self.shell.node_Ddd,
                         self.shell.ancf.n_nodes,
-                        1 / (fem._HHT_BETA * dt * dt),
+                        1 / (fem.HHT_BETA * dt * dt),
                     ],
                     device=self.device,
                 )
@@ -852,7 +796,7 @@ class CoupledShellNewton:
                         self.shell.node_Ddd,
                         self.coupler._iterate_velocity,
                         self.shell._dirichlet_dof_mask,
-                        fem._HHT_GAMMA * dt,
+                        fem.HHT_GAMMA * dt,
                     ],
                     device=self.device,
                 )

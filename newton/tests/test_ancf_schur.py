@@ -12,7 +12,6 @@ from newton._src.solvers.ancf_shell.schur import (
     ShellSchurResponse,
     _project_rigid_impedance,
     _rigid_motion_map,
-    make_interface_inverse,
 )
 
 
@@ -131,63 +130,6 @@ class TestANCFSchur(unittest.TestCase):
                     condensed = output.numpy()[tire]
                     np.testing.assert_allclose(condensed, j.T @ local[tire] @ j, atol=1e-12)
                     self.assertAlmostEqual(speed @ condensed @ speed, twist @ local[tire] @ twist, places=10)
-
-    def test_rotor_acceleration_braking_and_work(self):
-        # With all interface modes rigid, the exact Schur mass is I_hub + I_tire.
-        for device in ("cpu", "cuda:0") if wp.is_cuda_available() else ("cpu",):
-            with self.subTest(device=device):
-                hub, tire, dt = 0.1, 0.7, 1.0 / 600
-                inverse = wp.zeros((1, 1), dtype=wp.float64, device=device)
-                ready = wp.zeros(1, dtype=int, device=device)
-                wp.launch(
-                    make_interface_inverse(1),
-                    dim=1,
-                    inputs=[
-                        wp.array([[[hub]]], dtype=float, device=device),
-                        wp.zeros(1, dtype=float, device=device),
-                        wp.array([[[tire]]], dtype=wp.float64, device=device),
-                        inverse,
-                        ready,
-                    ],
-                    device=device,
-                )
-                h = inverse.numpy()[0, 0]
-                self.assertEqual(ready.numpy()[0], 1)
-                velocity, work, impulse = 0.0, 0.0, 0.0
-                for torque in [4.0] * 120 + [-4.0] * 120:
-                    old = velocity
-                    guess = old + 0.01
-                    response = old + dt * (torque - tire * (guess - old) / dt) / hub
-                    velocity = guess + h * (response - guess)
-                    impulse += torque * dt
-                    work += torque * dt * (old + velocity) / 2
-                    self.assertAlmostEqual((hub + tire) * velocity, impulse, delta=2e-7)
-                    self.assertAlmostEqual(0.5 * (hub + tire) * velocity**2, work, delta=2e-7)
-                self.assertAlmostEqual(velocity, 0.0, delta=2e-7)
-
-    def test_nonsymmetric_reduced_inverse_and_invalid_fallback(self):
-        rng = np.random.default_rng(8)
-        n = 4
-        r = rng.normal(size=(n, n))
-        mass_np = (r.T @ r + np.eye(n)).astype(np.float32)
-        armature_np = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
-        z_np = rng.normal(size=(2, n, n)) * 0.1 + np.eye(n)[None, :, :]
-        for device in ("cpu", "cuda:0") if wp.is_cuda_available() else ("cpu",):
-            with self.subTest(device=device):
-                mass = wp.array(mass_np[None, :, :], device=device)
-                armature = wp.array(armature_np, device=device)
-                z = wp.array(z_np, dtype=wp.float64, device=device)
-                output, ready = wp.zeros((n, n), dtype=wp.float64, device=device), wp.zeros(1, dtype=int, device=device)
-                wp.launch(make_interface_inverse(n), dim=1, inputs=[mass, armature, z, output, ready], device=device)
-                m = mass_np.astype(float) + np.diag(armature_np)
-                expected = np.linalg.solve(m + z_np.sum(axis=0), m)
-                np.testing.assert_allclose(output.numpy(), expected, rtol=1e-12, atol=1e-12)
-                self.assertEqual(ready.numpy()[0], 1)
-                # A rejected matrix must leave the previous usable inverse intact.
-                z.assign(np.full_like(z_np, np.nan))
-                wp.launch(make_interface_inverse(n), dim=1, inputs=[mass, armature, z, output, ready], device=device)
-                self.assertEqual(ready.numpy()[0], 0)
-                np.testing.assert_allclose(output.numpy(), expected, rtol=1e-12, atol=1e-12)
 
 
 if __name__ == "__main__":

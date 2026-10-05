@@ -21,6 +21,8 @@ import json
 import math
 import os
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 
 import numpy as np
 import warp as wp
@@ -39,6 +41,7 @@ from newton.examples.ancf._ancf_viz import (
 )
 from newton.examples.ancf._capture_utils import restore_arrays, snapshot_arrays, try_capture
 from newton.examples.ancf._vehicle_kernels import (
+    _CONTACT_SPIKE_STRIDE,
     advance_substep_pair,
     fill_spindle_positions,
     gather_contact_spikes,
@@ -51,6 +54,105 @@ from newton.solvers import (
     isotropic_ancf_material,
     load_ancf_tire_usd,
 )
+
+
+@dataclass(frozen=True)
+class TireSetup:
+    """Shell material, thickness, solver budget and pressure resolved by :func:`resolve_tire_setup`."""
+
+    e_tire: float  # [Pa]
+    nu_tire: float
+    rho_tire: float  # [kg/m^3]
+    alpha_d: float  # stiffness-proportional damping [s]
+    thickness: float | None  # uniform thickness requested by the options [m]; None = the asset's
+    # Thickness for the lumped-mass estimates [m]: thickness, the asset's shellThickness, or the mesh mean.
+    h_shell: float
+    elem_h: np.ndarray  # per-element thickness the solver runs with [m]
+    pcg_iters: int
+    kn: float  # [N/m]
+    kd: float  # [N·s/m]
+    requested_pressure: float  # nominal cavity pressure before the CTIS clamp [Pa]
+    pressure: float  # nominal cavity pressure inside the CTIS envelope [Pa] (unchanged when <= 0)
+    envelope: tuple  # (unit, Pa/unit, min, max, rate [unit/s], presets, title) from VehicleUSD.ctis_envelope
+
+
+def resolve_tire_setup(options: Mapping, tire_meta, elem_h: np.ndarray, vehicle: VehicleUSD) -> TireSetup:
+    """Apply the tire option precedence shared by :class:`VehicleSimulation` and the diffsim tire-lift setup.
+
+    ``options`` holds parser-style names (``shell_tires``, ``e_tire``, ``nu_tire``, ``rho_tire``,
+    ``h_shell``, ``pressure``, ``pcg_iters``, ``kn``, ``kd``); a missing key falls back to
+    ``_vehicle_config``.  ``--shell-tires`` (JSON text or list, first entry for every tire) overrides
+    the flat material args.  Geometry is fixed at bake time — see
+    third_party/newton-tire-tool/scripts/bake_tire.py — so only material, thickness and pressure
+    are applied to the loaded mesh (``elem_h`` is the host copy of its per-element thickness).
+    """
+    shell_tires = options.get("shell_tires")
+    if shell_tires:
+        if isinstance(shell_tires, str):
+            shell_tires = json.loads(shell_tires)
+        t0 = shell_tires[0]
+        e_tire = float(t0.get("E", vehicle_config.E_TIRE))
+        nu_tire = float(t0.get("nu", vehicle_config.NU_TIRE))
+        rho_tire = float(t0.get("rho", vehicle_config.RHO_TIRE))
+        h_cfg = t0.get("thickness", vehicle_config.H_SHELL)
+        thickness = None if h_cfg is None else float(h_cfg)  # None: the asset's shellThickness, else its bands
+        alpha_d = float(t0.get("alpha-damp", vehicle_config.ALPHA_D))
+        pressure = float(t0.get("pressure", vehicle_config.PRESSURE))
+    else:
+        e_tire = float(options.get("e_tire", vehicle_config.E_TIRE))
+        nu_tire = float(options.get("nu_tire", vehicle_config.NU_TIRE))
+        rho_tire = float(options.get("rho_tire", vehicle_config.RHO_TIRE))
+        thickness = float(options.get("h_shell", vehicle_config.H_SHELL))
+        alpha_d = float(vehicle_config.ALPHA_D)
+        pressure = float(options.get("pressure", vehicle_config.PRESSURE))
+
+    h_shell = thickness
+    if h_shell is None and tire_meta.shell_thickness is not None:
+        h_shell = float(tire_meta.shell_thickness)  # the asset's validated uniform thickness
+    if h_shell is None:
+        h_shell = float(elem_h.mean())
+    else:
+        elem_h = np.full(len(elem_h), h_shell, dtype=np.float32)
+
+    # kn and the PCG budget default to the tire asset's recommendation; the CLI / JSON override when given.
+    pcg_arg = options.get("pcg_iters")
+    kn_arg = options.get("kn")
+    kd_arg = options.get("kd")
+    pcg_iters = int(pcg_arg) if pcg_arg is not None else int(tire_meta.pcg_iters or vehicle_config.PCG_ITERS)
+    kn = float(kn_arg) if kn_arg is not None else float(tire_meta.contact_kn or vehicle_config.KN)
+    # kd: CLI > asset recommendation (sized to the vehicle's ride mode at bake time —
+    # an undamped rigid-hull ride mode never settles and its bounce can even ratchet the
+    # car forward on an asymmetric tread) > the baseline damping ratio.
+    if kd_arg is not None:
+        kd = float(kd_arg)
+    elif tire_meta.contact_kd is not None:
+        kd = float(tire_meta.contact_kd)
+    else:
+        kd = kn * (vehicle_config.KD / vehicle_config.KN)  # same damping ratio as the baseline
+
+    # The nominal pressure is clamped into the vehicle's CTIS envelope: 30 kPa is inside the
+    # jeep's 0.5-35 psi but 2x the Sherp's 2.1 psi ceiling, which its slider could not reach
+    # for minutes at the Sherp's fill rate.
+    envelope = vehicle.ctis_envelope(e_tire, elem_h, tire_meta)
+    requested_pressure = pressure
+    if pressure > 0.0:
+        _unit, per_unit, p_min, p_max, _rate, _presets, _title = envelope
+        pressure = min(max(pressure, p_min * per_unit), p_max * per_unit)
+    return TireSetup(
+        e_tire=e_tire,
+        nu_tire=nu_tire,
+        rho_tire=rho_tire,
+        alpha_d=alpha_d,
+        thickness=thickness,
+        h_shell=h_shell,
+        elem_h=elem_h,
+        pcg_iters=pcg_iters,
+        kn=kn,
+        kd=kd,
+        requested_pressure=requested_pressure,
+        pressure=pressure,
+        envelope=envelope,
+    )
 
 
 def _find_free_joint(model: newton.Model, body: int) -> int:
@@ -101,69 +203,27 @@ class VehicleSimulation:
         # ── Solver params ─────────────────────────────────────────────────────
         substeps = int(getattr(args, "substeps", vehicle_config.SIM_SUBSTEPS))
         nr_iters = int(getattr(args, "nr_iters", vehicle_config.NR_ITERS))
-        # kn and the PCG budget default to the tire asset's recommendation (resolved after the
-        # tire is loaded below); the CLI / JSON override when given.
-        pcg_arg = getattr(args, "pcg_iters", None)
-        kn_arg = getattr(args, "kn", None)
-        kd_arg = getattr(args, "kd", None)
         mu = float(getattr(args, "mu", vehicle_config.MU))
         sim_dt = vehicle_config.FRAME_DT / substeps
         self._substeps = substeps
         self._sim_dt = sim_dt
 
-        # ── Tire material (shell-tires JSON array or flat CLI args) ──────────
-        # Geometry (dimensions, n-circ, sec-divs) is fixed at bake time — see
-        # third_party/newton-tire-tool/scripts/bake_tire.py. Only material +
-        # thickness + pressure are still runtime-overridable (applied to the
-        # loaded mesh below).
-        shell_tires = getattr(args, "shell_tires", None)
-        if shell_tires:
-            if isinstance(shell_tires, str):
-                shell_tires = json.loads(shell_tires)
-            t0 = shell_tires[0]  # first entry used for all 4 tires
-            e_tire = float(t0.get("E", vehicle_config.E_TIRE))
-            nu_tire = float(t0.get("nu", vehicle_config.NU_TIRE))
-            rho_tire = float(t0.get("rho", vehicle_config.RHO_TIRE))
-            h_cfg = t0.get("thickness", vehicle_config.H_SHELL)
-            h_shell = None if h_cfg is None else float(h_cfg)  # None: the asset's shellThickness, else its bands
-            alpha_d = float(t0.get("alpha-damp", vehicle_config.ALPHA_D))
-            pressure = float(t0.get("pressure", vehicle_config.PRESSURE))
-        else:
-            e_tire = float(getattr(args, "e_tire", vehicle_config.E_TIRE))
-            nu_tire = float(getattr(args, "nu_tire", vehicle_config.NU_TIRE))
-            rho_tire = float(getattr(args, "rho_tire", vehicle_config.RHO_TIRE))
-            h_shell = float(getattr(args, "h_shell", vehicle_config.H_SHELL))
-            alpha_d = float(vehicle_config.ALPHA_D)
-            pressure = float(getattr(args, "pressure", vehicle_config.PRESSURE))
         thick_gp = int(getattr(args, "thickness_gp", 3))
-
-        mat = isotropic_ancf_material(E=e_tire, nu=nu_tire, rho=rho_tire, alpha_damp=alpha_d)
 
         # ── ANCF tire mesh (Y-up: axle along X, tread at Y=0) ────────────────
         self.ancf_model, tire_meta = load_ancf_tire_usd(asset_path(args.tire_asset), device=device)
         # Dimensions / limits from the vehicle USD and the tire USD.
         self.spec = self.vehicle.spec(args.tire_asset, tire_meta)
         n_elems = self.ancf_model.n_elems
+        # Material, thickness, contact and pressure (shell-tires JSON array or flat CLI args).
+        setup = resolve_tire_setup(vars(args), tire_meta, self.ancf_model.elem_h.numpy(), self.vehicle)
+        rho_tire, h_shell, pressure = setup.rho_tire, setup.h_shell, setup.pressure
+        pcg_iters, kn, kd = setup.pcg_iters, setup.kn, setup.kd
+        mat = isotropic_ancf_material(E=setup.e_tire, nu=setup.nu_tire, rho=rho_tire, alpha_damp=setup.alpha_d)
         self.ancf_model.elem_mat = wp.array(np.tile(material_row(mat), (n_elems, 1)), dtype=float, device=device)
-        if h_shell is None and tire_meta.shell_thickness is not None:
-            h_shell = float(tire_meta.shell_thickness)  # the asset's validated uniform thickness
-        if h_shell is None:
-            h_shell = float(self.ancf_model.elem_h.numpy().mean())  # for the lumped mass estimates below
-        else:
-            self.ancf_model.elem_h = wp.array(np.full(n_elems, h_shell, dtype=np.float32), device=device)
+        self.ancf_model.elem_h = wp.array(setup.elem_h, device=device)
         self._tire_meta = tire_meta
-        self._e_tire = e_tire
-        pcg_iters = int(pcg_arg) if pcg_arg is not None else int(tire_meta.pcg_iters or vehicle_config.PCG_ITERS)
-        kn = float(kn_arg) if kn_arg is not None else float(tire_meta.contact_kn or vehicle_config.KN)
-        # kd: CLI > asset recommendation (sized to the vehicle's ride mode at bake time —
-        # an undamped rigid-hull ride mode never settles and its bounce can even ratchet the
-        # car forward on an asymmetric tread) > the baseline damping ratio.
-        if kd_arg is not None:
-            kd = float(kd_arg)
-        elif tire_meta.contact_kd is not None:
-            kd = float(tire_meta.contact_kd)
-        else:
-            kd = kn * (vehicle_config.KD / vehicle_config.KN)  # same damping ratio as the baseline
+        self._e_tire = setup.e_tire
 
         n_circ = tire_meta.n_circ
         n_bead_rows = tire_meta.n_bead_rows
@@ -177,12 +237,9 @@ class VehicleSimulation:
 
         r_outer, r_inner, width = self.spec.tire_R_outer, self.spec.tire_R_inner, self.spec.tire_width
         m_tire = rho_tire * h_shell * (2.0 * math.pi * r_outer * width + 2.0 * math.pi * (r_outer**2 - r_inner**2))
-        # The asset contains the rigid rim only; the shell carries its own weight.
-        fz_tare = 0.0
 
         self._n_bead = n_bead
         self._n_nodes = n_nodes
-        self._fz_tare = fz_tare
 
         # ── Bead ring node indices: n_bead_rows rows pinned per side ─────────
         bead_np = bead_row_indices(n_bead_per_ring, n_bead_rows, n_ax_divs)
@@ -252,26 +309,18 @@ class VehicleSimulation:
         # Dirichlet bead nodes (global indices across all envs).
         bead_global_np = np.concatenate([bead_np + e * n_nodes for e in range(vehicle_config.N_TIRES)])
         self.ancf_solver.set_dirichlet_nodes(bead_global_np)
-        self.ancf_solver._fix_dirichlet_in_batched = True
         self.ancf_solver.debug_residuals = bool(getattr(args, "debug_residuals", False))
 
         # CTIS (see _ctis.py; per-tire valves or one air line, from the vehicle asset).
         # Start already inflated — the ramp is a realistic 2 psi/s, so filling from the
         # build pressure would leave the jeep on flat tires for seconds and would not
-        # reproduce the settled baseline (h=0.42 m, 14-17 kN/corner). The scenario's
-        # pressure is clamped into the vehicle's CTIS envelope: 30 kPa is inside the
-        # jeep's 0.5-35 psi but 2x the Sherp's 2.1 psi ceiling, which its slider could
-        # not reach for minutes at the Sherp's fill rate.
+        # reproduce the settled baseline (h=0.42 m, 14-17 kN/corner). resolve_tire_setup
+        # clamped the scenario's pressure into the vehicle's CTIS envelope.
         self._build_pressure = float(getattr(args, "build_pressure", vehicle_config.BUILD_PRESSURE))
         self.ctis = None
         if pressure > 0.0:
-            # (unit label, Pa per unit, min, max, ramp rate [unit/s], presets, title); one host
-            # copy of elem_h for the hoop-strain cap.
-            envelope = self.vehicle.ctis_envelope(self._e_tire, self.ancf_model.elem_h.numpy(), self._tire_meta)
-            _unit, per_unit, p_min, p_max, _rate, _presets, _title = envelope
-            pressure = min(max(pressure, p_min * per_unit), p_max * per_unit)
             self.ctis = self.vehicle.make_ctis(
-                self.ancf_solver, vehicle_config.N_TIRES, pressure, self._build_pressure, envelope
+                self.ancf_solver, vehicle_config.N_TIRES, pressure, self._build_pressure, setup.envelope
             )
         else:
             self.ancf_solver.set_cavity([0.0] * vehicle_config.N_TIRES, [self._build_pressure] * vehicle_config.N_TIRES)
@@ -361,7 +410,7 @@ class VehicleSimulation:
                 tire_idx=w,
                 spindle_mj=spindle_mj_list[w],
                 bead_idx_np=(bead_np + w * n_nodes).astype(np.int32),
-                tare_fz=fz_tare,
+                tare_fz=0.0,
                 world_idx=0,
                 lateral_offset=0.0,
                 device=device,
@@ -406,31 +455,23 @@ class VehicleSimulation:
         self._gs_coupler = None
         self._gs_prescribe_toggle = 0
         coupling_method = getattr(args, "coupling_method", "auto")
-        if coupling_method in ("schur", "coupled-newton") and self._substeps % 2:
-            raise ValueError("Schur coupling requires the implicit solver and an even number of substeps.")
+        if coupling_method == "coupled-newton" and self._substeps % 2:
+            raise ValueError("Coupled Newton coupling requires an even number of substeps.")
         if coupling_method == "auto":
             # Response reuse depends on the rigid interface size and graph support,
             # independently of the vehicle asset or tire mesh resolution.
             can_reuse = self.state_0.joint_qd.shape[0] <= 64 and self._substeps % 2 == 0
             terrain = self.ancf_solver.terrain
             can_condense = can_reuse and self.model.articulation_count == 1 and (terrain is None or terrain.rigid)
-            coupling_method = (
-                "coupled-newton"
-                if can_condense and self._gs_iters >= 3
-                else "schur"
-                if can_condense
-                else "quasi-newton"
-                if can_reuse
-                else "adaptive"
-            )
+            # Models coupled Newton rejects (singular rigid mass, > 32 dofs) fall
+            # back to adaptive Aitken inside the coupler.
+            coupling_method = "coupled-newton" if can_condense and self._gs_iters >= 3 else "adaptive"
         if self._gs_iters > 1:
             self._gs_coupler = newton.solvers.InterfaceCouplerGS(
                 self.ancf_solver,
                 n_iters=self._gs_iters,
-                tol=0.0,
                 acceleration=True,
-                adaptive=coupling_method in ("adaptive", "quasi-newton", "schur", "coupled-newton"),
-                reuse_response=coupling_method in ("quasi-newton", "schur", "coupled-newton"),
+                adaptive=True,
                 coupled_newton=coupling_method == "coupled-newton",
             )
             # elem_eas_alpha is mutated by the ANCF step and is not part of the
@@ -440,9 +481,7 @@ class VehicleSimulation:
                 self.state_0,
                 extra_arrays=extra,
                 model=self.model,
-                interface_body_indices=self._spindle_body_indices_np
-                if coupling_method in ("schur", "coupled-newton")
-                else None,
+                interface_body_indices=self._spindle_body_indices_np if coupling_method == "coupled-newton" else None,
                 kinematic_state_arrays=[
                     getattr(self.solver.mjw_data, name)
                     for name in ("qpos", "qvel", "xpos", "xquat", "cvel", "subtree_com")
@@ -563,7 +602,7 @@ class VehicleSimulation:
             wp.launch(advance_substep_pair, dim=1, inputs=[self._substep_pairs], device="cuda:0")
 
         def frame():
-            if coupler.reuse_response:
+            if coupler._coupled_solver is not None:
                 self._substep_pairs.fill_(self._substeps // 2)
                 wp.capture_while(self._substep_pairs, pair)
             else:
@@ -575,10 +614,6 @@ class VehicleSimulation:
             method = (
                 "coupled shell/interface Newton"
                 if coupler._coupled_solver is not None
-                else "Schur quasi-Newton"
-                if coupler._shell_response is not None
-                else "quasi-Newton"
-                if coupler.reuse_response
                 else "adaptive Aitken"
                 if coupler.adaptive
                 else "Aitken"
@@ -876,7 +911,7 @@ class VehicleSimulation:
         for label, e in vehicle_config.WHEEL_ORDER:
             x_e = x_all[e * nn : (e + 1) * nn]
             any_nan = bool(np.any(np.isnan(x_e)))
-            fz = float(stg_per_wheel[e][4]) + self._fz_tare
+            fz = float(stg_per_wheel[e][4])
             pos_zu = spindle_poses[e, :3]
             hub = np.array([float(pos_zu[1]), float(pos_zu[2]), float(pos_zu[0])])
             # Compare bead/crown positions to the integrated spindle at the same time.
@@ -939,6 +974,8 @@ class VehicleSimulation:
                 self._n_nodes,
                 0.0,
                 self._contact_vis_scale,
+                _CONTACT_SPIKE_STRIDE,
+                2,
                 self._contact_line_s,
                 self._contact_line_e,
             ],

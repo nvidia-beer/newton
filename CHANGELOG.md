@@ -4,7 +4,7 @@
 
 ### Added
 
-- Add optional `coupling-method=schur` for implicit vehicle tires: condense six spindle motion directions per tire, reuse the interface tangent, and fall back to finite differences when an estimate is invalid.
+- Add condensed Schur interface tangents for implicit vehicle tires: six spindle motion directions per tire are condensed through the shell's linear solve and reused by coupled Newton between refreshes.
 - Add `coupling-method=coupled-newton` to share shell and wheel corrections across interface iterations, retain full reaction torque, and reserve additional corrections for difficult steps. Keep partitioned coupling for singular rigid mass matrices.
 - Add an opt-in, uncoupled wheel stiffness-recovery experiment with synthetic noise, a separate validation drop, and numerical accuracy gates.
 - Add `diffsim_ancf_skid_steer` (Docker example 09): learn speed and turning response from simulated MuJoCo/ANCF maneuvers, compare physical before/after motion against a gray target vehicle, and export observations as preparation for vehicle telemetry calibration.
@@ -15,7 +15,7 @@
 
 ### Changed
 
-- Default full-vehicle examples 03, 05, and 07 to `coupling-method=auto`, selecting joint shell/interface corrections on supported implicit vehicles on flat ground and rigid terrain. Retain partitioned coupling for unsupported rigid models and adaptive coupling for odd substeps. Use `coupling-method=adaptive` to restore the previous terrain/telemetry preset or `coupling-method=schur` for complete shell solves between interface corrections.
+- Default full-vehicle examples 03, 05, and 07 to `coupling-method=auto`, selecting joint shell/interface corrections on supported implicit vehicles on flat ground and rigid terrain. Retain partitioned coupling for unsupported rigid models and adaptive coupling for odd substeps. Use `coupling-method=adaptive` to restore the previous terrain/telemetry preset.
 - Share the full-vehicle runtime across flat-ground, terrain, sand, and telemetry examples; keep existing launcher commands and `--test`, with acceptance checks maintained in `newton/tests`.
 - Upgrade the ARM64 Docker default to Warp 1.17.0 with CUDA 13; set `WARP_VERSION=locked` when building to restore the lockfile version.
 
@@ -31,7 +31,7 @@
 - Make shell force assembly and reductions reproducible across translated drop environments, and accelerate the symmetric block preconditioner.
 - Stabilize sticking and sliding at a fixed iteration budget without changing the rigid-ground contact force law.
 - Enable CUDA–OpenGL buffer sharing for dynamic viewer meshes and lines on Linux.
-- Reduce implicit ANCF vehicle cost at the fixed 6 / 2 / 10 solver budget: shared-memory symmetric sweeps and parallel damping for small tires, bounded coupling refresh work during motion, adaptive GPU wheel–tire coupling (`coupling-method=aitken` retains six fixed passes), and single-CUDA-graph wheel-rig frames; full torque transfer and tire damping are unchanged.
+- Reduce implicit ANCF vehicle cost at the fixed 6 / 2 / 10 solver budget: shared-memory symmetric sweeps and parallel damping for small tires, bounded coupling refresh work during motion, adaptive GPU wheel–tire coupling, and single-CUDA-graph wheel-rig frames; full torque transfer and tire damping are unchanged.
 - Size the rigid-floor drop penalty from gravitational energy and a penetration target; retain explicit `--kn` and `--kd` overrides.
 - Correct ANCF shell strain transformations, physical mass and director inertia, and rigid-mode convergence at fixed solver iteration budgets.
 - Preserve accepted HHT force history and prescribed wheel motion through integration, warm-up, resets, and coupling retries.

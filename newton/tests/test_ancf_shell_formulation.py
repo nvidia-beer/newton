@@ -396,8 +396,8 @@ class TestANCFShellFormulation(unittest.TestCase):
         np.testing.assert_array_equal(solver.global_f_ext0.numpy(), 4.0)
 
     def test_vehicle_support_check_uses_full_rigid_mass(self):
-        # 100 kg vehicle, 10 N shell-weight tare per corner. The single-wheel
-        # rig metadata deliberately differs from the vehicle's quarter mass.
+        # 100 kg vehicle. The single-wheel rig metadata deliberately differs
+        # from the vehicle's quarter mass.
         def array(values, dtype=float):
             return wp.array(values, dtype=dtype, device="cpu")
 
@@ -406,7 +406,6 @@ class TestANCFShellFormulation(unittest.TestCase):
             _bead_idx_np=np.array([0]),
             _bead_rest_np=np.zeros((1, 3)),
             _spindle_body_indices_np=[0, 1, 2, 3],
-            _fz_tare=10.0,
             _frame=0,
             _t=0.0,
             model=SimpleNamespace(body_mass=array([80.0, 5.0, 5.0, 5.0, 5.0])),
@@ -416,7 +415,7 @@ class TestANCFShellFormulation(unittest.TestCase):
                 node_x=array(np.zeros((4, 3)), wp.vec3),
                 node_xd=array(np.zeros((4, 3)), wp.vec3),
                 global_f_int=array(np.zeros(24)),
-                _xfrc_stg_per_tire=[array([[0, 0, 0, 0, 25.0 * 9.81 - 10.0, 0]], wp.spatial_vector) for _ in range(4)],
+                _xfrc_stg_per_tire=[array([[0, 0, 0, 0, 25.0 * 9.81, 0]], wp.spatial_vector) for _ in range(4)],
             ),
         )
         VehicleExample.test_final(example)

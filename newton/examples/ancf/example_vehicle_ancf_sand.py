@@ -33,7 +33,8 @@ import warp.fem as fem
 import newton
 import newton.examples
 from newton.examples.ancf import _vehicle_config as vehicle_config
-from newton.examples.ancf._vehicle_kernels import gather_contact_spikes
+from newton.examples.ancf._capture_utils import try_capture
+from newton.examples.ancf._vehicle_kernels import _CONTACT_SPIKE_STRIDE, gather_contact_spikes
 from newton.examples.ancf._vehicle_simulation import VehicleSimulation
 from newton.solvers import SolverImplicitMPM
 
@@ -226,21 +227,13 @@ class Example(VehicleSimulation):
         )
 
         # Warm-up (JIT, grid allocation) then capture the whole sand step as one graph.
-        self._sand_graph = None
         self._sand_step()
         wp.synchronize_device(dev)
-        try:
-            wp.capture_begin(device=dev)
-            self._sand_step()
-            self._sand_graph = wp.capture_end(device=dev)
+        self._sand_graph = try_capture(
+            self._sand_step, "[SAND] sand-step graph capture failed ({error!r}) — eager mode", dev
+        )
+        if self._sand_graph is not None:
             print("[SAND] sand-step graph captured (1 launch/frame)")
-        except Exception as e:
-            try:
-                wp.capture_end(device=dev)
-            except Exception:
-                pass
-            self._sand_graph = None
-            print(f"[SAND] sand-step graph capture failed ({e!r}) — eager mode")
         wp.synchronize_device(dev)
 
         if self.viewer is not None:
@@ -387,6 +380,8 @@ class Example(VehicleSimulation):
                 self._n_nodes,
                 self._sand_h,
                 self._contact_vis_scale,
+                _CONTACT_SPIKE_STRIDE,
+                2,
                 self._contact_line_s,
                 self._contact_line_e,
             ],
@@ -414,7 +409,7 @@ class Example(VehicleSimulation):
     def create_parser():
         parser = VehicleSimulation.create_parser()
         # Sand uses a separate, frame-lagged MPM coupling and keeps its existing default.
-        parser.set_defaults(coupling_method="aitken")
+        parser.set_defaults(coupling_method="adaptive")
         parser.add_argument(
             "--sand-size",
             type=float,

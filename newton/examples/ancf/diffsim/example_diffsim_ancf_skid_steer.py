@@ -470,11 +470,37 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         parser.set_defaults(num_frames=4000)
-        parser.add_argument("--telemetry-config", type=Path, default=vehicle_config.TELEMETRY_PRESET)
-        parser.add_argument("--target-speed", type=float, default=0.6, help="Target forward speed [m/s], 0.2–0.9.")
-        parser.add_argument("--target-yaw-deg", type=float, default=2.0, help="Target yaw rate [degrees/s], -3 to 3.")
-        parser.add_argument("--train", action=argparse.BooleanOptionalAction, default=True)
-        parser.add_argument("--report", type=Path, help="Write a new calibration report and sibling observation CSV.")
+        parser.add_argument(
+            "--telemetry-config",
+            type=Path,
+            default=vehicle_config.TELEMETRY_PRESET,
+            help="Source vehicle_telemetry JSON preset; its physical vehicle/tire settings are reused on flat ground.",
+        )
+        parser.add_argument(
+            "--target-speed",
+            type=float,
+            default=0.6,
+            help="Target forward speed [m/s], 0.2–0.9; changing it replays before/after using the fitted response.",
+        )
+        parser.add_argument(
+            "--target-yaw-deg",
+            type=float,
+            default=2.0,
+            help="Target yaw rate [degrees/s], -3 to 3; positive turns left.",
+        )
+        parser.add_argument(
+            "--train",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Collect straight and gentle/strong left/right maneuvers, fit with Warp gradients, then test the "
+            "learned commands; --no-train runs only the initial comparison until Learn again is pressed.",
+        )
+        parser.add_argument(
+            "--report",
+            type=Path,
+            help="Write a new .json calibration report and sibling observation .csv; these synthetic response fits "
+            "do not overwrite or recalibrate the source telemetry preset.",
+        )
         return parser
 
 

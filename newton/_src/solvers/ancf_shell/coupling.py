@@ -18,27 +18,13 @@ from ._kinematic_cache import KinematicStateCache
 from .coupled_newton import CoupledShellNewton
 from .kernels_coupling import (
     _adaptive_interface_step,
-    _advance_interface_iteration,
-    _advance_response_probe,
     _aitken_coefficient,
-    _choose_response_refresh,
-    _finish_shell_linearization,
     _integrate_interface_joints,
-    _make_response_inverse,
-    _newton_interface_step,
     _pack_ancf,
     _predict_interface_velocity,
-    _probe_guess,
     _relax_coordinates,
-    _response_column,
-    _response_correction,
-    _response_secant_apply,
-    _response_secant_curvature,
-    _response_secant_products,
-    _save_corrected_increment,
     _save_interface_increment,
     _unpack_ancf,
-    _update_response_secant,
 )
 from .schur import RigidShellSchurResponse
 
@@ -50,8 +36,8 @@ class InterfaceCouplerGS:
     Stability depends on convergence of the shared interface DOFs.
 
     The ANCF solver's internal NR+PCG loop can run as a captured CUDA graph,
-    or the caller can capture the complete coupling loop. When *tol* is
-    ``0.0`` (default), no GPU-to-CPU synchronisation is needed per substep.
+    or the caller can capture the complete coupling loop; neither needs a
+    GPU-to-CPU synchronisation per substep.
     Adaptive mode can skip converged trials inside a CUDA conditional graph;
     otherwise the fixed iteration budget runs in full.
 
@@ -75,20 +61,17 @@ class InterfaceCouplerGS:
     is accepted without wrench scaling. Inspect ``interface_residual`` when
     selecting the iteration count; a fixed count does not guarantee convergence.
 
-    ``reuse_response`` replaces repeated cold starts of the interface solve with
-    a small inverse Jacobian of the velocity residual. Finite-difference probes
-    seed it after startup, and good Broyden updates follow the current substep.
-    Refresh probes are fully rewound, including HHT force history. Every accepted
-    state still comes from a full physical response. Early stopping requires a
-    velocity residual test; exhausting the iteration budget does not guarantee convergence.
+    ``coupled_newton`` replaces repeated cold starts of the interface solve: the
+    shell Newton iterate persists across interface corrections and a condensed
+    interface tangent is reused between refreshes. Every accepted state still
+    comes from a full physical response; exhausting the iteration budget does not
+    guarantee convergence.
 
     Args:
         ancf_solver: A :class:`~newton.solvers.SolverANCFShell` instance.
         n_iters: Maximum number of GS coupling iterations per substep.
             ``1`` selects a single exchange; convergence depends on the
             tire impedance and rigid inertia, and must be checked for each model.
-        tol: Convergence tolerance for spindle position change [m].  ``0.0``
-            (default) disables early exit, avoiding any GPU→CPU sync per substep.
         acceleration: Apply vector Aitken relaxation to the joint velocity
             interface and construct end-of-step trial poses consistently.
         initial_relaxation: Initial Aitken weight per substep, in (0, 1].
@@ -109,51 +92,40 @@ class InterfaceCouplerGS:
             abs(response))``. ``interface_iterations`` and ``interface_totals``
             expose the adaptive trial count on the device, without readbacks.
         coupled_newton: Keep shell Newton iterates between interface corrections
-            in CUDA captures. Requires response reuse, condensed tangents, and at
-            least three evaluations. Small block-local shell systems use up to
+            in CUDA captures. Requires adaptive coupling, condensed tangents
+            (``interface_body_indices`` in :meth:`allocate`), and at least three
+            evaluations. Small block-local shell systems use up to
             four inner PCG iterations; larger systems retain the shell budget.
             Three extra evaluations are reserved for large interface residuals.
-            Singular rigid mass matrices retain partitioned coupling.
-        reuse_response: Reuse an interface inverse Jacobian in captured adaptive
-            solves with at most 64 joint velocity coordinates. Intended for small
-            vehicle interfaces. Uses Aitken during startup and when an estimate is
-            invalid; a valid reused response can stop after one verified trial.
-            ``interface_probe_count`` counts the additional full tire
-            evaluations used to refresh the response; add this to the trial count
-            when measuring solver work. With condensed shell tangents,
-            ``interface_linearization_count`` counts the cheaper tangent builds.
-            Finite-difference refreshes are separated by at least five
-            times the number of velocity coordinates; invalid estimates use Aitken
-            between refreshes. Callbacks in this captured loop must not depend
-            on the host-side ``gs_iter`` value. Uncaptured execution uses legacy Aitken.
+            Rigid models it does not support (singular mass matrix, more than 32
+            dofs) fall back to adaptive coupling. ``interface_linearization_count``
+            counts the condensed tangent builds. Callbacks in this captured loop
+            must not depend on the host-side ``gs_iter`` value; uncaptured
+            execution uses adaptive Aitken relaxation.
     """
 
     def __init__(
         self,
         ancf_solver,
         n_iters: int = 2,
-        tol: float = 0.0,
         acceleration: bool = False,
         initial_relaxation: float = 0.1,
         adaptive: bool = False,
         velocity_atol: float = 1.0e-3,
         velocity_rtol: float = 1.0e-3,
-        reuse_response: bool = False,
         coupled_newton: bool = False,
     ) -> None:
         self._ancf = ancf_solver
         self.acceleration = bool(acceleration)
         self.adaptive = bool(adaptive)
-        self.reuse_response = bool(reuse_response)
         self._coupled_newton = bool(coupled_newton)
+        # Reported by the acceptance probes: True while coupled Newton (with its
+        # reused condensed interface tangent) is active; allocate() clears it on fallback.
+        self.reuse_response = self._coupled_newton
         self._coupled_solver = None
-        if coupled_newton and (not reuse_response or n_iters < 3):
-            raise ValueError("Coupled Newton requires response reuse and at least three interface evaluations.")
-        if self.reuse_response and not self.adaptive:
-            raise ValueError("Response reuse requires adaptive coupling.")
+        if coupled_newton and (not self.adaptive or n_iters < 3):
+            raise ValueError("Coupled Newton requires adaptive coupling and at least three interface evaluations.")
         self._shell_response = None
-        self._response_warmup_steps = 200
-        self._response_refresh_interval = 500
         if self.adaptive and not self.acceleration:
             raise ValueError("Adaptive stopping requires accelerated coupling.")
         if velocity_atol <= 0.0 or velocity_rtol < 0.0:
@@ -164,7 +136,6 @@ class InterfaceCouplerGS:
             raise ValueError("initial_relaxation must be in (0, 1].")
         self._initial_relaxation = float(initial_relaxation)
         self._n_iters = n_iters
-        self._tol = tol
         self._n_nodes = None  # set by allocate()
         self.gs_iter = 0  # current GS iteration inside substep(); see prescribe_fn
 
@@ -197,9 +168,9 @@ class InterfaceCouplerGS:
                 response reruns ``kinematics_fn``.
             model: Rigid model used for joint integration and forward kinematics
                 when acceleration is enabled.
-            interface_body_indices: Optional spindle body indices, one per batched
-                implicit tire. Enables condensed shell tangents for response reuse,
-                with finite-difference fallback if the estimate is invalid.
+            interface_body_indices: Spindle body indices, one per batched implicit
+                tire. Required for coupled Newton, which condenses the shell tangent
+                onto these bodies.
         """
         a = self._ancf
         dev = a.node_x.device
@@ -230,41 +201,21 @@ class InterfaceCouplerGS:
 
         self._rigid_snap = [_mk_rigid(), _mk_rigid()]
         self._iterate_velocity = wp.clone(state_0.joint_qd)
-        self.interface_probe_count = wp.zeros(1, dtype=int, device=dev)
         self.interface_linearization_count = wp.zeros(1, dtype=int, device=dev)
         self._linearization_failed = wp.zeros(1, dtype=int, device=dev)
-        if interface_body_indices is not None:
-            if not self.reuse_response or model is None:
-                raise ValueError("Shell condensation requires response reuse and a rigid model.")
-            self._shell_response = RigidShellSchurResponse(a, model, interface_body_indices)
-            self._response_refresh_interval = 50
-        if self.reuse_response:
-            if state_0.joint_qd.shape[0] > 64:
-                raise ValueError("Response reuse supports at most 64 generalized velocities.")
+        if self._coupled_newton:
+            if interface_body_indices is None or model is None:
+                raise ValueError("Coupled Newton requires the rigid model and one spindle body index per tire.")
             nv = state_0.joint_qd.shape[0]
-            self._response_matrix = wp.zeros((nv, nv), dtype=wp.float64, device=dev)
-            self._response_inverse = wp.zeros_like(self._response_matrix)
+            if nv > 64:
+                raise ValueError("Coupled Newton supports at most 64 generalized velocities.")
+            self._shell_response = RigidShellSchurResponse(a, model, interface_body_indices)
+            self._response_inverse = wp.zeros((nv, nv), dtype=wp.float64, device=dev)
             self._response_ready = wp.zeros(1, dtype=int, device=dev)
             self._response_age = wp.zeros(1, dtype=int, device=dev)
             self._response_refreshed = wp.zeros(1, dtype=int, device=dev)
-            self._response_refresh = wp.zeros(1, dtype=int, device=dev)
-            self._response_guess = wp.zeros_like(state_0.joint_qd)
-            self._interface_iteration = wp.zeros(1, dtype=int, device=dev)
-            self._probe_column = wp.zeros(1, dtype=int, device=dev)
-            self._probe_active = wp.zeros(1, dtype=int, device=dev)
-            self._secant_previous_guess = wp.zeros_like(state_0.joint_qd)
-            self._secant_hy = wp.zeros(nv, dtype=wp.float64, device=dev)
-            self._secant_sh = wp.zeros(nv, dtype=wp.float64, device=dev)
-            # Small interfaces benefit from fewer launches; larger matrices
-            # otherwise serialize most of the response work on one GPU thread.
-            self._parallel_response = nv >= 8
-            self._response_correction = wp.zeros(nv if self._parallel_response else 0, dtype=wp.float64, device=dev)
-            self._secant_curvature = wp.zeros(1, dtype=wp.float64, device=dev)
             self._corrected_velocity = wp.clone(state_0.joint_qd)
             self._previous_corrected = wp.clone(state_0.joint_qd)
-            self._response_rigid = _mk_rigid()
-            self._response_pack = wp.zeros(pack_size, dtype=float, device=dev)
-            self._inverse_kernel = _make_response_inverse(nv)
         self._zero_qdd = wp.zeros_like(state_0.joint_qd)
         self._predicted_velocity = wp.zeros_like(state_0.joint_qd)
         self._aitken_previous = wp.zeros_like(state_0.joint_qd)
@@ -291,19 +242,19 @@ class InterfaceCouplerGS:
             if array is not None and all(array is not other for other in self._extra_live):
                 self._extra_live.append(array)
         self._extra_snaps = [wp.clone(arr) for arr in self._extra_live]
-        if self.reuse_response:
-            self._response_extra = [wp.clone(arr) for arr in self._extra_live]
-
-        self._kinematic_cache = KinematicStateCache(
-            (kinematic_state_arrays or ()) if self.acceleration and not self._coupled_newton else ()
-        )
 
         if self._coupled_newton:
-            if self._shell_response is None:
-                raise ValueError("Coupled Newton requires condensed shell tangents.")
             candidate = CoupledShellNewton(self, state_0, kinematic_state_arrays or ())
             if candidate.supported:
                 self._coupled_solver = candidate
+            else:
+                # Singular rigid mass or too many dofs: run adaptive Aitken coupling instead.
+                self._coupled_newton = False
+                self.reuse_response = False
+                self._shell_response = None
+        self._kinematic_cache = KinematicStateCache(
+            (kinematic_state_arrays or ()) if self.acceleration and not self._coupled_newton else ()
+        )
 
     def reset(self, state_0) -> None:
         """Refresh both snapshots after the caller resets rigid and tire states.
@@ -325,15 +276,12 @@ class InterfaceCouplerGS:
         self._interface_converged.zero_()
         self.interface_iterations.zero_()
         self.interface_totals.zero_()
-        self.interface_probe_count.zero_()
         self.interface_linearization_count.zero_()
         self._linearization_failed.zero_()
-        if self.reuse_response:
+        if self._coupled_newton:
             self._response_ready.zero_()
             self._response_age.zero_()
             self._response_refreshed.zero_()
-            self._response_refresh.zero_()
-            self._secant_previous_guess.zero_()
             wp.copy(self._corrected_velocity, state_0.joint_qd)
             wp.copy(self._previous_corrected, state_0.joint_qd)
 
@@ -469,7 +417,6 @@ class InterfaceCouplerGS:
         prescribe_fn,
         accumulate_fn,
         dynamics_fn,
-        interface_body_indices: np.ndarray | None = None,
         ancf_step_fn=None,
         trial_kinematics_fn=None,
     ) -> int:
@@ -498,9 +445,6 @@ class InterfaceCouplerGS:
                 writes ``solver.xfrc_applied``.
             dynamics_fn: Callable ``(state_rigid)`` that runs MuJoCo
                 constraint solve and integration.
-            interface_body_indices: Optional 1-D int32 NumPy array of Newton
-                body indices for convergence checking (GPU→CPU sync per iter
-                only when *tol* > 0).
             ancf_step_fn: Optional direct shell step used when capturing the
                 complete coupling loop; default replays the shell graph.
             trial_kinematics_fn: Optional cheaper replacement for the predicted
@@ -531,7 +475,6 @@ class InterfaceCouplerGS:
                 dynamics_fn,
                 trial_kinematics_fn=trial_kinematics_fn,
             )
-        sp_prev: np.ndarray | None = None
 
         def predict_pose():
             self._predict_pose(state_0, dt)
@@ -566,9 +509,6 @@ class InterfaceCouplerGS:
             self.interface_residual.zero_()
             self._interface_active.fill_(1)
         conditional = self.adaptive and self._ancf.node_x.device.is_capturing
-        reusing = conditional and self.reuse_response
-        if reusing:
-            wp.load_module(module=self._inverse_kernel.module, device=self._ancf.node_x.device)
 
         def evaluate_response():
             # ── restore ANCF to t_n (1 kernel, not 8 copies) ──────────────
@@ -620,279 +560,43 @@ class InterfaceCouplerGS:
             # ── MuJoCo dynamics ────────────────────────────────────────────
             dynamics_fn(state_rigid)
 
-        def calibrate_finite_difference():
-            dev = self._ancf.node_x.device
-            wp.copy(self._response_guess, self._iterate_velocity)
-            for key, name in (
-                ("bq", "body_q"),
-                ("bqd", "body_qd"),
-                ("jq", "joint_q"),
-                ("jqd", "joint_qd"),
-            ):
-                wp.copy(self._response_rigid[key], getattr(state_rigid, name))
-            # Preserve this evaluated response while every probe rewinds to the same t_n.
-            self._pack_ancf_buffer(self._response_pack)
-            for live, snap in zip(self._extra_live, self._response_extra, strict=True):
-                wp.copy(snap, live)
-            self._probe_column.zero_()
-            self._probe_active.fill_(1)
-            # Capture one complete response, not one copy per velocity column.
-            # A 0.05 velocity probe resolves float32 bead-pose differences at this dt.
-
-            def probe():
-                wp.launch(
-                    _probe_guess,
-                    dim=state_0.joint_qd.shape[0],
-                    inputs=[self._response_guess, state_0.joint_qd, self._probe_column, 0.05],
-                    device=dev,
-                )
-                self._predict_pose(state_0, dt)
-                evaluate_response()
-                wp.launch(
-                    _response_column,
-                    dim=state_0.joint_qd.shape[0],
-                    inputs=[
-                        self._response_rigid["jqd"],
-                        state_rigid.joint_qd,
-                        self._response_matrix,
-                        self._probe_column,
-                        0.05,
-                    ],
-                    device=dev,
-                )
-                wp.launch(
-                    _advance_response_probe,
-                    dim=1,
-                    inputs=[self._probe_column, self._probe_active, state_0.joint_qd.shape[0]],
-                    device=dev,
-                )
-
-            wp.capture_while(self._probe_active, probe)
-            wp.launch(
-                self._inverse_kernel,
-                dim=1,
-                inputs=[
-                    self._response_matrix,
-                    self._response_inverse,
-                    self._response_ready,
-                    self._response_age,
-                    self._response_refreshed,
-                    self.interface_probe_count,
-                ],
-                device=dev,
-            )
-            self._unpack_ancf_buffer(self._response_pack)
-            for live, snap in zip(self._extra_live, self._response_extra, strict=True):
-                wp.copy(live, snap)
-            for key, name in (
-                ("bq", "body_q"),
-                ("bqd", "body_qd"),
-                ("jq", "joint_q"),
-                ("jqd", "joint_qd"),
-            ):
-                wp.copy(getattr(state_rigid, name), self._response_rigid[key])
-            wp.copy(self._iterate_velocity, self._response_guess)
-            accumulate_fn()
-
-        def calibrate_response():
-            if self._shell_response is None:
-                calibrate_finite_difference()
-                return
-            self._shell_response.refresh(state_0, dt, self._response_inverse, self._response_ready)
-            wp.launch(
-                _finish_shell_linearization,
-                dim=1,
-                inputs=[
-                    self._response_ready,
-                    self._response_age,
-                    self._response_refreshed,
-                    self.interface_linearization_count,
-                    self._linearization_failed,
-                ],
-                device=self._ancf.node_x.device,
-            )
-
-            def fallback():
-                calibrate_finite_difference()
-                # An unsupported/noisy tangent must not trigger a full finite-
-                # difference rebuild at each subsequent substep.
-                self._response_age.fill_(-5 * state_0.joint_qd.shape[0])
-
-            wp.capture_if(self._linearization_failed, fallback)
-
         def trial(k):
-            nonlocal sp_prev
-            # Accelerated trials already carry an end-of-step pose. Legacy
-            # unaccelerated callers extrapolate their first bead prescription.
+            # Accelerated trials already carry an end-of-step pose; unaccelerated
+            # ones extrapolate their first bead prescription.
             self.gs_iter = k
             if self.acceleration:
                 wp.copy(self._iterate_velocity, state_0.joint_qd)
 
             evaluate_response()
 
-            if reusing:
+            if self.adaptive:
                 wp.launch(
-                    _choose_response_refresh,
+                    _adaptive_interface_step,
                     dim=1,
                     inputs=[
                         self._iterate_velocity,
                         state_rigid.joint_qd,
                         self._aitken_previous,
-                        self._response_ready,
-                        self._response_age,
-                        self.interface_totals,
-                        self._response_refreshed,
-                        self._response_refresh,
-                        self._interface_iteration,
+                        self._aitken_weight,
+                        state_0.joint_qd,
+                        self.interface_residual,
+                        self._interface_active,
+                        self._interface_converged,
+                        self.interface_iterations,
+                        k,
+                        self._n_iters,
                         self._velocity_atol,
                         self._velocity_rtol,
-                        self._response_warmup_steps,
-                        self._response_refresh_interval,
-                        1 if self._shell_response is not None else 5 * state_0.joint_qd.shape[0],
-                        self.interface_linearization_count
-                        if self._shell_response is not None
-                        else self.interface_probe_count,
+                        self._initial_relaxation,
+                        conditional,
                     ],
                     device=self._ancf.node_x.device,
                 )
-                wp.capture_if(self._response_refresh, calibrate_response)
-
-            if self.adaptive:
-                if reusing:
-                    if self._parallel_response:
-                        wp.launch(
-                            _response_secant_products,
-                            dim=self._iterate_velocity.shape[0],
-                            inputs=[
-                                self._iterate_velocity,
-                                state_rigid.joint_qd,
-                                self._secant_previous_guess,
-                                self._aitken_previous,
-                                self._response_inverse,
-                                self._response_ready,
-                                self._response_refresh,
-                                self._secant_hy,
-                                self._secant_sh,
-                                self._interface_iteration,
-                            ],
-                            device=self._ancf.node_x.device,
-                        )
-                        wp.launch(
-                            _response_secant_curvature,
-                            dim=1,
-                            inputs=[
-                                self._iterate_velocity,
-                                state_rigid.joint_qd,
-                                self._secant_previous_guess,
-                                self._aitken_previous,
-                                self._response_ready,
-                                self._response_refresh,
-                                self._secant_hy,
-                                self._interface_iteration,
-                                self._secant_curvature,
-                            ],
-                            device=self._ancf.node_x.device,
-                        )
-                        wp.launch(
-                            _response_secant_apply,
-                            dim=self._iterate_velocity.shape[0],
-                            inputs=[
-                                self._iterate_velocity,
-                                self._secant_previous_guess,
-                                self._response_inverse,
-                                self._response_ready,
-                                self._secant_hy,
-                                self._secant_sh,
-                                self._secant_curvature,
-                            ],
-                            device=self._ancf.node_x.device,
-                        )
-                        wp.launch(
-                            _response_correction,
-                            dim=self._iterate_velocity.shape[0],
-                            inputs=[
-                                self._iterate_velocity,
-                                state_rigid.joint_qd,
-                                self._response_inverse,
-                                self._response_ready,
-                                self._response_correction,
-                            ],
-                            device=self._ancf.node_x.device,
-                        )
-                    else:
-                        wp.launch(
-                            _update_response_secant,
-                            dim=1,
-                            inputs=[
-                                self._iterate_velocity,
-                                state_rigid.joint_qd,
-                                self._secant_previous_guess,
-                                self._aitken_previous,
-                                self._response_inverse,
-                                self._response_ready,
-                                self._response_refresh,
-                                self._secant_hy,
-                                self._secant_sh,
-                                self._interface_iteration,
-                            ],
-                            device=self._ancf.node_x.device,
-                        )
-                    wp.launch(
-                        _newton_interface_step,
-                        dim=1,
-                        inputs=[
-                            self._iterate_velocity,
-                            state_rigid.joint_qd,
-                            self._aitken_previous,
-                            self._aitken_weight,
-                            self._response_inverse,
-                            self._response_correction,
-                            self._response_ready,
-                            state_0.joint_qd,
-                            self.interface_residual,
-                            self._interface_active,
-                            self._interface_converged,
-                            self.interface_iterations,
-                            self._interface_iteration,
-                            self._n_iters,
-                            self._velocity_atol,
-                            self._velocity_rtol,
-                            self._initial_relaxation,
-                            conditional,
-                        ],
-                        device=self._ancf.node_x.device,
-                    )
-                    wp.copy(self._corrected_velocity, state_0.joint_qd)
-                else:
-                    wp.launch(
-                        _adaptive_interface_step,
-                        dim=1,
-                        inputs=[
-                            self._iterate_velocity,
-                            state_rigid.joint_qd,
-                            self._aitken_previous,
-                            self._aitken_weight,
-                            state_0.joint_qd,
-                            self.interface_residual,
-                            self._interface_active,
-                            self._interface_converged,
-                            self.interface_iterations,
-                            k,
-                            self._n_iters,
-                            self._velocity_atol,
-                            self._velocity_rtol,
-                            self._initial_relaxation,
-                            conditional,
-                        ],
-                        device=self._ancf.node_x.device,
-                    )
                 # The final raw rigid response is always accepted. Convergence
                 # changes the amount of work, never scales a physical wrench.
-                if reusing:
-                    wp.capture_if(self._interface_active, predict_pose, accept_response)
-                elif k + 1 == self._n_iters:
+                if k + 1 == self._n_iters:
                     accept_response()
-                elif conditional and (reusing or k >= 2):
+                elif conditional and k >= 2:
                     wp.capture_if(self._interface_active, predict_pose, accept_response)
                 else:
                     self._predict_pose(state_0, dt)
@@ -936,55 +640,12 @@ class InterfaceCouplerGS:
                 wp.copy(state_0.joint_q, state_rigid.joint_q)
                 wp.copy(state_0.joint_qd, state_rigid.joint_qd)
 
-            # ── convergence check (GPU→CPU, skipped when tol == 0) ────────
-            if self._tol > 0.0 and interface_body_indices is not None:
-                sp_new = state_0.body_q.numpy()[interface_body_indices, :3]
-                if sp_prev is not None:
-                    if float(np.max(np.abs(sp_new - sp_prev))) < self._tol:
-                        self._presave(state_0)
-                        return k + 1
-                sp_prev = sp_new
-
-        # Reuse one trial graph, including its conditional calibration loop.
-        # Unrolling trials duplicates every FEM solve even when branches are idle.
-        if reusing:
-            self._interface_iteration.zero_()
-
-            def reused_trial():
-                trial(0)
-                wp.launch(
-                    _advance_interface_iteration,
-                    dim=1,
-                    inputs=[self._interface_iteration],
-                    device=self._ancf.node_x.device,
-                )
-
-            wp.capture_while(self._interface_active, reused_trial)
-        else:
-            for k in range(self._n_iters):
-                if conditional and k >= (1 if reusing else 3):
-                    wp.capture_if(self._interface_active, lambda k=k: trial(k))
-                else:
-                    completed = trial(k)
-                    if completed is not None:
-                        return completed
-        if reusing:
-            wp.launch(
-                _save_corrected_increment,
-                dim=state_0.joint_qd.shape[0],
-                inputs=[
-                    state_0.joint_qd,
-                    self._corrected_velocity,
-                    self._previous_corrected,
-                    self._velocity_increment,
-                    self._interface_converged,
-                    self.interface_iterations,
-                    self.interface_totals,
-                ],
-                device=self._ancf.node_x.device,
-            )
-
-        elif self.adaptive:
+        for k in range(self._n_iters):
+            if conditional and k >= 3:
+                wp.capture_if(self._interface_active, lambda k=k: trial(k))
+            else:
+                trial(k)
+        if self.adaptive:
             wp.launch(
                 _save_interface_increment,
                 dim=state_0.joint_qd.shape[0],

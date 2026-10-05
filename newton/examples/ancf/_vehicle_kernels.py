@@ -145,20 +145,30 @@ _CONTACT_SPIKE_STRIDE = 4
 def gather_contact_spikes(
     node_x: wp.array[wp.vec3],  # ANCF Y-up, all envs flat
     n_nodes: int,  # nodes per tire, for the per-tire local index
-    ground_y: float,
-    vis_scale: float,
-    line_starts: wp.array[wp.vec3],  # Z-up output
-    line_ends: wp.array[wp.vec3],  # Z-up output
+    ground_y: float,  # ground level in ANCF Y-up
+    vis_scale: float,  # penetration amplification for visibility
+    stride: int,  # draw every ``stride``-th node of each tire (1 = every node)
+    up_axis: int,  # viewer up axis: 2 converts to Z-up, (x, y, z) -> (z, x, y); 1 keeps Y-up
+    line_starts: wp.array[wp.vec3],
+    line_ends: wp.array[wp.vec3],
 ):
-    """GPU-only contact visualization: a spike of height pen*vis_scale per sampled penetrating node."""
+    """GPU-only contact visualization: a spike of height pen*vis_scale per sampled penetrating node.
+
+    Every node emits a segment from its ground-plane footprint; a node that is not sampled or not
+    penetrating gets a zero-length (invisible) one.
+    """
     i = wp.tid()
     p = node_x[i]
-    base = wp.vec3(p[2], p[0], ground_y)
+    pen = ground_y - p[1]  # positive = inside ground
+    if up_axis == 2:
+        base = wp.vec3(p[2], p[0], ground_y)
+        tip = wp.vec3(base[0], base[1], base[2] + pen * vis_scale)
+    else:
+        base = wp.vec3(p[0], ground_y, p[2])
+        tip = wp.vec3(base[0], base[1] + pen * vis_scale, base[2])
     line_starts[i] = base
-    local = i % n_nodes
-    pen = ground_y - p[1]
-    if pen > 0.0 and local % _CONTACT_SPIKE_STRIDE == 0:
-        line_ends[i] = wp.vec3(base[0], base[1], base[2] + pen * vis_scale)
+    if pen > 0.0 and (i % n_nodes) % stride == 0:
+        line_ends[i] = tip
     else:
         line_ends[i] = base
 

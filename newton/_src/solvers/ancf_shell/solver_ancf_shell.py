@@ -51,6 +51,7 @@ from .kernels_assembly import (
     cavity_gas_law_circuit,
     compute_pressure_force_stiffness,
 )
+from .kernels_coarse import _to_double
 from .kernels_contact import (
     apply_ground_contact,
     apply_ground_contact_batched,
@@ -287,11 +288,6 @@ def _pcg_store_x(x_pad: wp.array[float], x_ext: wp.array[float], n_dof: int, n_d
     x_ext[tid] = x_pad[env * n_dof_pad + i]
 
 
-@wp.func
-def _to_double(value: float) -> wp.float64:
-    return wp.float64(value)
-
-
 @wp.kernel
 def _dot_tile_batched(
     a: wp.array[float],
@@ -468,7 +464,7 @@ class PcgSolverBatched:
         n_dof_pad = int(math.ceil(n_dof / 128) * 128)
         self._n_dof_pad = n_dof_pad
         # n_chunks: blocks per env in multi-block tile launches (N*n_chunks total blocks).
-        # Each block handles exactly TILE_PCG=128 DOFs → fills all SMs vs old dim=[N].
+        # Each block handles exactly TILE_PCG=128 DOFs → fills all SMs.
         self._n_chunks = n_dof_pad // int(TILE_PCG)
         if n_dof % 6 != 0:
             raise ValueError(f"PcgSolverBatched: n_dof={n_dof} is not a multiple of 6 (ANCF node DOFs)")
@@ -554,11 +550,12 @@ class PcgSolverBatched:
                 sweep_offsets.append(starts)
             self._sweep_offsets = wp.array(sweep_offsets, dtype=int, device=self.device)
             self._sweep_blocks = wp.array(sweep_blocks, dtype=int, device=self.device)
-            self._sweep_kernel = kernels_pcg.make_colored_sweep(self._n_dof_pad, len(counts))
             layout = kernels_pcg.packed_sweep_layout(
                 np.asarray(sweep_offsets), np.asarray(sweep_blocks), columns, nodes, counts, self.nnz
             )
-            if layout is not None:
+            if layout is None:
+                self._sweep_kernel = kernels_pcg.make_colored_sweep(self._n_dof_pad, len(counts))
+            else:
                 sources, neighbors, degrees, width, max_edges = layout
                 self._sweep_sources = wp.array(sources, dtype=int, device=self.device)
                 self._sweep_packed = wp.empty(self.n_envs * sources.size, dtype=float, device=self.device)
@@ -860,26 +857,32 @@ class PcgSolverBatched:
 class _CompileProgress:
     """Context manager that shows an ASCII spinner + elapsed time on one line.
 
+    Prints nothing unless ``enabled`` (see :paramref:`SolverANCFShell.verbose`).
+
     Usage::
-        with _CompileProgress("Building mass matrix"):
+        with _CompileProgress("Building mass matrix", enabled=True):
             wp.launch(kernel, ...)
             wp.synchronize_device(dev)
     """
 
     _FRAMES = r"|/-\\"
 
-    def __init__(self, label: str, interval: float = 0.15):
+    def __init__(self, label: str, enabled: bool = False, interval: float = 0.15):
         self._label = label
+        self._enabled = enabled
         self._interval = interval
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def __enter__(self):
         self._t0 = time.perf_counter()
-        self._thread.start()
+        if self._enabled:
+            self._thread.start()
         return self
 
     def __exit__(self, *_):
+        if not self._enabled:
+            return
         self._stop.set()
         self._thread.join()
         elapsed = time.perf_counter() - self._t0
@@ -900,9 +903,12 @@ class _CompileProgress:
 # ---------------------------------------------------------------------------
 # HHT parameters
 # ---------------------------------------------------------------------------
-_HHT_ALPHA = -0.2
-_HHT_BETA = (1.0 - _HHT_ALPHA) ** 2 / 4.0  # 0.36
-_HHT_GAMMA = (1.0 - 2.0 * _HHT_ALPHA) / 2.0  # 0.70
+HHT_ALPHA = -0.2
+HHT_BETA = (1.0 - HHT_ALPHA) ** 2 / 4.0  # 0.36
+HHT_GAMMA = (1.0 - 2.0 * HHT_ALPHA) / 2.0  # 0.70
+# Imported by solver_ancf_shell_rigid.py under the old names.
+_HHT_ALPHA = HHT_ALPHA
+_HHT_GAMMA = HHT_GAMMA
 
 
 # ---------------------------------------------------------------------------
@@ -911,7 +917,7 @@ _HHT_GAMMA = (1.0 - 2.0 * _HHT_ALPHA) / 2.0  # 0.70
 
 
 @wp.kernel
-def _hht_predict(
+def hht_predict(
     x_n: wp.array[wp.vec3],
     xd_n: wp.array[wp.vec3],
     xdd_n: wp.array[wp.vec3],
@@ -929,7 +935,7 @@ def _hht_predict(
 
 
 @wp.kernel
-def _hht_kinematic(
+def hht_kinematic(
     x_pred: wp.array[wp.vec3],
     xd_pred: wp.array[wp.vec3],
     xdd_new: wp.array[wp.vec3],  # current NR iterate a_{n+1}
@@ -1033,14 +1039,14 @@ def _build_dirichlet_nnz_mask_blk(
 
 
 @wp.kernel
-def _mask_dof(mask: wp.array[float], arr: wp.array[float]):
+def mask_dof(mask: wp.array[float], arr: wp.array[float]):
     """arr[i] *= mask[i] — zero the Dirichlet rows of a DOF vector."""
     i = wp.tid()
     arr[i] = arr[i] * mask[i]
 
 
 @wp.kernel
-def _apply_dirichlet_to_bsr(mask_nnz: wp.array[float], values: wp.array[float]):
+def apply_dirichlet_to_bsr(mask_nnz: wp.array[float], values: wp.array[float]):
     """Eliminate Dirichlet rows/columns from K_eff in place.
 
     mask_nnz: +1 keep, 0 zero (row or column pinned), -1 pinned diagonal → 1.
@@ -1121,7 +1127,7 @@ def _accum_nr_residual_sq(
 
 
 @wp.kernel
-def _build_residual(
+def build_residual(
     # M · a_{n+1}  (mass-weighted acceleration)
     M_a: wp.array[float],  # (n_dof,) M·a_new
     # (1+alpha)*f_int(x_{n+1})
@@ -1141,7 +1147,7 @@ def _build_residual(
 
 
 @wp.kernel
-def _flatten_vec3_pair(
+def flatten_vec3_pair(
     xdd: wp.array[wp.vec3],
     Ddd: wp.array[wp.vec3],
     flat: wp.array[float],  # (n_nodes*6,)
@@ -1179,19 +1185,19 @@ def _zero_eas_alpha(eas_alpha: wp.array2d[float]):
 
 
 @wp.kernel
-def _negate(src: wp.array[float], dst: wp.array[float]):
+def negate(src: wp.array[float], dst: wp.array[float]):
     i = wp.tid()
     dst[i] = -src[i]
 
 
 @wp.kernel
-def _pointwise_scale(src: wp.array[float], s: float, dst: wp.array[float]):
+def pointwise_scale(src: wp.array[float], s: float, dst: wp.array[float]):
     i = wp.tid()
     dst[i] = src[i] * s
 
 
 @wp.kernel
-def _pointwise_mul(
+def pointwise_mul(
     a: wp.array[float],
     b: wp.array[float],
     out: wp.array[float],
@@ -1232,6 +1238,8 @@ class SolverANCFShell(SolverBase):
         pcg_max_iter: PCG iterations per Newton-Raphson iteration.
         n_envs: Number of independent tires solved as one batch (flat ``[n_envs * per_env]`` arrays).
         thickness_gp: Through-thickness Gauss points, 3 or 5.
+        verbose: Print a progress spinner to stdout during kernel compilation
+            and graph capture.
     """
 
     def __init__(
@@ -1247,10 +1255,12 @@ class SolverANCFShell(SolverBase):
         pcg_max_iter: int = 200,
         n_envs: int = 1,
         thickness_gp: int = 3,
+        verbose: bool = False,
     ):
         super().__init__(model)
         self.ancf = ancf_model
         self.n_envs = n_envs
+        self.verbose = bool(verbose)
 
         self.ground_z = ground_z
         # Optional heightfield / soil terrain (terrain_scm.TerrainSCM); set before capture_graph().
@@ -1266,12 +1276,6 @@ class SolverANCFShell(SolverBase):
         if thickness_gp not in (3, 5):
             raise ValueError(f"thickness_gp must be 3 or 5, got {thickness_gp}")
         self.thickness_gp = int(thickness_gp)
-
-        # When True, _step_batched applies the Dirichlet (bead) handling of
-        # _step_single: predictor override, row elimination and zeroed NR
-        # acceleration update at pinned nodes.  Must be set BEFORE
-        # capture_graph() so the flag is baked into the captured CUDA graph.
-        self._fix_dirichlet_in_batched: bool = True
 
         n = ancf_model.n_nodes
         ne = ancf_model.n_elems
@@ -1328,6 +1332,11 @@ class SolverANCFShell(SolverBase):
         self._cav_centroid_parts = wp.zeros((N, (n + chunk - 1) // chunk), dtype=wp.vec3d, device=dev)
         self._cav_volume_parts = wp.zeros((N, (ne + chunk - 1) // chunk), dtype=wp.float64, device=dev)
         self._cav_centre = wp.zeros(N, dtype=wp.vec3, device=dev)
+        # Single-block cavity reduction and stiffness block size, selected by
+        # set_coupled_launch_config(); None / 256 keep the chunked default path.
+        self._cavity_reduction = None
+        self._cavity_block_dim = 0
+        self._stiffness_block_dim = 256
         self.cav_p = wp.zeros(N, dtype=float, device=dev)  # absolute pressure
         self.cav_Kgas = wp.zeros(N, dtype=float, device=dev)  # m·R·T (CTIS control)
         self.cav_pbuild = wp.zeros(N, dtype=float, device=dev)  # build pressure
@@ -1341,9 +1350,9 @@ class SolverANCFShell(SolverBase):
         self.gp_bs0 = wp.zeros((N * ne, 24, n_gp_total), dtype=float, device=dev)
         self.gp_b13 = wp.zeros((N * ne, 24, n_gp_total), dtype=float, device=dev)
         self.gp_b23 = wp.zeros((N * ne, 24, n_gp_total), dtype=float, device=dev)
+        self.gp_force = wp.zeros((N * ne, 24, n_gp_total), dtype=float, device=dev)
         # Per-element scratch of the single-env kernel compute_element_forces_stiffness
         # (init sparsity build and the N=1 step), which keeps the element-major layout.
-        self.gp_force = wp.zeros((N * ne, 24, n_gp_total), dtype=float, device=dev)
         self.gp_bd_single = wp.zeros((ne, 24, 3), dtype=float, device=dev)
         self.gp_bs0_single = wp.zeros((ne, 24), dtype=float, device=dev)
         self.gp_b13_single = wp.zeros((ne, 24), dtype=float, device=dev)
@@ -1496,12 +1505,30 @@ class SolverANCFShell(SolverBase):
         :meth:`capture_graph`; the CTIS amounts still come from :meth:`set_cavity`."""
         self.cav_circuit = bool(circuit)
 
+    def set_coupled_launch_config(self, stiffness_block_dim: int = 64, cavity_block_dim: int = 128) -> None:
+        """Select launch shapes for the coupled Newton substep.
+
+        :class:`CoupledShellNewton` re-evaluates the tangent and cavity volume
+        inside every interface iteration, so the cavity volume is reduced in one
+        block per tire and the element tangent uses a smaller block. Call before
+        :meth:`capture_graph`.
+
+        Args:
+            stiffness_block_dim: CUDA block size for the element tangent assembly.
+            cavity_block_dim: CUDA block size of the single-block cavity reduction.
+        """
+        self._cavity_reduction = kernels_gather.make_cavity_reduction(
+            self.ancf.n_nodes, self.ancf.n_elems, int(cavity_block_dim)
+        )
+        self._cavity_block_dim = int(cavity_block_dim)
+        self._stiffness_block_dim = int(stiffness_block_dim)
+
     def _update_cavity_volume(self) -> None:
-        if getattr(self, "_cavity_reduction", None) is not None:
+        if self._cavity_reduction is not None:
             wp.launch(
                 self._cavity_reduction,
-                dim=(self.n_envs, 128),
-                block_dim=128,
+                dim=(self.n_envs, self._cavity_block_dim),
+                block_dim=self._cavity_block_dim,
                 inputs=[self.node_x, self.ancf.elem_nodes, self.elem_psign, self._cav_centre, self.cav_V],
                 device=self.device,
             )
@@ -1622,8 +1649,8 @@ class SolverANCFShell(SolverBase):
                 self.node_xdd,
                 self.node_Ddd,
                 dt,
-                _HHT_BETA,
-                _HHT_GAMMA,
+                HHT_BETA,
+                HHT_GAMMA,
                 self.x_pred,
                 self.xd_pred,
                 self.D_pred,
@@ -1642,7 +1669,7 @@ class SolverANCFShell(SolverBase):
 
         self.elem_f.zero_()
         self.elem_K.zero_()
-        with _CompileProgress(f"stiffness kernel  ({ne} elem)"):
+        with _CompileProgress(f"stiffness kernel  ({ne} elem)", enabled=self.verbose):
             wp.launch(
                 compute_element_forces_stiffness,
                 dim=ne,
@@ -1697,7 +1724,7 @@ class SolverANCFShell(SolverBase):
 
         # Node-block (6x6) CSR derived from the scalar sparsity; the solve, the in-place
         # refill and the Dirichlet mask all use this layout (see kernels_assembly).
-        with _CompileProgress("scatter map"):
+        with _CompileProgress("scatter map", enabled=self.verbose):
             self.blk_offsets, self.blk_columns, self.blk_scatter_map, self._nnzb = build_block_structure(
                 self.ancf.elem_nodes, K_eff, self.ancf.n_nodes, dev
             )
@@ -1749,7 +1776,7 @@ class SolverANCFShell(SolverBase):
         """
         dev = self.device
         ne = self.ancf.n_elems
-        with _CompileProgress(f"lumped mass  ({ne} elem)"):
+        with _CompileProgress(f"lumped mass  ({ne} elem)", enabled=self.verbose):
             wp.launch(
                 compute_lumped_mass,
                 dim=ne,
@@ -1768,12 +1795,9 @@ class SolverANCFShell(SolverBase):
     def _precompute_rest_jacobians(self):
         """Compute per-element rest-configuration Jacobian inverses + EAS T0 basis once.
 
-        compute_element_forces_stiffness[_batched_gp] used to recompute this
-        block from scratch on every call (every NR iteration, and in the
-        GP-parallel batched kernel, redundantly again per Gauss-point thread
-        of the same element) even though it depends only on the rest
-        configuration (node_x0/node_D0) and fiber angle, never the current
-        deformed state.  See compute_rest_jacobians's docstring.
+        These depend only on the rest configuration (node_x0/node_D0) and the
+        fiber angle, never on the deformed state, so they are evaluated once
+        here instead of in every force/stiffness call. See compute_rest_jacobians.
         """
         dev = self.device
         ne = self.ancf.n_elems
@@ -1817,7 +1841,7 @@ class SolverANCFShell(SolverBase):
         n = self.ancf.n_nodes
         ne = self.ancf.n_elems
         n_dof = n * 6
-        beta, gamma = _HHT_BETA, _HHT_GAMMA
+        beta, gamma = HHT_BETA, HHT_GAMMA
         self.elem_f.zero_()
         self.elem_K.zero_()
         wp.launch(
@@ -1936,7 +1960,7 @@ class SolverANCFShell(SolverBase):
         wp.launch(
             compute_element_K_from_B,
             dim=self.n_envs * self.ancf.n_elems * 36,
-            block_dim=getattr(self, "_stiffness_block_dim", 256),
+            block_dim=self._stiffness_block_dim,
             inputs=[
                 self.gp_bd,
                 self.gp_bs0,
@@ -1958,7 +1982,7 @@ class SolverANCFShell(SolverBase):
         n_dof = n * 6
         N = self.n_envs
         Nn, Nne, Nndof = N * n, N * ne, N * n_dof
-        beta, gamma = _HHT_BETA, _HHT_GAMMA
+        beta, gamma = HHT_BETA, HHT_GAMMA
         # elem_K needs no zeroing: compute_element_K_from_B assigns every entry.
         wp.launch(
             compute_element_forces_stiffness_batched_gp,
@@ -2086,9 +2110,9 @@ class SolverANCFShell(SolverBase):
         dev = self.device
         n = self.ancf.n_nodes
         n_dof = n * 6
-        alpha = _HHT_ALPHA
-        beta = _HHT_BETA
-        gamma = _HHT_GAMMA
+        alpha = HHT_ALPHA
+        beta = HHT_BETA
+        gamma = HHT_GAMMA
 
         wp.copy(self.global_f_int0, self.global_f_int)
         wp.copy(self.global_f_ext0, self.global_f_ext)
@@ -2099,14 +2123,14 @@ class SolverANCFShell(SolverBase):
         wp.launch(_zero_eas_alpha, dim=self.ancf.n_elems, inputs=[self.ancf.elem_eas_alpha], device=dev)
 
         wp.launch(
-            _hht_predict,
+            hht_predict,
             dim=n,
             inputs=[self.node_x, self.node_xd, self.node_xdd, dt, beta, gamma],
             outputs=[self.x_pred, self.xd_pred],
             device=dev,
         )
         wp.launch(
-            _hht_predict,
+            hht_predict,
             dim=n,
             inputs=[self.node_D, self.node_Dd, self.node_Ddd, dt, beta, gamma],
             outputs=[self.D_pred, self.Dd_pred],
@@ -2126,14 +2150,14 @@ class SolverANCFShell(SolverBase):
 
         for _nr in range(self.nr_max_iter):
             wp.launch(
-                _hht_kinematic,
+                hht_kinematic,
                 dim=n,
                 inputs=[self.x_pred, self.xd_pred, self.node_xdd, dt, beta, gamma],
                 outputs=[self.node_x, self.node_xd],
                 device=dev,
             )
             wp.launch(
-                _hht_kinematic,
+                hht_kinematic,
                 dim=n,
                 inputs=[self.D_pred, self.Dd_pred, self.node_Ddd, dt, beta, gamma],
                 outputs=[self.node_D, self.node_Dd],
@@ -2142,11 +2166,11 @@ class SolverANCFShell(SolverBase):
 
             self._evaluate_forces_single(dt, update_eas=True)
 
-            wp.launch(_flatten_vec3_pair, dim=n, inputs=[self.node_xdd, self.node_Ddd, self.a_flat], device=dev)
-            wp.launch(_pointwise_mul, dim=n_dof, inputs=[self.lumped_mass, self.a_flat, self.M_a], device=dev)
+            wp.launch(flatten_vec3_pair, dim=n, inputs=[self.node_xdd, self.node_Ddd, self.a_flat], device=dev)
+            wp.launch(pointwise_mul, dim=n_dof, inputs=[self.lumped_mass, self.a_flat, self.M_a], device=dev)
 
             wp.launch(
-                _build_residual,
+                build_residual,
                 dim=n_dof,
                 inputs=[
                     self.M_a,
@@ -2160,7 +2184,7 @@ class SolverANCFShell(SolverBase):
                 device=dev,
             )
             if self._dirichlet_idx is not None:
-                wp.launch(_mask_dof, dim=n_dof, inputs=[self._dirichlet_dof_mask, self.residual], device=dev)
+                wp.launch(mask_dof, dim=n_dof, inputs=[self._dirichlet_dof_mask, self.residual], device=dev)
 
             if self.debug_residuals:
                 wp.launch(_zero_nr_slot, dim=1, inputs=[self._nr_res_hist, _nr, self.nr_max_iter], device=dev)
@@ -2174,7 +2198,7 @@ class SolverANCFShell(SolverBase):
             self._update_K_eff_inplace_batched(scale_K_Keff)
 
             wp.launch(
-                _pointwise_scale,
+                pointwise_scale,
                 dim=self.K_contact_diag.shape[0],
                 inputs=[self.K_contact_diag, float(1.0 + alpha), self.K_contact_diag],
                 device=dev,
@@ -2194,14 +2218,14 @@ class SolverANCFShell(SolverBase):
             )
             if self._dirichlet_idx is not None:
                 wp.launch(
-                    _apply_dirichlet_to_bsr,
+                    apply_dirichlet_to_bsr,
                     dim=self._nnz,
                     inputs=[self._dirichlet_nnz_mask, self.bsr_values_batched],
                     device=dev,
                 )
 
             self.da.zero_()
-            wp.launch(_negate, dim=n_dof, inputs=[self.residual, self.neg_R], device=dev)
+            wp.launch(negate, dim=n_dof, inputs=[self.residual, self.neg_R], device=dev)
             self.pcg.solve(
                 self.blk_offsets,
                 self.blk_columns,
@@ -2219,14 +2243,14 @@ class SolverANCFShell(SolverBase):
             )
 
         wp.launch(
-            _hht_kinematic,
+            hht_kinematic,
             dim=n,
             inputs=[self.x_pred, self.xd_pred, self.node_xdd, dt, beta, gamma],
             outputs=[self.node_x, self.node_xd],
             device=dev,
         )
         wp.launch(
-            _hht_kinematic,
+            hht_kinematic,
             dim=n,
             inputs=[self.D_pred, self.Dd_pred, self.node_Ddd, dt, beta, gamma],
             outputs=[self.node_D, self.node_Dd],
@@ -2244,9 +2268,9 @@ class SolverANCFShell(SolverBase):
         N = self.n_envs
         Nn = N * n
         Nndof = N * n_dof
-        alpha = _HHT_ALPHA
-        beta = _HHT_BETA
-        gamma = _HHT_GAMMA
+        alpha = HHT_ALPHA
+        beta = HHT_BETA
+        gamma = HHT_GAMMA
 
         wp.copy(self.global_f_int0, self.global_f_int)
         wp.copy(self.global_f_ext0, self.global_f_ext)
@@ -2255,22 +2279,20 @@ class SolverANCFShell(SolverBase):
             self.terrain.update_plastic(self.node_x, self.node_xd, self.kn, dt)
 
         wp.launch(
-            _hht_predict,
+            hht_predict,
             dim=Nn,
             inputs=[self.node_x, self.node_xd, self.node_xdd, dt, beta, gamma],
             outputs=[self.x_pred, self.xd_pred],
             device=dev,
         )
         wp.launch(
-            _hht_predict,
+            hht_predict,
             dim=Nn,
             inputs=[self.node_D, self.node_Dd, self.node_Ddd, dt, beta, gamma],
             outputs=[self.D_pred, self.Dd_pred],
             device=dev,
         )
-        # Dirichlet handling in the batched path can be switched off with
-        # _fix_dirichlet_in_batched (default on).
-        _dirichlet = self._fix_dirichlet_in_batched and self._dirichlet_idx is not None
+        _dirichlet = self._dirichlet_idx is not None
         if _dirichlet:
             self._launch_dirichlet_pred_override(dt)
 
@@ -2279,14 +2301,14 @@ class SolverANCFShell(SolverBase):
 
         for _nr in range(self.nr_max_iter):
             wp.launch(
-                _hht_kinematic,
+                hht_kinematic,
                 dim=Nn,
                 inputs=[self.x_pred, self.xd_pred, self.node_xdd, dt, beta, gamma],
                 outputs=[self.node_x, self.node_xd],
                 device=dev,
             )
             wp.launch(
-                _hht_kinematic,
+                hht_kinematic,
                 dim=Nn,
                 inputs=[self.D_pred, self.Dd_pred, self.node_Ddd, dt, beta, gamma],
                 outputs=[self.node_D, self.node_Dd],
@@ -2295,11 +2317,11 @@ class SolverANCFShell(SolverBase):
 
             self._evaluate_forces_batched(dt)
 
-            wp.launch(_flatten_vec3_pair, dim=Nn, inputs=[self.node_xdd, self.node_Ddd, self.a_flat], device=dev)
-            wp.launch(_pointwise_mul, dim=Nndof, inputs=[self.lumped_mass_tiled, self.a_flat, self.M_a], device=dev)
+            wp.launch(flatten_vec3_pair, dim=Nn, inputs=[self.node_xdd, self.node_Ddd, self.a_flat], device=dev)
+            wp.launch(pointwise_mul, dim=Nndof, inputs=[self.lumped_mass_tiled, self.a_flat, self.M_a], device=dev)
 
             wp.launch(
-                _build_residual,
+                build_residual,
                 dim=Nndof,
                 inputs=[
                     self.M_a,
@@ -2313,7 +2335,7 @@ class SolverANCFShell(SolverBase):
                 device=dev,
             )
             if _dirichlet:
-                wp.launch(_mask_dof, dim=Nndof, inputs=[self._dirichlet_dof_mask, self.residual], device=dev)
+                wp.launch(mask_dof, dim=Nndof, inputs=[self._dirichlet_dof_mask, self.residual], device=dev)
 
             if self.debug_residuals:
                 wp.launch(_zero_nr_slot, dim=N, inputs=[self._nr_res_hist, _nr, self.nr_max_iter], device=dev)
@@ -2327,7 +2349,7 @@ class SolverANCFShell(SolverBase):
             self._update_K_eff_inplace_batched(scale_K_Keff)
 
             wp.launch(
-                _pointwise_scale,
+                pointwise_scale,
                 dim=self.K_contact_diag.shape[0],
                 inputs=[self.K_contact_diag, float(1.0 + alpha), self.K_contact_diag],
                 device=dev,
@@ -2347,14 +2369,14 @@ class SolverANCFShell(SolverBase):
             )
             if _dirichlet:
                 wp.launch(
-                    _apply_dirichlet_to_bsr,
+                    apply_dirichlet_to_bsr,
                     dim=N * self._nnz,
                     inputs=[self._dirichlet_nnz_mask, self.bsr_values_batched],
                     device=dev,
                 )
 
             self.da.zero_()
-            wp.launch(_negate, dim=Nndof, inputs=[self.residual, self.neg_R], device=dev)
+            wp.launch(negate, dim=Nndof, inputs=[self.residual, self.neg_R], device=dev)
             self.pcg.solve(
                 self.blk_offsets,
                 self.blk_columns,
@@ -2372,14 +2394,14 @@ class SolverANCFShell(SolverBase):
             )
 
         wp.launch(
-            _hht_kinematic,
+            hht_kinematic,
             dim=Nn,
             inputs=[self.x_pred, self.xd_pred, self.node_xdd, dt, beta, gamma],
             outputs=[self.node_x, self.node_xd],
             device=dev,
         )
         wp.launch(
-            _hht_kinematic,
+            hht_kinematic,
             dim=Nn,
             inputs=[self.D_pred, self.Dd_pred, self.node_Ddd, dt, beta, gamma],
             outputs=[self.node_D, self.node_Dd],
@@ -2470,25 +2492,17 @@ class SolverANCFShell(SolverBase):
 
         # Precompute lumped_mass_scaled = lumped_mass / (β·dt²).
         # Constant for fixed dt — outside the captured region (read-only inside).
-        scale_M = 1.0 / (_HHT_BETA * dt * dt)
-        if N > 1:
-            wp.launch(
-                _pointwise_scale,
-                dim=N * n_dof,
-                inputs=[self.lumped_mass_tiled, float(scale_M), self.lumped_mass_scaled_tiled],
-                device=dev,
-            )
-        else:
-            wp.launch(
-                _pointwise_scale,
-                dim=n_dof,
-                inputs=[self.lumped_mass, float(scale_M), self.lumped_mass_scaled],
-                device=dev,
-            )
+        scale_M = 1.0 / (HHT_BETA * dt * dt)
+        wp.launch(
+            pointwise_scale,
+            dim=N * n_dof,
+            inputs=[self.lumped_mass_tiled, float(scale_M), self.lumped_mass_scaled_tiled],
+            device=dev,
+        )
         wp.synchronize_device(dev)
 
         label = f"CUDA graph capture  ({N} env × {self.nr_max_iter} NR × {self.pcg.max_iters} PCG, dt={dt:.2e} s)"
-        with _CompileProgress(label):
+        with _CompileProgress(label, enabled=self.verbose):
             wp.capture_begin(device=dev)
             self.step(None, None, None, None, dt)
             self._graph = wp.capture_end(device=dev)

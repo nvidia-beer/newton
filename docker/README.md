@@ -186,7 +186,8 @@ ANCF-specific coupling lives in `newton/_src/solvers/ancf_shell/`: `coupling.py`
 iteration and state snapshots, `kernels_coupling.py` holds its shared device kernels, and `schur.py`
 / `coupled_newton.py` provide the condensed solves. Vehicle setup and MuJoCo callbacks remain in
 `newton/examples/ancf/_vehicle_simulation.py`. The public `newton.solvers.InterfaceCouplerGS` import
-is unchanged; the experimental proxy/ADMM framework remains separate.
+is unchanged; the experimental proxy/ADMM framework remains separate. The mathematics of the
+interface iterations and the reasons for the default are in `newton/_src/solvers/ancf_shell/COUPLING.md`.
 
 Full-vehicle examples 03 (flat ground), 05 (rigid terrain), and 07 (telemetry)
 default to `coupling-method=auto` in both the Docker presets and the Python CLI.
@@ -211,13 +212,14 @@ per joint correction; larger systems retain `pcg-iters`. The normal `gs-iters`
 budget gains three reserve evaluations when the interface residual remains
 above 0.025. The usual absolute/relative convergence test is unchanged, and
 exhausting the budget still does not imply convergence. A singular rigid mass
-matrix retains partitioned Schur coupling and the original linear budget.
+matrix, or more than 32 rigid dofs, falls back to adaptive Aitken coupling.
 
 The implicit solver, an even number of substeps, and at least three `gs-iters`
 are required. Keep the default six-evaluation budget for the validated vehicle
 profiles; `auto` retains partitioned coupling with smaller budgets, which have
-not passed the moving-vehicle acceptance checks. Select
-`coupling-method=schur` to use complete tire solves between interface corrections.
+not passed the moving-vehicle acceptance checks. Models coupled Newton cannot
+handle (for example the Superjeep suspension's dof count) run adaptive Aitken
+coupling automatically.
 Acceptance probes record the active method, inner iteration budget, and whether
 each counter denotes a joint Newton evaluation or a complete shell step.
 

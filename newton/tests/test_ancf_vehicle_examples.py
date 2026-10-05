@@ -171,7 +171,7 @@ class TestANCFVehicleExamples(unittest.TestCase):
     def test_sand_preserves_separate_coupling_default(self):
         module = importlib.import_module("newton.examples.ancf.example_vehicle_ancf_sand")
         parser = module.Example.create_parser()
-        self.assertEqual(parser.parse_args([]).coupling_method, "aitken")
+        self.assertEqual(parser.parse_args([]).coupling_method, "adaptive")
         self.assertEqual(parser.parse_args(["--coupling-method", "coupled-newton"]).coupling_method, "coupled-newton")
 
 

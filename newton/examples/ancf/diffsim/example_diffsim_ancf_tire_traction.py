@@ -371,10 +371,31 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         parser.set_defaults(num_frames=1600)
-        parser.add_argument("--reference-mu", type=float, default=0.65, help="Synthetic target friction, 0.15–1.0.")
-        parser.add_argument("--initial-mu", type=float, default=0.2, help="Initial friction estimate, 0.15–1.0.")
-        parser.add_argument("--train", action=argparse.BooleanOptionalAction, default=True)
-        parser.add_argument("--report", type=Path, help="Save the learned friction and validation report as JSON.")
+        parser.add_argument(
+            "--reference-mu",
+            type=float,
+            default=0.65,
+            help="Synthetic ground friction used only to generate observations, 0.15–1.0.",
+        )
+        parser.add_argument(
+            "--initial-mu",
+            type=float,
+            default=0.2,
+            help="Initial friction estimate, 0.15–1.0; pressure, stiffness and carried mass remain fixed.",
+        )
+        parser.add_argument(
+            "--train",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Fit friction with implicit trajectory derivatives, then validate a different spin/brake sequence; "
+            "--no-train shows the initial mismatch until Learn friction is pressed.",
+        )
+        parser.add_argument(
+            "--report",
+            type=Path,
+            help="Save a .json report with synthetic provenance, commands, accepted losses and independent validation "
+            "errors; this is not a calibrated telemetry preset.",
+        )
         return parser
 
 

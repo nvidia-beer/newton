@@ -44,3 +44,27 @@ def restore_arrays(saved: dict[str, np.ndarray], live: dict[str, wp.array]) -> N
     """Assign every snapshot in ``saved`` back to the array of the same name in ``live``."""
     for name, value in saved.items():
         live[name].assign(value)
+
+
+def reset_ancf_state(solver, ancf_model, node_x: np.ndarray, node_D: np.ndarray) -> None:
+    """Put a shell solver back at rest after a warm-up step.
+
+    Positions and directors come from ``node_x`` / ``node_D``; every velocity,
+    acceleration, force and EAS array is zeroed.  ``set_cavity(p, p)`` gives
+    p_gauge = 0 at V_ref, so the reference configuration has no internal force.
+    """
+    solver.node_x.assign(node_x)
+    solver.node_D.assign(node_D)
+    for array in (
+        solver.node_xd,
+        solver.node_xdd,
+        solver.node_Dd,
+        solver.node_Ddd,
+        solver.global_f_int,
+        solver.global_f_int0,
+        solver.global_f_ext,
+        solver.global_f_ext0,
+        solver.node_f_ext_persistent,
+        ancf_model.elem_eas_alpha,
+    ):
+        array.zero_()

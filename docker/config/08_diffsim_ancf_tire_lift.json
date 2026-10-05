@@ -11,15 +11,6 @@
     "ground": "telemetry",
     "pressure-range": null
   },
-  "arg_help": {
-    "target-height": "Axle height [m]; null generates a synthetic target inside the numerically checked reachable range.",
-    "load": "Additional spindle load [N]; null uses the vehicle asset's estimated chassis share per wheel.",
-    "train": "Start pressure learning automatically (or fit stiffness with CSV); false starts a manual preview.",
-    "calibration-csv": "Static measurements with explicit nominal pressure, additional load, axle height, uncertainty and train/validation split.",
-    "export-config": "New vehicle_telemetry replay JSON, plus a provenance report; exported after convergence.",
-    "ground": "telemetry keeps 07 contact settings; firm doubles flat contact stiffness and damping. These are compliance experiments, not soil or uneven terrain.",
-    "pressure-range": "null selects tested 0.25–8 PSI for the demonstration, or source 07 limits for CSV/export. Set telemetry explicitly for the original Warthog 2–4 PSI comparison."
-  },
   "env": {
     "OPENBLAS_NUM_THREADS": "1"
   }

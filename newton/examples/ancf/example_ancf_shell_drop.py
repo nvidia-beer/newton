@@ -33,7 +33,8 @@ import warp as wp
 import newton
 import newton.examples
 from newton.examples.ancf._ancf_viz import material_row, quad_triangles
-from newton.examples.ancf._capture_utils import try_capture
+from newton.examples.ancf._capture_utils import reset_ancf_state, try_capture
+from newton.examples.ancf._vehicle_kernels import gather_contact_spikes
 from newton.solvers import SolverANCFShell, isotropic_ancf_material, load_ancf_tire_usd
 
 # Baked by third_party/newton-tire-tool/scripts/bake_tire.py — the tire mesh
@@ -45,32 +46,6 @@ from newton.solvers import SolverANCFShell, isotropic_ancf_material, load_ancf_t
 def _world_positions(local: wp.array[wp.vec3], origins: wp.array[wp.vec3], n_nodes: int, world: wp.array[wp.vec3]):
     i = wp.tid()
     world[i] = local[i] + origins[i // n_nodes]
-
-
-@wp.kernel
-def _gather_contact_spikes(
-    node_x: wp.array[wp.vec3],  # ANCF Y-up, all envs flat
-    ground_y: float,
-    vis_scale: float,
-    line_starts: wp.array[wp.vec3],
-    line_ends: wp.array[wp.vec3],
-):
-    """GPU-only contact visualization: a spike of height pen*vis_scale per penetrating node.
-
-    The model here is built Y-up (``up_axis=newton.Axis.Y``), so unlike the
-    Z-up viewers used by ``example_ancf_rigid_mujoco_tires`` /
-    ``example_vehicle_ancf_tires``, no axis conversion is needed.
-    """
-    i = wp.tid()
-    p = node_x[i]
-    pen = ground_y - p[1]
-    base = wp.vec3(p[0], ground_y, p[2])
-    if pen > 0.0:
-        line_starts[i] = base
-        line_ends[i] = wp.vec3(base[0], base[1] + pen * vis_scale, base[2])
-    else:
-        line_starts[i] = base
-        line_ends[i] = base
 
 
 class Example:
@@ -283,18 +258,7 @@ class Example:
         self.solver.step(None, None, None, None, _dt)
         wp.synchronize_device(_dev)
         # Restore state after pre-warm
-        self.solver.node_x.assign(local_x)
-        self.solver.node_xd.zero_()
-        self.solver.node_xdd.zero_()
-        self.solver.node_D.assign(np.tile(self.ancf_model.node_D0.numpy(), (n_envs, 1)))
-        self.solver.node_Dd.zero_()
-        self.solver.node_Ddd.zero_()
-        self.solver.global_f_ext.zero_()
-        self.solver.global_f_ext0.zero_()
-        self.solver.global_f_int.zero_()
-        self.solver.global_f_int0.zero_()
-        self.solver.node_f_ext_persistent.zero_()
-        self.ancf_model.elem_eas_alpha.zero_()
+        reset_ancf_state(self.solver, self.ancf_model, local_x, np.tile(self.ancf_model.node_D0.numpy(), (n_envs, 1)))
 
         def frame():
             for _ in range(self.sim_substeps):
@@ -430,10 +394,20 @@ class Example:
         self.viewer.begin_frame(self.sim_time)
         # All tires render through the standard model pipeline (particles + tris).
         self.viewer.log_state(self.state_0)
+        # The model is built Y-up (``up_axis=newton.Axis.Y``), so the spikes stay in ANCF coordinates.
         wp.launch(
-            _gather_contact_spikes,
+            gather_contact_spikes,
             dim=self._n_envs * self._n_nodes,
-            inputs=[self._node_x(), 0.0, self._contact_vis_scale, self._contact_line_s, self._contact_line_e],
+            inputs=[
+                self._node_x(),
+                self._n_nodes,
+                0.0,
+                self._contact_vis_scale,
+                1,
+                1,
+                self._contact_line_s,
+                self._contact_line_e,
+            ],
             device="cuda:0",
         )
         self.viewer.log_lines("contact_spikes", self._contact_line_s, self._contact_line_e, colors=(0.0, 1.0, 1.0))

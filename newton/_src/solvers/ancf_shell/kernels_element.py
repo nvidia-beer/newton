@@ -587,7 +587,7 @@ def _beta_transform_shear(e_d: wp.vec3, e_s: wp.vec3, b: wp.mat33) -> wp.vec3:
 
 
 # ---------------------------------------------------------------------------
-# Lumped mass kernel  (replaces the old consistent-mass 24×24 kernel)
+# Lumped mass kernel
 # The element force/stiffness kernels live in kernels_stiffness.py (separate
 # compile unit so the lumped-mass kernel here doesn't block their compilation).
 # ---------------------------------------------------------------------------

@@ -59,7 +59,8 @@ from newton.examples.ancf._ancf_viz import (
     quad_triangles,
     ring_segments,
 )
-from newton.examples.ancf._capture_utils import restore_arrays, snapshot_arrays, try_capture
+from newton.examples.ancf._capture_utils import reset_ancf_state, restore_arrays, snapshot_arrays, try_capture
+from newton.examples.ancf._vehicle_kernels import gather_contact_spikes
 from newton.examples.ancf._vehicle_usd import VehicleUSD, find_body
 from newton.solvers import (
     SolverANCFShellRigid,
@@ -340,33 +341,6 @@ def _apply_vertical_load(
     )
 
 
-@wp.kernel
-def _gather_contact_spikes(
-    node_x: wp.array[wp.vec3],  # ANCF Y-up, all envs flat
-    ground_y: float,  # ground level in ANCF Y-up (= 0.0)
-    vis_scale: float,  # penetration amplification for visibility
-    line_starts: wp.array[wp.vec3],  # Z-up output
-    line_ends: wp.array[wp.vec3],  # Z-up output
-):
-    """GPU-only contact visualization: a spike of height pen*vis_scale per penetrating node.
-
-    Non-contact nodes emit a zero-length segment (invisible).
-    ANCF Y-up → Z-up: (x, y, z) → (z, x, y); the spike goes up (+z) from the ground plane.
-    """
-    i = wp.tid()
-    p = node_x[i]  # ANCF Y-up
-    pen = ground_y - p[1]  # positive = inside ground
-
-    base = wp.vec3(p[2], p[0], ground_y)  # clamp to ground surface for spike base
-
-    if pen > 0.0:
-        line_starts[i] = base
-        line_ends[i] = wp.vec3(base[0], base[1], base[2] + pen * vis_scale)
-    else:
-        line_starts[i] = base
-        line_ends[i] = base  # zero-length → invisible
-
-
 # ── Example class ─────────────────────────────────────────────────────────────
 
 
@@ -503,8 +477,6 @@ class Example:
         drop_heights = [drop_h] * n_envs  # all tires at same height; spaced laterally
 
         m_tire = rho_tire * h_shell * (2.0 * math.pi * r_outer * width + 2.0 * math.pi * (r_outer**2 - r_inner**2))
-        # The spindle and the FEM shell are separate masses.
-        fz_tare = 0.0
 
         # ── Mass-proportional Rayleigh damping (auto-derived) ─────────────────
         _l_sw = math.sqrt((r_outer - r_inner) ** 2 + (width / 2.0) ** 2)
@@ -538,7 +510,6 @@ class Example:
         self._n_bead_per_ring = n_bead_per_ring
         self._n_bead_rows = n_bead_rows
         self._n_bead = n_bead
-        self._fz_tare = fz_tare
         self._m_tire = m_tire
         self._alpha_m_damp = alpha_m_damp
         # Rigid wheel mass for the contact-force check: the asset spindle's mass unless --m-rigid overrides.
@@ -747,7 +718,7 @@ class Example:
                 tire_idx=_e,
                 spindle_mj=self._spindle_mj,
                 bead_idx_np=bead_global_e,
-                tare_fz=fz_tare,
+                tare_fz=0.0,
                 world_idx=_e,  # parallel-world: env == world
                 lateral_offset=float(tire_positions[_e]),
                 device=device,
@@ -790,28 +761,10 @@ class Example:
         self._contact_vis_scale = 100.0  # pen 4 mm → 400 mm spike at kn=10k; tune per kn
 
         # ── Graph capture ─────────────────────────────────────────────────────
-        # Must be set before capture_graph(): _step_batched (used by CUDA graph)
-        # only zeros NR corrector at Dirichlet nodes when this flag is True.
-        # Without it, bead nodes drift during the NR loop → growing spurious forces.
-        self.ancf_solver._fix_dirichlet_in_batched = True
         self.ancf_solver.capture_graph(self._sim_dt)
 
         # Restore ANCF state consumed by the capture_graph warmup step.
-        # Zero f_int/f_int0: set_cavity(p,p) gives p_gauge=0 at V_ref, so the
-        # reference config has no internal force.
-        self.ancf_solver.node_x.assign(world_x)
-        self.ancf_solver.node_xd.zero_()
-        self.ancf_solver.node_xdd.zero_()
-        self.ancf_solver.node_D.assign(d0_np_tiled)
-        self.ancf_solver.node_Dd.zero_()
-        self.ancf_solver.node_Ddd.zero_()
-        self.ancf_solver.global_f_int.zero_()
-        self.ancf_solver.global_f_int0.zero_()
-        self.ancf_solver.global_f_ext.zero_()
-        if hasattr(self.ancf_solver, "global_f_ext0"):
-            self.ancf_solver.global_f_ext0.zero_()
-        self.ancf_solver.node_f_ext_persistent.zero_()
-        self.ancf_model.elem_eas_alpha.zero_()
+        reset_ancf_state(self.ancf_solver, self.ancf_model, world_x, d0_np_tiled)
         self.solver.step_kinematics(self.state_0, self.state_rigid, self.control, None, self._sim_dt)
         self._prescribe_beads()
 
@@ -1252,7 +1205,7 @@ class Example:
                 axis=1,
             )
             drift_mm = float(np.max(np.linalg.norm(bead_x - expected, axis=1))) * 1e3
-            fz = float(stg_e[4]) + self._fz_tare
+            fz = float(stg_e[4])
 
             # What the coupling kernel actually uses as hub position
             xpos_e = xpos_all[e, self._spindle_mj]  # MuJoCo Z-up (x_fwd,y_lat,z_up)
@@ -1312,7 +1265,7 @@ class Example:
         fi_np = fi_all[:nf]
         fi_finite = bool(np.all(np.isfinite(fi_np)))
         fi_max = float(np.max(np.abs(fi_np))) if fi_finite else float("nan")
-        fz_contact = float(stg_all[0][4]) + self._fz_tare
+        fz_contact = float(stg_all[0][4])
         fz_exp = self._m_rigid * _GRAVITY
         sp_z = float(sp_tf0[2])
         xpos_zu = xpos_all[0, self._spindle_mj]
@@ -1438,9 +1391,18 @@ class Example:
         )
         # Cyan spikes: one per FEM node, height ∝ contact penetration (GPU-only).
         wp.launch(
-            _gather_contact_spikes,
+            gather_contact_spikes,
             dim=self._n_envs * self._n_nodes,
-            inputs=[self.ancf_solver.node_x, 0.0, self._contact_vis_scale, self._contact_line_s, self._contact_line_e],
+            inputs=[
+                self.ancf_solver.node_x,
+                self._n_nodes,
+                0.0,
+                self._contact_vis_scale,
+                1,
+                2,
+                self._contact_line_s,
+                self._contact_line_e,
+            ],
             device="cuda:0",
         )
         self.viewer.log_lines(
@@ -1484,9 +1446,9 @@ class Example:
         max_drift_m = float(np.max(np.linalg.norm(bead_x - expected, axis=1)))
         assert max_drift_m < 1e-3, f"FAIL: bead drift {max_drift_m * 1e3:.2f} mm > 1 mm"
 
-        # Env-0 vertical spindle load as fed to MuJoCo: solver staging [4] (ANCF Y) + tare.
+        # Env-0 vertical spindle load as fed to MuJoCo: solver staging [4] (ANCF Y).
         stg_np = self.ancf_solver._xfrc_stg_per_tire[0].numpy()[0]
-        fz = abs(float(stg_np[4]) + self._fz_tare)
+        fz = abs(float(stg_np[4]))
         fz_exp = self._m_rigid * _GRAVITY
         rel_err = abs(fz - fz_exp) / max(fz_exp, 1.0)
         assert rel_err < 0.50, f"FAIL: F_z={fz:.1f} N, expected~{fz_exp:.1f} N (err={rel_err * 100:.1f}% > 50%)"

@@ -14,22 +14,11 @@ from newton._src.solvers.ancf_shell.coupling import InterfaceCouplerGS as ANCFCo
 from newton._src.solvers.ancf_shell.kernels_contact import apply_ground_contact
 from newton._src.solvers.ancf_shell.kernels_coupling import (
     _adaptive_interface_step,
-    _advance_response_probe,
     _aitken_coefficient,
-    _choose_response_refresh,
     _integrate_interface_joints,
-    _make_response_inverse,
-    _newton_interface_step,
     _predict_interface_velocity,
-    _probe_guess,
     _relax_coordinates,
-    _response_column,
-    _response_correction,
-    _response_secant_apply,
-    _response_secant_curvature,
-    _response_secant_products,
     _save_interface_increment,
-    _update_response_secant,
 )
 from newton._src.solvers.ancf_shell.model_ancf_shell import ANCFShellModel
 from newton._src.solvers.ancf_shell.solver_ancf_shell_rigid import (
@@ -528,282 +517,6 @@ class TestANCFCoupling(unittest.TestCase):
                     )
                 np.testing.assert_array_equal(qd_output.numpy(), velocity)
 
-    def test_response_reuse_requires_adaptive_coupling(self):
-        with self.assertRaisesRegex(ValueError, "requires adaptive"):
-            InterfaceCouplerGS(None, reuse_response=True)
-
-    def test_response_inverse_pivoting_and_singular_fallback(self):
-        block = np.array([[0.0, 2.0, 0.1], [1.0, 0.4, 0.0], [0.0, 0.1, 1.5]], dtype=np.float64)
-        for size in (3, 32, 50, 64):
-            matrix = np.eye(size, dtype=np.float64)
-            matrix[:3, :3] = block
-            for device in ("cpu", *wp.get_cuda_devices()):
-                with self.subTest(device=device, size=size):
-                    source = wp.array(matrix, dtype=wp.float64, device=device)
-                    inverse = wp.zeros_like(source)
-                    ready, age, refreshed, count = [wp.zeros(1, dtype=int, device=device) for _ in range(4)]
-                    kernel = _make_response_inverse(size)
-                    wp.launch(kernel, dim=1, inputs=[source, inverse, ready, age, refreshed, count], device=device)
-                    np.testing.assert_allclose(inverse.numpy(), np.linalg.inv(matrix), rtol=1e-10, atol=1e-10)
-                    self.assertEqual(int(ready.numpy()[0]), 1)
-                    # Singular responses disable reuse without replacing a valid stored matrix.
-                    accepted = inverse.numpy()
-                    source.zero_()
-                    wp.launch(kernel, dim=1, inputs=[source, inverse, ready, age, refreshed, count], device=device)
-                    self.assertEqual(int(ready.numpy()[0]), 0)
-                    np.testing.assert_array_equal(inverse.numpy(), accepted)
-
-    def test_response_refresh_budget_includes_invalid_estimates(self):
-        for device in ("cpu", *wp.get_cuda_devices()):
-            with self.subTest(device=device):
-                guess = wp.zeros(2, dtype=float, device=device)
-                response = wp.full(2, 0.2, dtype=float, device=device)
-                previous = wp.full(2, 0.1, dtype=float, device=device)
-                ready, age, refreshed, active, iteration, count = [
-                    wp.zeros(1, dtype=int, device=device) for _ in range(6)
-                ]
-                totals = wp.array([200, 800], dtype=int, device=device)
-
-                arguments = [
-                    guess,
-                    response,
-                    previous,
-                    ready,
-                    age,
-                    totals,
-                    refreshed,
-                    active,
-                    iteration,
-                    1e-3,
-                    1e-3,
-                    200,
-                    500,
-                    50,
-                    count,
-                ]
-
-                def choose(arguments=arguments, active=active, device=device):
-                    wp.launch(_choose_response_refresh, dim=1, inputs=arguments, device=device)
-                    return int(active.numpy()[0])
-
-                self.assertEqual(choose(), 1, "The first estimate needs no cooldown")
-                count.fill_(2)
-                age.zero_()
-                for _ in range(49):
-                    self.assertEqual(choose(), 0, "An invalid estimate must use Aitken until the cooldown expires")
-                self.assertEqual(choose(), 1)
-                iteration.fill_(1)
-                refreshed.fill_(1)
-                self.assertEqual(choose(), 0, "At most one refresh per substep")
-                refreshed.zero_()
-                ready.fill_(1)
-                self.assertEqual(choose(), 1, "Stalled valid estimates can refresh after the cooldown")
-
-    @unittest.skipUnless(wp.is_cuda_available(), "Conditional graphs require CUDA")
-    def test_response_probe_loop_visits_each_column_once(self):
-        device = "cuda:0"
-        n = 3
-        base = wp.array([1.0, 2.0, 3.0], dtype=float, device=device)
-        trial, reference, response = [wp.zeros_like(base) for _ in range(3)]
-        matrix = wp.zeros((n, n), dtype=wp.float64, device=device)
-        column, active = [wp.zeros(1, dtype=int, device=device) for _ in range(2)]
-        wp.launch(_two_rotor_response, dim=n, inputs=[base, reference, 3.0, 0.01, 1.0, 1.0, 4.0], device=device)
-
-        def probe():
-            wp.launch(_probe_guess, dim=n, inputs=[base, trial, column, 0.05], device=device)
-            wp.launch(_two_rotor_response, dim=n, inputs=[trial, response, 3.0, 0.01, 1.0, 1.0, 4.0], device=device)
-            wp.launch(_response_column, dim=n, inputs=[reference, response, matrix, column, 0.05], device=device)
-            wp.launch(_advance_response_probe, dim=1, inputs=[column, active, n], device=device)
-
-        with wp.ScopedCapture(device=device) as capture:
-            column.zero_()
-            active.fill_(1)
-            wp.capture_while(active, probe)
-        for _ in range(2):
-            wp.capture_launch(capture.graph)
-            np.testing.assert_allclose(matrix.numpy(), 5.0 * np.eye(n), atol=2e-5, rtol=0)
-            self.assertEqual(int(column.numpy()[0]), n)
-            self.assertEqual(int(active.numpy()[0]), 0)
-            np.testing.assert_array_equal(base.numpy(), [1.0, 2.0, 3.0])
-
-    def test_response_update_satisfies_measured_secant(self):
-        jacobian = np.array([[2.0, 0.4], [0.05, 3.0]], dtype=np.float32)
-        step = np.array([0.05, -0.02], dtype=np.float32)
-        previous_residual = np.array([0.2, -0.1], dtype=np.float32)
-        residual = previous_residual - jacobian @ step
-        for device in ("cpu", *wp.get_cuda_devices()):
-            with self.subTest(device=device):
-                guess = wp.array(step, device=device)
-                response = wp.array(step + residual, device=device)
-                previous_guess = wp.zeros(2, dtype=float, device=device)
-                history = wp.array(previous_residual, device=device)
-                inverse = wp.array(0.3 * np.eye(2), dtype=wp.float64, device=device)
-                ready = wp.ones(1, dtype=int, device=device)
-                refresh = wp.zeros_like(ready)
-                hy, sh = [wp.zeros(2, dtype=wp.float64, device=device) for _ in range(2)]
-                wp.launch(
-                    _update_response_secant,
-                    dim=1,
-                    inputs=[
-                        guess,
-                        response,
-                        previous_guess,
-                        history,
-                        inverse,
-                        ready,
-                        refresh,
-                        hy,
-                        sh,
-                        wp.ones(1, dtype=int, device=device),
-                    ],
-                    device=device,
-                )
-                np.testing.assert_allclose(inverse.numpy() @ (previous_residual - residual), step, atol=1e-7, rtol=1e-5)
-                self.assertEqual(int(ready.numpy()[0]), 1)
-
-    def test_parallel_response_matches_serial_update_and_fallback(self):
-        rng = np.random.default_rng(824)
-        for n in (50, 64):
-            base = rng.normal(0, 0.01, n).astype(np.float32)
-            step = rng.normal(0, 0.05, n).astype(np.float32)
-            history = rng.normal(0, 0.1, n).astype(np.float32)
-            jacobian = np.diag(np.linspace(2.0, 3.0, n)).astype(np.float32)
-            initial_inverse = 0.3 * np.eye(n) + rng.normal(0, 0.01 / n, (n, n))
-            for mode in ("update", "startup", "refresh", "tiny", "negative", "invalid", "aitken"):
-                delta = step * (1e-5 if mode == "tiny" else 1.0)
-                residual = history - (jacobian @ delta) * (-1.0 if mode == "negative" else 1.0)
-                for device in ("cpu", *wp.get_cuda_devices()):
-                    with self.subTest(size=n, mode=mode, device=device):
-                        outputs = []
-                        for parallel in (False, True):
-                            guess = wp.array(base + delta, dtype=float, device=device)
-                            response = wp.array(base + delta + residual, dtype=float, device=device)
-                            previous_guess = wp.array(base, dtype=float, device=device)
-                            previous = wp.array(history, dtype=float, device=device)
-                            inverse = wp.array(
-                                20.0 * np.eye(n) if mode == "invalid" else initial_inverse,
-                                dtype=wp.float64,
-                                device=device,
-                            )
-                            ready = wp.full(1, int(mode != "aitken"), dtype=int, device=device)
-                            refresh = wp.full(1, int(mode == "refresh"), dtype=int, device=device)
-                            iteration = wp.full(1, int(mode != "startup"), dtype=int, device=device)
-                            hy, sh = [wp.zeros(n, dtype=wp.float64, device=device) for _ in range(2)]
-                            correction = wp.zeros(n if parallel else 0, dtype=wp.float64, device=device)
-                            if parallel:
-                                curvature = wp.zeros(1, dtype=wp.float64, device=device)
-                                wp.launch(
-                                    _response_secant_products,
-                                    dim=n,
-                                    inputs=[
-                                        guess,
-                                        response,
-                                        previous_guess,
-                                        previous,
-                                        inverse,
-                                        ready,
-                                        refresh,
-                                        hy,
-                                        sh,
-                                        iteration,
-                                    ],
-                                    device=device,
-                                )
-                                wp.launch(
-                                    _response_secant_curvature,
-                                    dim=1,
-                                    inputs=[
-                                        guess,
-                                        response,
-                                        previous_guess,
-                                        previous,
-                                        ready,
-                                        refresh,
-                                        hy,
-                                        iteration,
-                                        curvature,
-                                    ],
-                                    device=device,
-                                )
-                                wp.launch(
-                                    _response_secant_apply,
-                                    dim=n,
-                                    inputs=[guess, previous_guess, inverse, ready, hy, sh, curvature],
-                                    device=device,
-                                )
-                                wp.launch(
-                                    _response_correction,
-                                    dim=n,
-                                    inputs=[guess, response, inverse, ready, correction],
-                                    device=device,
-                                )
-                            else:
-                                wp.launch(
-                                    _update_response_secant,
-                                    dim=1,
-                                    inputs=[
-                                        guess,
-                                        response,
-                                        previous_guess,
-                                        previous,
-                                        inverse,
-                                        ready,
-                                        refresh,
-                                        hy,
-                                        sh,
-                                        iteration,
-                                    ],
-                                    device=device,
-                                )
-                            weight = wp.full(1, 0.7, dtype=float, device=device)
-                            corrected = wp.zeros(n, dtype=float, device=device)
-                            norm = wp.zeros(6, dtype=float, device=device)
-                            active, converged, used = [wp.zeros(1, dtype=int, device=device) for _ in range(3)]
-                            wp.launch(
-                                _newton_interface_step,
-                                dim=1,
-                                inputs=[
-                                    guess,
-                                    response,
-                                    previous,
-                                    weight,
-                                    inverse,
-                                    correction,
-                                    ready,
-                                    corrected,
-                                    norm,
-                                    active,
-                                    converged,
-                                    used,
-                                    iteration,
-                                    6,
-                                    1e-3,
-                                    1e-3,
-                                    0.5,
-                                    True,
-                                ],
-                                device=device,
-                            )
-                            outputs.append(
-                                [
-                                    a.numpy()
-                                    for a in (
-                                        inverse,
-                                        ready,
-                                        previous_guess,
-                                        previous,
-                                        corrected,
-                                        norm,
-                                        active,
-                                        converged,
-                                        used,
-                                        weight,
-                                    )
-                                ]
-                            )
-                        for actual, expected in zip(outputs[1], outputs[0], strict=True):
-                            np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-10)
-
     @unittest.skipUnless(wp.is_cuda_available(), "MuJoCo-Warp requires CUDA")
     def test_trial_kinematics_preserves_spindle_origin_velocity(self):
         builder = newton.ModelBuilder(gravity=0)
@@ -859,10 +572,6 @@ class TestANCFCoupling(unittest.TestCase):
             np.testing.assert_allclose(actual, reference, rtol=5e-6, atol=5e-6)
 
     @unittest.skipUnless(wp.is_cuda_available(), "The coupled solvers require CUDA")
-    def test_reused_response_rotor_acceleration_braking_and_energy(self):
-        self._check_rotor(True, reuse_response=True)
-
-    @unittest.skipUnless(wp.is_cuda_available(), "The coupled solvers require CUDA")
     def test_rotor_acceleration_braking_and_energy(self):
         self._check_rotor(False)
 
@@ -871,14 +580,10 @@ class TestANCFCoupling(unittest.TestCase):
         self._check_rotor(True)
 
     @unittest.skipUnless(wp.is_cuda_available(), "The coupled solvers require CUDA")
-    def test_condensed_response_rotor_acceleration_braking_and_energy(self):
-        self._check_rotor(True, reuse_response=True, condensed=True)
+    def test_coupled_newton_rotor_acceleration_braking_and_energy(self):
+        self._check_rotor(True, coupled_newton=True)
 
-    @unittest.skipUnless(wp.is_cuda_available(), "Conditional fallback requires CUDA")
-    def test_invalid_condensed_response_preserves_rotor_work_on_fallback(self):
-        self._check_rotor(True, reuse_response=True, bad_linearization=True)
-
-    def _check_rotor(self, recycle, reuse_response=False, condensed=False, bad_linearization=False):
+    def _check_rotor(self, recycle, coupled_newton=False):
         """MuJoCo and a pinned shell share a torque, with tire inertia four times the hub inertia."""
         f = ElementFixture([rotation(0)], "cuda:0")
         a = ANCFShellModel(4, 1, f.x0, f.d0, f.nodes, f.h, f.material, f.zeros((1, 5)), f.cos, f.sin, device="cuda:0")
@@ -951,13 +656,8 @@ class TestANCFCoupling(unittest.TestCase):
         # Allocate MuJoCo workspace outside conditional capture without advancing s0.
         rigid.step_dynamics(out)
         rigid.step_kinematics(s0, out, control, None, dt)
-        c = InterfaceCouplerGS(soft, n_iters=6, acceleration=True, adaptive=recycle, reuse_response=reuse_response)
-        c.allocate(s0, model=model, interface_body_indices=[link] if condensed else None)
-        if bad_linearization:
-            c._shell_response = SimpleNamespace(refresh=lambda state, dt, inverse, ready: ready.zero_())
-        if reuse_response:
-            # This contact-free fixture can identify its added inertia immediately.
-            c._response_warmup_steps = 0
+        c = InterfaceCouplerGS(soft, n_iters=6, acceleration=True, adaptive=recycle, coupled_newton=coupled_newton)
+        c.allocate(s0, model=model, interface_body_indices=[link] if coupled_newton else None)
 
         def accumulate():
             soft.accumulate_wheel_wrenches(rigid.xfrc_applied, rigid.xpos)
@@ -1001,18 +701,11 @@ class TestANCFCoupling(unittest.TestCase):
             substeps, passes = c.interface_totals.numpy()
             self.assertEqual(substeps, 24)
             self.assertLess(passes / substeps, 4.0, "Smooth rotor motion should need fewer interface trials")
-            if reuse_response:
-                if condensed:
-                    self.assertEqual(int(c.interface_probe_count.numpy()[0]), 0)
-                    self.assertGreater(int(c.interface_linearization_count.numpy()[0]), 0)
-                else:
-                    self.assertGreater(int(c.interface_probe_count.numpy()[0]), 0)
-                if bad_linearization:
-                    self.assertGreater(int(c.interface_linearization_count.numpy()[0]), 0)
-                self.assertLess(passes / substeps, 2.0)
+            if coupled_newton:
+                self.assertIsNotNone(c._coupled_solver, "The rotor fixture must support coupled Newton")
+                self.assertGreater(int(c.interface_linearization_count.numpy()[0]), 0)
                 c.reset(s0)
                 self.assertEqual(int(c._response_ready.numpy()[0]), 0)
-                self.assertEqual(int(c.interface_probe_count.numpy()[0]), 0)
                 self.assertEqual(int(c.interface_linearization_count.numpy()[0]), 0)
                 np.testing.assert_array_equal(c._previous_corrected.numpy(), s0.joint_qd.numpy())
 

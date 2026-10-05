@@ -9,12 +9,6 @@
     "train": true,
     "report": null
   },
-  "arg_help": {
-    "reference-mu": "Synthetic ground friction used only to generate observations, 0.15–1.0.",
-    "initial-mu": "Starting friction estimate, 0.15–1.0; pressure, stiffness and carried mass remain fixed.",
-    "train": "Fit friction with implicit trajectory derivatives, then validate a different spin/brake sequence. False shows the initial mismatch until Learn friction is pressed.",
-    "report": "Optional .json report with synthetic provenance, commands, accepted losses and independent validation errors. This is not a calibrated example 07 preset."
-  },
   "env": {
     "OPENBLAS_NUM_THREADS": "1",
     "OMP_NUM_THREADS": "1"

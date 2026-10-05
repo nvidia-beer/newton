@@ -6,12 +6,28 @@
 
 from __future__ import annotations
 
-import functools
-
 import warp as wp
 
 from ...sim import JointType
 from ..featherstone.kernels import jcalc_integrate
+
+
+@wp.func
+def _scaled_error(residual: float, guess: float, response: float, atol: float, rtol: float) -> float:
+    """Residual relative to the per-coordinate tolerance ``atol + rtol * max(|guess|, |response|)``."""
+    return wp.abs(residual) / (atol + rtol * wp.max(wp.abs(guess), wp.abs(response)))
+
+
+@wp.func
+def _aitken_weight(
+    weight: float, numerator: wp.float64, denominator: wp.float64, iteration: int, initial: float
+) -> float:
+    """Vector Aitken delta-squared update of the relaxation weight; the first trial uses ``initial``."""
+    if iteration == 0:
+        return initial
+    if denominator > wp.float64(1.0e-30):
+        return float(-wp.float64(weight) * numerator / denominator)
+    return weight
 
 
 @wp.kernel
@@ -214,10 +230,7 @@ def _aitken_coefficient(
         denominator += change * change
         norm += wp.float64(r) * wp.float64(r)
         previous[i] = r
-    if iteration == 0:
-        weight[0] = initial_weight
-    elif denominator > wp.float64(1.0e-30):
-        weight[0] = float(-wp.float64(weight[0]) * numerator / denominator)
+    weight[0] = _aitken_weight(weight[0], numerator, denominator, iteration, initial_weight)
     residual_norm[iteration] = float(wp.sqrt(norm))
 
 
@@ -283,14 +296,9 @@ def _adaptive_interface_step(
         numerator += wp.float64(previous_residual[j]) * change
         denominator += change * change
         norm += wp.float64(r) * wp.float64(r)
-        scale = atol + rtol * wp.max(wp.abs(guess[j]), wp.abs(response[j]))
-        scaled = wp.max(scaled, wp.abs(r) / scale)
+        scaled = wp.max(scaled, _scaled_error(r, guess[j], response[j], atol, rtol))
         previous_residual[j] = r
-    weight = relaxation[0]
-    if iteration == 0:
-        weight = initial_weight
-    elif denominator > wp.float64(1.0e-30):
-        weight = float(-wp.float64(weight) * numerator / denominator)
+    weight = _aitken_weight(relaxation[0], numerator, denominator, iteration, initial_weight)
     relaxation[0] = weight
     residual_norm[iteration] = float(wp.sqrt(norm))
     iterations[0] = iteration + 1
@@ -301,84 +309,6 @@ def _adaptive_interface_step(
     active[0] = int(iteration + 1 < max_iterations and (not allow_early_exit or converged[0] == 0))
     for i in range(guess.shape[0]):
         output[i] = guess[i] + weight * (response[i] - guess[i])
-
-
-@wp.kernel(enable_backward=False)
-def _probe_guess(base: wp.array[float], out: wp.array[float], column: wp.array[int], epsilon: float):
-    i = wp.tid()
-    out[i] = base[i]
-    if i == column[0]:
-        out[i] += epsilon
-
-
-@wp.kernel(enable_backward=False)
-def _response_column(
-    base: wp.array[float],
-    response: wp.array[float],
-    matrix: wp.array2d[wp.float64],
-    column: wp.array[int],
-    epsilon: float,
-):
-    i = wp.tid()
-    identity = wp.float64(0.0)
-    if i == column[0]:
-        identity = wp.float64(1.0)
-    matrix[i, column[0]] = identity - wp.float64(response[i] - base[i]) / wp.float64(epsilon)
-
-
-@wp.kernel(enable_backward=False)
-def _advance_interface_iteration(iteration: wp.array[int]):
-    iteration[0] += 1
-
-
-@wp.kernel(enable_backward=False)
-def _advance_response_probe(column: wp.array[int], active: wp.array[int], n: int):
-    column[0] += 1
-    active[0] = int(column[0] < n)
-
-
-@wp.kernel(enable_backward=False)
-def _choose_response_refresh(
-    guess: wp.array[float],
-    response: wp.array[float],
-    previous: wp.array[float],
-    ready: wp.array[int],
-    age: wp.array[int],
-    totals: wp.array[int],
-    refreshed: wp.array[int],
-    active: wp.array[int],
-    iteration_index: wp.array[int],
-    atol: float,
-    rtol: float,
-    warmup_steps: int,
-    refresh_interval: int,
-    minimum_interval: int,
-    probe_count: wp.array[int],
-):
-    iteration = iteration_index[0]
-    norm = wp.float64(0.0)
-    old_norm = wp.float64(0.0)
-    scaled = float(0.0)
-    for i in range(guess.shape[0]):
-        r = wp.float64(response[i] - guess[i])
-        scaled = wp.max(
-            scaled,
-            float(wp.abs(r)) / (atol + rtol * wp.max(wp.abs(guess[i]), wp.abs(response[i]))),
-        )
-        norm += r * r
-        old_norm += wp.float64(previous[i]) * wp.float64(previous[i])
-    if iteration == 0:
-        refreshed[0] = 0
-        age[0] += 1
-    slow = iteration > 0 and norm > wp.float64(0.81) * old_norm and scaled > 1.0
-    # Invalid/noisy estimates must not trigger a full Jacobian rebuild each
-    # substep. Use the existing Aitken fallback while the refresh budget recovers.
-    active[0] = int(
-        totals[0] >= warmup_steps
-        and refreshed[0] == 0
-        and (probe_count[0] == 0 or age[0] >= minimum_interval)
-        and (ready[0] == 0 or age[0] >= refresh_interval or slow)
-    )
 
 
 @wp.kernel(enable_backward=False)
@@ -394,285 +324,6 @@ def _finish_shell_linearization(
     if ready[0] != 0:
         age[0] = 0
         refreshed[0] = 1
-
-
-@functools.cache
-def _make_response_inverse(n: int):
-    """Partial-pivot inverse of I - d(rigid response)/d(interface velocity)."""
-    mat = wp.types.matrix(shape=(n, n), dtype=wp.float64)
-
-    @wp.kernel(enable_backward=False, module="unique")
-    def invert(
-        matrix: wp.array2d[wp.float64],
-        inverse: wp.array2d[wp.float64],
-        ready: wp.array[int],
-        age: wp.array[int],
-        refreshed: wp.array[int],
-        count: wp.array[int],
-    ):
-        a = mat()
-        b = mat()
-        for i in range(n):
-            b[i, i] = wp.float64(1.0)
-            for j in range(n):
-                a[i, j] = matrix[i, j]
-        valid = bool(True)
-        for col in range(n):
-            pivot = col
-            for row in range(col + 1, n):
-                if wp.abs(a[row, col]) > wp.abs(a[pivot, col]):
-                    pivot = row
-            if wp.abs(a[pivot, col]) < wp.float64(1.0e-8):
-                valid = False
-            if valid:
-                for j in range(n):
-                    temp = a[col, j]
-                    a[col, j] = a[pivot, j]
-                    a[pivot, j] = temp
-                    temp = b[col, j]
-                    b[col, j] = b[pivot, j]
-                    b[pivot, j] = temp
-                d = a[col, col]
-                for j in range(n):
-                    a[col, j] /= d
-                    b[col, j] /= d
-                for i in range(n):
-                    if i != col:
-                        factor = a[i, col]
-                        for j in range(n):
-                            a[i, j] -= factor * a[col, j]
-                            b[i, j] -= factor * b[col, j]
-        for i in range(n):
-            for j in range(n):
-                if not wp.isfinite(b[i, j]) or wp.abs(b[i, j]) > wp.float64(10.0):
-                    valid = False
-        ready[0] = int(valid)
-        if valid:
-            for i in range(n):
-                for j in range(n):
-                    inverse[i, j] = b[i, j]
-        refreshed[0] = 1
-        age[0] = 0
-        count[0] += n
-
-    return invert
-
-
-@wp.kernel(enable_backward=False)
-def _update_response_secant(
-    guess: wp.array[float],
-    response: wp.array[float],
-    previous_guess: wp.array[float],
-    previous_residual: wp.array[float],
-    inverse: wp.array2d[wp.float64],
-    ready: wp.array[int],
-    refresh: wp.array[int],
-    hy: wp.array[wp.float64],
-    sh: wp.array[wp.float64],
-    iteration_index: wp.array[int],
-):
-    iteration = iteration_index[0]
-    # Good Broyden: H += (s-Hy)(s^T H)/(s^T H y), with y = -delta(residual).
-    # Reject tiny/noisy secants and near-zero denominators; do not compare
-    # residuals across substeps, whose force and inertia history have changed.
-    # Float32 bead poses make smaller velocity secants unreliable during motion.
-    n = guess.shape[0]
-    if iteration > 0 and ready[0] != 0 and refresh[0] == 0:
-        curvature = wp.float64(0.0)
-        snorm = wp.float64(0.0)
-        hynorm = wp.float64(0.0)
-        ynorm = wp.float64(0.0)
-        for i in range(n):
-            a = wp.float64(0.0)
-            b = wp.float64(0.0)
-            for j in range(n):
-                yj = wp.float64(previous_residual[j] - (response[j] - guess[j]))
-                sj = wp.float64(guess[j] - previous_guess[j])
-                a += inverse[i, j] * yj
-                b += sj * inverse[j, i]
-            hy[i] = a
-            sh[i] = b
-            si = wp.float64(guess[i] - previous_guess[i])
-            yi = wp.float64(previous_residual[i] - (response[i] - guess[i]))
-            curvature += si * a
-            snorm += si * si
-            hynorm += a * a
-            ynorm += yi * yi
-        if (
-            snorm > wp.float64(1.0e-6)
-            and ynorm > wp.float64(1.0e-4)
-            and curvature > wp.float64(0.05) * wp.sqrt(snorm * hynorm)
-        ):
-            valid = bool(True)
-            for i in range(n):
-                error = wp.float64(guess[i] - previous_guess[i]) - hy[i]
-                for j in range(n):
-                    inverse[i, j] += error * sh[j] / curvature
-                    if not wp.isfinite(inverse[i, j]) or wp.abs(inverse[i, j]) > wp.float64(10.0):
-                        valid = False
-            if not valid:
-                ready[0] = 0
-    for i in range(n):
-        previous_guess[i] = guess[i]
-
-
-@wp.kernel(enable_backward=False)
-def _response_secant_products(
-    guess: wp.array[float],
-    response: wp.array[float],
-    previous_guess: wp.array[float],
-    previous_residual: wp.array[float],
-    inverse: wp.array2d[wp.float64],
-    ready: wp.array[int],
-    refresh: wp.array[int],
-    hy: wp.array[wp.float64],
-    sh: wp.array[wp.float64],
-    iteration: wp.array[int],
-):
-    i = wp.tid()
-    if iteration[0] > 0 and ready[0] != 0 and refresh[0] == 0:
-        a = wp.float64(0.0)
-        b = wp.float64(0.0)
-        for j in range(guess.shape[0]):
-            a += inverse[i, j] * wp.float64(previous_residual[j] - (response[j] - guess[j]))
-            b += wp.float64(guess[j] - previous_guess[j]) * inverse[j, i]
-        hy[i] = a
-        sh[i] = b
-
-
-@wp.kernel(enable_backward=False)
-def _response_secant_curvature(
-    guess: wp.array[float],
-    response: wp.array[float],
-    previous_guess: wp.array[float],
-    previous_residual: wp.array[float],
-    ready: wp.array[int],
-    refresh: wp.array[int],
-    hy: wp.array[wp.float64],
-    iteration: wp.array[int],
-    accepted_curvature: wp.array[wp.float64],
-):
-    accepted_curvature[0] = wp.float64(0.0)
-    if iteration[0] > 0 and ready[0] != 0 and refresh[0] == 0:
-        curvature = wp.float64(0.0)
-        snorm = wp.float64(0.0)
-        hynorm = wp.float64(0.0)
-        ynorm = wp.float64(0.0)
-        for i in range(guess.shape[0]):
-            si = wp.float64(guess[i] - previous_guess[i])
-            yi = wp.float64(previous_residual[i] - (response[i] - guess[i]))
-            curvature += si * hy[i]
-            snorm += si * si
-            hynorm += hy[i] * hy[i]
-            ynorm += yi * yi
-        if (
-            snorm > wp.float64(1.0e-6)
-            and ynorm > wp.float64(1.0e-4)
-            and curvature > wp.float64(0.05) * wp.sqrt(snorm * hynorm)
-        ):
-            accepted_curvature[0] = curvature
-
-
-@wp.kernel(enable_backward=False)
-def _response_secant_apply(
-    guess: wp.array[float],
-    previous_guess: wp.array[float],
-    inverse: wp.array2d[wp.float64],
-    ready: wp.array[int],
-    hy: wp.array[wp.float64],
-    sh: wp.array[wp.float64],
-    accepted_curvature: wp.array[wp.float64],
-):
-    i = wp.tid()
-    curvature = accepted_curvature[0]
-    # Gate on the previous kernel's decision, not ready: another row may
-    # invalidate ready while this row is still updating the matrix.
-    if curvature > wp.float64(0.0):
-        error = wp.float64(guess[i] - previous_guess[i]) - hy[i]
-        for j in range(guess.shape[0]):
-            value = inverse[i, j] + error * sh[j] / curvature
-            inverse[i, j] = value
-            if not wp.isfinite(value) or wp.abs(value) > wp.float64(10.0):
-                wp.atomic_min(ready, 0, 0)
-    previous_guess[i] = guess[i]
-
-
-@wp.kernel(enable_backward=False)
-def _response_correction(
-    guess: wp.array[float],
-    response: wp.array[float],
-    inverse: wp.array2d[wp.float64],
-    ready: wp.array[int],
-    correction: wp.array[wp.float64],
-):
-    i = wp.tid()
-    if ready[0] != 0:
-        value = wp.float64(0.0)
-        for j in range(guess.shape[0]):
-            value += inverse[i, j] * wp.float64(response[j] - guess[j])
-        correction[i] = value
-
-
-@wp.kernel(enable_backward=False)
-def _newton_interface_step(
-    guess: wp.array[float],
-    response: wp.array[float],
-    previous: wp.array[float],
-    weight: wp.array[float],
-    inverse: wp.array2d[wp.float64],
-    response_correction: wp.array[wp.float64],
-    ready: wp.array[int],
-    output: wp.array[float],
-    residual_norm: wp.array[float],
-    active: wp.array[int],
-    converged: wp.array[int],
-    iterations: wp.array[int],
-    iteration_index: wp.array[int],
-    max_iterations: int,
-    atol: float,
-    rtol: float,
-    initial_weight: float,
-    allow_exit: bool,
-):
-    iteration = iteration_index[0]
-    norm = wp.float64(0.0)
-    numerator = wp.float64(0.0)
-    denominator = wp.float64(0.0)
-    scaled = float(0.0)
-    for i in range(guess.shape[0]):
-        r = response[i] - guess[i]
-        change = wp.float64(r - previous[i])
-        numerator += wp.float64(previous[i]) * change
-        denominator += change * change
-        norm += wp.float64(r) * wp.float64(r)
-        scaled = wp.max(
-            scaled,
-            wp.abs(r) / (atol + rtol * wp.max(wp.abs(guess[i]), wp.abs(response[i]))),
-        )
-    omega = weight[0]
-    if iteration == 0:
-        omega = initial_weight
-    elif denominator > wp.float64(1.0e-30):
-        omega = float(-wp.float64(omega) * numerator / denominator)
-    weight[0] = omega
-    for i in range(guess.shape[0]):
-        correction = omega * (response[i] - guess[i])
-        if ready[0] != 0:
-            if response_correction.shape[0] != 0:
-                correction = float(response_correction[i])
-            else:
-                acc = wp.float64(0.0)
-                for j in range(guess.shape[0]):
-                    acc += inverse[i, j] * wp.float64(response[j] - guess[j])
-                correction = float(acc)
-        output[i] = guess[i] + correction
-    for i in range(guess.shape[0]):
-        previous[i] = response[i] - guess[i]
-    residual_norm[iteration] = float(wp.sqrt(norm))
-    iterations[0] = iteration + 1
-    minimum_met = iteration >= 2 or ready[0] != 0
-    converged[0] = int(minimum_met and scaled <= 1.0)
-    active[0] = int(iteration + 1 < max_iterations and (not allow_exit or converged[0] == 0))
 
 
 @wp.kernel(enable_backward=False)

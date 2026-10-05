@@ -163,12 +163,12 @@ def create_parser():
     )
     parser.add_argument(
         "--coupling-method",
-        choices=["aitken", "adaptive", "auto", "quasi-newton", "schur", "coupled-newton"],
+        choices=["auto", "adaptive", "coupled-newton"],
         default="auto",
-        help="Fixed/adaptive Aitken, reused quasi-Newton response, condensed shell response (schur), or joint "
-        "shell/interface Newton corrections (coupled-newton). Auto (default) selects coupled-newton on supported "
-        "implicit vehicles on flat ground or rigid terrain, with even substeps and at least three gs-iters; "
-        "unsupported models retain partitioned coupling. Odd substeps use adaptive Aitken.",
+        help="Wheel/tire interface coupling. Auto (default) selects coupled-newton (joint shell/interface Newton "
+        "corrections with a reused condensed tangent) on supported implicit vehicles with even substeps and at "
+        "least three gs-iters; other models, odd substeps and large "
+        "interfaces use adaptive Aitken relaxation.",
     )
     parser.add_argument("--fast-math", action="store_true", default=False, help="Enable Warp fast-math.")
     parser.add_argument(

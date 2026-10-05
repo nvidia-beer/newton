@@ -50,7 +50,7 @@ def check_vehicle_final(example) -> None:
         expected = np.stack([p_mj[:, 1], p_mj[:, 2], p_mj[:, 0]], axis=1)
         max_drift = float(np.max(np.linalg.norm(x_e[example._bead_idx_np] - expected, axis=1)))
         assert max_drift < 1e-3, f"FAIL tire {e}: bead drift {max_drift * 1e3:.2f} mm > 1 mm"
-        fz = abs(float(stg_per_wheel[e][4]) + example._fz_tare)
+        fz = abs(float(stg_per_wheel[e][4]))
         rel = abs(fz - fz_exp) / max(fz_exp, 1.0)
         assert rel < 0.50, f"FAIL tire {e}: F_z={fz:.1f} N  expected~{fz_exp:.1f} N  err={rel * 100:.1f}% > 50%"
 

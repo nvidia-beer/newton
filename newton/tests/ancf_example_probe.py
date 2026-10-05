@@ -163,7 +163,7 @@ def _measure(example, case: str, frame: int, hull_points=None) -> dict:
     if not (np.isfinite(q).all() and np.isfinite(qd).all()):
         raise AssertionError(f"{case}: non-finite rigid state at frame {frame}")
     staging = np.array([a.numpy()[0] for a in ancf._xfrc_stg_per_tire])
-    sample["support_force"] = (staging[:, 4] + example._fz_tare).tolist()
+    sample["support_force"] = staging[:, 4].tolist()
     if case.startswith("02"):
         sample["pose"] = q[example._spindle_newton_idx].tolist()
         sample["velocity"] = qd[example._spindle_newton_idx].tolist()
@@ -182,7 +182,6 @@ def _measure(example, case: str, frame: int, hull_points=None) -> dict:
         sample["coupling_velocity_residual"] = example._gs_coupler.interface_residual.numpy().tolist()
         sample["coupling_iterations_used"] = int(example._gs_coupler.interface_iterations.numpy()[0])
         sample["coupling_totals"] = example._gs_coupler.interface_totals.numpy().tolist()
-        sample["coupling_probes"] = int(example._gs_coupler.interface_probe_count.numpy()[0])
     sample["wheel_target"] = (example.control.joint_target_qd.numpy()[dofs] * signs).tolist()
     sample["fault_count"] = int(getattr(example, "fault_count", 0))
     sample["fault"] = str(getattr(example, "_fault", ""))
@@ -297,7 +296,7 @@ def probe(case: str, output: Path, overrides: dict | None = None, *, benchmark: 
                 report["rolling_radius"] = example.vehicle.r_roll
                 report["torque_alpha"] = example.ancf_solver.torque_alpha
                 report["coupling_iterations"] = example._gs_coupler._n_iters if example._gs_coupler else 1
-                report["coupling_method"] = getattr(args, "coupling_method", "aitken")
+                report["coupling_method"] = getattr(args, "coupling_method", None)
                 report["coupling_graph_captured"] = example._substep_graph is not None
                 report["response_reuse"] = bool(example._gs_coupler and example._gs_coupler.reuse_response)
                 combined = example._gs_coupler._coupled_solver if example._gs_coupler else None
