@@ -7,9 +7,9 @@ Flat rigid plane at height ``ground_z`` (Newton is Y-up, so the plane is y = gro
 Each node whose position penetrates the plane receives a normal penalty force and a
 regularised (tanh) Coulomb friction force.
 
-The contact tangent is added to K_eff as a per-DOF diagonal: the normal stiffness and
-damping term plus the diagonal of the friction Jacobian, both converted from velocity to
-displacement derivatives with the HHT factor c_v (see :func:`_contact_tangent_diag`).
+The contact iteration matrix adds normal stiffness/damping and a positive tangential
+majorizer to K_eff. Velocity terms use the HHT factor c_v. The physical force law
+remains regularised Coulomb friction (see :func:`_contact_tangent_diag`).
 Heightfield / soil terrain contact lives in :mod:`terrain_scm`.
 """
 
@@ -32,29 +32,18 @@ def _contact_tangent_diag(
     g: float,  # tanh(|vt|/v_reg)
     c_v: float,  # gamma/(beta*dt): d(velocity)/d(displacement) for the HHT corrector
 ) -> wp.vec3:
-    """Diagonal of -∂f_contact/∂u for one node, (x, y, z).
+    """Positive contact iteration diagonal for frozen normal load, (x, y, z).
 
-    Every contact force term is differentiated, including the velocity-dependent
-    ones, so Newton sees the same model the residual evaluates:
-      normal   : ∂fn/∂y  = -kn,  ∂fn/∂vy = -kd (only while closing)
-      friction : f_t = -mu·fn·g(|v|)·v̂,  ∂f_t/∂v = -mu·fn·[ g/|v|·(I - v̂v̂ᵀ) + g'·v̂v̂ᵀ ]
-                 with g' = sech²(|v|/v_reg)/v_reg  (its |v|→0 limit is 1/v_reg).
-    Velocity derivatives are converted to displacement derivatives with c_v.
-    The regularised-Coulomb slope mu·fn/v_reg is far stiffer than the shell, so
-    leaving it out of the tangent (explicit friction) makes NR unable to converge.
+    The friction derivative along sliding tends to zero; using that slope with
+    a fixed Newton budget can overshoot sticking and reverse the slip repeatedly.
+    The lagged slope tanh(s)/s majorizes sech(s)^2, retains the correct sticking
+    limit, and leaves the normal solve and residual forces unchanged.
     """
     k_yy = kn
     if vn > 0.0:
         k_yy = k_yy + kd * c_v
-    sech2 = 1.0 - g * g
-    g_prime = sech2 / v_reg
-    g_over_v = g / vt_mag
-    inv_v2 = 1.0 / (vt_mag * vt_mag)
-    ux2 = vt_x * vt_x * inv_v2
-    uz2 = vt_z * vt_z * inv_v2
-    k_xx = mu * fn * c_v * (g_over_v * (1.0 - ux2) + g_prime * ux2)
-    k_zz = mu * fn * c_v * (g_over_v * (1.0 - uz2) + g_prime * uz2)
-    return wp.vec3(k_xx, k_yy, k_zz)
+    k_t = mu * fn * c_v * g / vt_mag
+    return wp.vec3(k_t, k_yy, k_t)
 
 
 @wp.kernel

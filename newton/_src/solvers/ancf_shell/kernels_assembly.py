@@ -14,10 +14,10 @@ Graph-capture path
 Since the mesh never changes, K_eff has a fixed sparsity pattern every step.
 `assemble_sparse_stiffness` (one-time, at init) builds a scalar CSR via
 warp.sparse.bsr_set_from_triplets only to fix that pattern; `build_block_structure`
-derives the node-block CSR and the element->block scatter map from it.
-`zero_bsr_values` + `scatter_elem_to_blk_batched` + `add_diag_to_blk_values_batched`
-then refill the blocked values in place without any memory allocation — the only
-path that can be captured as a CUDA graph.
+derives the node-block CSR and the element->block scatter map from it; the
+solver then refills the blocked values in place (`add_diag_to_blk_values_batched`
+and the gather kernels) without any memory allocation, so the step can be
+captured as a CUDA graph.
 """
 
 import numpy as np
@@ -25,26 +25,6 @@ import warp as wp
 import warp.sparse as wps
 
 wp.set_module_options({"enable_backward": False})
-
-
-# ---------------------------------------------------------------------------
-# Force scatter — element forces → global flat DOF vector
-# ---------------------------------------------------------------------------
-
-
-@wp.kernel
-def scatter_forces(
-    elem_nodes: wp.array2d[wp.int32],  # (n_elem, 4)
-    elem_f: wp.array2d[float],  # (n_elem, 24)
-    global_f: wp.array[float],  # (n_nodes * 6,) output
-):
-    """Atomically accumulate element internal forces into the global DOF vector."""
-    e = wp.tid()
-    for node_local in range(4):
-        na = elem_nodes[e, node_local]
-        base = na * 6
-        for s in range(6):
-            wp.atomic_add(global_f, base + s, elem_f[e, node_local * 6 + s])
 
 
 @wp.func
@@ -117,56 +97,6 @@ def _pressure_element(
 
 
 @wp.kernel
-def accumulate_centroid(
-    node_x: wp.array[wp.vec3],  # (N*n_nodes,)
-    centroid_sum: wp.array[float],  # (N*3,) zeroed by caller
-    n_nodes: int,
-):
-    """dim = N*n_nodes.  Sum node positions per env (caller divides by n_nodes).
-
-    A co-moving centroid makes the enclosed-volume integral translation
-    invariant — the tire can drop/roll without spuriously changing its volume.
-    """
-    tid = wp.tid()
-    env = tid // n_nodes
-    x = node_x[tid]
-    wp.atomic_add(centroid_sum, env * 3 + 0, x[0])
-    wp.atomic_add(centroid_sum, env * 3 + 1, x[1])
-    wp.atomic_add(centroid_sum, env * 3 + 2, x[2])
-
-
-@wp.kernel
-def accumulate_cavity_volume(
-    node_x: wp.array[wp.vec3],  # (N*n_nodes,) deformed
-    elem_nodes: wp.array2d[wp.int32],  # (n_elems, 4) shared topology
-    psign: wp.array[float],  # (n_elems,) outward orientation
-    centroid_sum: wp.array[float],  # (N*3,)
-    inv_n_nodes: float,
-    V_out: wp.array[float],  # (N,) zeroed by caller
-    n_elems: int,
-    n_nodes: int,
-):
-    """dim = N*n_elems.  Enclosed volume via divergence theorem, cone-closed to
-    the per-env centroid:  V = (1/3) Σ_elem (x̄ − c) · (area-normal)."""
-    tid = wp.tid()
-    env = tid // n_elems
-    e = tid % n_elems
-    nb = env * n_nodes
-    cx = wp.vec3(
-        centroid_sum[env * 3 + 0] * inv_n_nodes,
-        centroid_sum[env * 3 + 1] * inv_n_nodes,
-        centroid_sum[env * 3 + 2] * inv_n_nodes,
-    )
-    x0 = node_x[nb + elem_nodes[e, 0]]
-    x1 = node_x[nb + elem_nodes[e, 1]]
-    x2 = node_x[nb + elem_nodes[e, 2]]
-    x3 = node_x[nb + elem_nodes[e, 3]]
-    xbar = 0.25 * (x0 + x1 + x2 + x3)
-    nrm = (0.5 * psign[e]) * wp.cross(x2 - x0, x3 - x1)  # outward area-normal
-    wp.atomic_add(V_out, env, (1.0 / 3.0) * wp.dot(xbar - cx, nrm))
-
-
-@wp.kernel
 def cavity_gas_law(
     Kgas: wp.array[float],  # (N,) m·R·T  (CTIS control)
     V: wp.array[float],  # (N,) enclosed volume
@@ -225,89 +155,6 @@ def compute_pressure_force_stiffness(
     x2 = node_x[elem_nodes[e, 2]]
     x3 = node_x[elem_nodes[e, 3]]
     _pressure_element(x0, x1, x2, x3, p, e, elem_fp)
-
-
-@wp.kernel
-def compute_pressure_force_stiffness_batched_gp(
-    node_x: wp.array[wp.vec3],
-    elem_nodes: wp.array2d[wp.int32],
-    psign: wp.array[float],
-    pressure: wp.array[float],
-    elem_fp: wp.array2d[float],  # (N*n_elems, 24)  zeroed by caller
-    n_elems: int,
-    n_nodes: int,
-):
-    """dim = N*n_elems*4.  One thread per (element, Gauss point).
-
-    Per-env follower pressure force; same physics as the single-env
-    compute_pressure_force_stiffness with one thread per in-plane Gauss point,
-    forces accumulate via atomic_add.
-    """
-    tid = wp.tid()
-    e_global = tid // 4
-    gp_flat = tid % 4
-
-    env = e_global // n_elems
-    e = e_global % n_elems
-    p = pressure[env] * psign[e]
-    nb = env * n_nodes
-
-    x0 = node_x[nb + elem_nodes[e, 0]]
-    x1 = node_x[nb + elem_nodes[e, 1]]
-    x2 = node_x[nb + elem_nodes[e, 2]]
-    x3 = node_x[nb + elem_nodes[e, 3]]
-
-    # 2×2 Gauss point natural coordinates (hardcoded by gp_flat 0..3)
-    g = float(0.5773502691896258)
-    xi = float(0.0)
-    eta = float(0.0)
-    if gp_flat == 0:
-        xi = -g
-        eta = -g
-    elif gp_flat == 1:
-        xi = g
-        eta = -g
-    elif gp_flat == 2:
-        xi = g
-        eta = g
-    else:
-        xi = -g
-        eta = g
-
-    cxi0 = float(-1.0)
-    cxi1 = float(1.0)
-    cxi2 = float(1.0)
-    cxi3 = float(-1.0)
-    ceta0 = float(-1.0)
-    ceta1 = float(-1.0)
-    ceta2 = float(1.0)
-    ceta3 = float(1.0)
-
-    N0 = 0.25 * (1.0 + cxi0 * xi) * (1.0 + ceta0 * eta)
-    N1 = 0.25 * (1.0 + cxi1 * xi) * (1.0 + ceta1 * eta)
-    N2 = 0.25 * (1.0 + cxi2 * xi) * (1.0 + ceta2 * eta)
-    N3 = 0.25 * (1.0 + cxi3 * xi) * (1.0 + ceta3 * eta)
-    Nv = wp.vec4(N0, N1, N2, N3)
-
-    dxi0 = 0.25 * cxi0 * (1.0 + ceta0 * eta)
-    dxi1 = 0.25 * cxi1 * (1.0 + ceta1 * eta)
-    dxi2 = 0.25 * cxi2 * (1.0 + ceta2 * eta)
-    dxi3 = 0.25 * cxi3 * (1.0 + ceta3 * eta)
-
-    det0 = 0.25 * ceta0 * (1.0 + cxi0 * xi)
-    det1 = 0.25 * ceta1 * (1.0 + cxi1 * xi)
-    det2 = 0.25 * ceta2 * (1.0 + cxi2 * xi)
-    det3 = 0.25 * ceta3 * (1.0 + cxi3 * xi)
-
-    x_xi = dxi0 * x0 + dxi1 * x1 + dxi2 * x2 + dxi3 * x3
-    x_eta = det0 * x0 + det1 * x1 + det2 * x2 + det3 * x3
-    nvec = wp.cross(x_xi, x_eta)
-
-    for a in range(4):
-        fa = (p * Nv[a]) * nvec
-        wp.atomic_add(elem_fp, e_global, a * 6 + 0, fa[0])
-        wp.atomic_add(elem_fp, e_global, a * 6 + 1, fa[1])
-        wp.atomic_add(elem_fp, e_global, a * 6 + 2, fa[2])
 
 
 # ---------------------------------------------------------------------------
@@ -376,45 +223,6 @@ def assemble_sparse_stiffness(
 
 
 # ---------------------------------------------------------------------------
-# Graph-capture path: in-place K_eff = M/beta/dt^2 + (1+alpha)*K_t update
-# without memory allocation
-# ---------------------------------------------------------------------------
-
-
-@wp.kernel
-def zero_bsr_values(values: wp.array[float]):
-    """Zero all non-zero values in a BSR matrix (one thread per stored entry)."""
-    i = wp.tid()
-    values[i] = float(0.0)
-
-
-# ---------------------------------------------------------------------------
-# N-env batched variants (flat arrays: env * per_env + local index)
-# Reference / topology arrays (elem_nodes, blk_scatter_map) are shared across envs.
-# ---------------------------------------------------------------------------
-
-
-@wp.kernel
-def scatter_forces_batched(
-    elem_nodes: wp.array2d[wp.int32],  # (n_elems, 4) — shared
-    elem_f: wp.array2d[float],  # (N*n_elems, 24)
-    global_f: wp.array[float],  # (N*n_nodes*6,)
-    n_elems: int,
-    n_nodes: int,
-):
-    """dim = N*n_elems.  env = tid // n_elems;  e = tid % n_elems."""
-    tid = wp.tid()
-    env = tid // n_elems
-    e = tid % n_elems
-    node_base = env * n_nodes * 6
-    for node_local in range(4):
-        na = elem_nodes[e, node_local]
-        base = node_base + na * 6
-        for s in range(6):
-            wp.atomic_add(global_f, base + s, elem_f[tid, node_local * 6 + s])
-
-
-# ---------------------------------------------------------------------------
 # Blocked (6x6 per node pair) storage of K_eff — used by the PCG path.
 # Node-block CSR: blk_offsets (n_nodes+1,), blk_columns (nnzb,) shared across envs;
 # values flat (N * nnzb * 36,), block b of env e at e*nnz + b*36, row-major 6x6.
@@ -471,30 +279,6 @@ def build_block_structure(
         wp.array(scatter, dtype=wp.int32, device=device),
         nnzb,
     )
-
-
-@wp.kernel
-def scatter_elem_to_blk_batched(
-    elem_K: wp.array3d[float],  # (N*n_elems, 24, 24)
-    blk_scatter_map: wp.array2d[wp.int32],  # (n_elems, 16) — shared
-    scale: float,
-    out_vals: wp.array[float],  # (N*nnz,) flat, nnz = nnzb*36
-    n_elems: int,
-    nnz: int,
-):
-    """dim = N*n_elems*24.  One thread per (env, element, K-row k); blocked layout."""
-    tid = wp.tid()
-    n_per_env = n_elems * 24
-    env = tid // n_per_env
-    e_row = tid % n_per_env
-    e = e_row // 24
-    k = e_row % 24
-    e_global = env * n_elems + e
-    base = env * nnz + (k % 6) * 6
-    a4 = (k // 6) * 4
-    for j in range(24):
-        blk = blk_scatter_map[e, a4 + j // 6]
-        wp.atomic_add(out_vals, base + blk * 36 + (j % 6), scale * elem_K[e_global, k, j])
 
 
 @wp.kernel

@@ -598,14 +598,19 @@ def get_examples() -> dict[str, str]:
     """Return a dict mapping example short names to their full module paths."""
     example_map = {}
     examples_dir = get_source_directory()
+
+    def scan(package: str, directory: str) -> None:
+        for filename in sorted(os.listdir(directory)):
+            path = os.path.join(directory, filename)
+            if os.path.isdir(path) and not filename.startswith("_"):
+                scan(f"{package}.{filename}", path)  # e.g. ancf/diffsim
+            elif filename.startswith("example_") and filename.endswith(".py"):
+                example_map[filename[8:-3]] = f"{package}.{filename[:-3]}"
+
     for module in sorted(os.listdir(examples_dir)):
         module_dir = os.path.join(examples_dir, module)
-        if not os.path.isdir(module_dir) or module.startswith("_"):
-            continue
-        for filename in sorted(os.listdir(module_dir)):
-            if filename.startswith("example_") and filename.endswith(".py"):
-                example_name = filename[8:-3]
-                example_map[example_name] = f"newton.examples.{module}.{filename[:-3]}"
+        if os.path.isdir(module_dir) and not module.startswith("_"):
+            scan(f"newton.examples.{module}", module_dir)
     return example_map
 
 

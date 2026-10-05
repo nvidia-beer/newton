@@ -13,7 +13,7 @@
 #   ./run-examples.sh 1                            # Run item #1 from the menu
 #   ./run-examples.sh basic_pendulum               # By name (uses JSON defaults)
 #   ./run-examples.sh basic_pendulum -e            # By name + edit interactively
-#   ./run-examples.sh basic_pendulum --set num-frames=500
+#   ./run-examples.sh basic_pendulum --set num-frames=500   (flags go AFTER the example name/number)
 #   ./run-examples.sh basic_pendulum -- --num-frames 500   # Raw Newton args after --
 #   ./run-examples.sh basic_pendulum --profile     # Profile with Nsight Systems
 #   ./run-examples.sh basic_pendulum --profile --profile-dir ~/my-profiles
@@ -163,10 +163,28 @@ else
     for extra in "$@"; do RAW_ARGS+=("$extra"); done
 fi
 
+# ─── Read the config once: module, prompt keys, env ─────────────────────────
 # A config may delegate to a different example module via the optional
 # top-level "example" field — lets multiple configs share one Python
 # example (e.g. baymax_demo.json → inflatable with --shape baymax).
-INVOKE_EXAMPLE=$(python3 -c "import json; d=json.load(open('$CONFIG_DIR/$EXAMPLE.json')); print(d.get('example') or '$EXAMPLE')")
+# Every fact the prompts below need is emitted as shlex-quoted shell
+# assignments from a single read of the JSON, then eval'd.
+DESCRIBE=$(python3 - "$CONFIG_DIR/$EXAMPLE.json" "$EXAMPLE" <<'PY'
+import json, shlex, sys
+d = json.load(open(sys.argv[1])); a = d.get("args", {})
+def out(name, value): print(f"{name}={shlex.quote(str(value))}")
+out("INVOKE_EXAMPLE", d.get("example") or sys.argv[2])
+out("HAS_VEHICLE_KEY", int("vehicle-asset" in a and a.get("vehicle-asset") is None))
+out("HAS_TERRAIN_KEY", int("terrain" in a))
+out("CONFIG_TERRAIN", a.get("terrain") or "")
+out("TELEMETRY_VEHICLE", a.get("telemetry-vehicle") or "")
+out("HAS_TIRE_KEY", int("tire-asset" in a and a.get("tire-asset") is None and "vehicle-asset" not in a))
+out("HAS_SUBSTEPS_KEY", int("substeps" in a))
+out("CONFIG_SUBSTEPS", a.get("substeps"))
+print("CONFIG_ENV=(" + " ".join(shlex.quote(f"{k}={v}") for k, v in d.get("env", {}).items()) + ")")
+PY
+)
+eval "$DESCRIBE"
 
 echo "Running: $EXAMPLE (module: $INVOKE_EXAMPLE)"
 echo ""
@@ -176,67 +194,159 @@ RESOLVE_CMD=(python3 "$HELPER" resolve --config "$CONFIG_DIR/$EXAMPLE.json")
 [ "$EDIT" -eq 1 ] && RESOLVE_CMD+=(--edit)
 for s in "${SETS[@]}"; do RESOLVE_CMD+=(--set "$s"); done
 
+# given KEY → true when --set KEY=... or a raw --KEY... argument was passed
+given() {
+    local s r
+    for s in "${SETS[@]}"; do [[ "$s" == "$1="* ]] && return 0; done
+    for r in "${RAW_ARGS[@]}"; do [[ "$r" == "--$1"* ]] && return 0; done
+    return 1
+}
+
+# prompt_choice VAR noun "Title" default_name NAMES [LABELS]
+# Lists the NAMES array (shown as LABELS when given), reads a 1-based choice —
+# Enter picks default_name, or item 1 when it is absent — validates it and
+# stores the chosen name in VAR.
+prompt_choice() {
+    local out="$1" noun="$2" title="$3" default_name="$4"
+    local -n names_ref="$5"
+    local -n labels_ref="${6:-$5}"
+    local default=1 i choice
+    for i in "${!names_ref[@]}"; do [ "${names_ref[$i]}" = "$default_name" ] && default=$((i+1)); done
+    echo "$title"
+    for i in "${!names_ref[@]}"; do printf "  %3d) %s\n" $((i+1)) "${labels_ref[$i]}"; done
+    read -p "Select ${noun} (1-${#names_ref[@]}, Enter for ${default}=${names_ref[$((default-1))]}): " choice
+    choice="${choice:-$default}"
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#names_ref[@]}" ]; then
+        echo "Error: invalid ${noun} choice." >&2
+        exit 1
+    fi
+    printf -v "$out" '%s' "${names_ref[$((choice-1))]}"
+}
+
 # ─── Vehicle prompt: configs with a "vehicle-asset" key run any vehicle USD ──
 # (newton/examples/ancf/assets/*_vehicle.usd*, baked by newton-tire-tool). Ask which one
-# unless --set vehicle-asset=... / a raw --vehicle-asset was given; default: the Sherp.
+# unless --set vehicle-asset=... / a raw --vehicle-asset was given; default: the Warthog.
 # The tire follows the vehicle (defaultTireAsset in the vehicle USD) unless overridden.
-HAS_VEHICLE_KEY=$(python3 -c "import json; d=json.load(open('$CONFIG_DIR/$EXAMPLE.json')); print(int('vehicle-asset' in d.get('args', {})))")
-VEHICLE_GIVEN=0
-for s in "${SETS[@]}"; do [[ "$s" == vehicle-asset=* ]] && VEHICLE_GIVEN=1; done
-for r in "${RAW_ARGS[@]}"; do [[ "$r" == --vehicle-asset* ]] && VEHICLE_GIVEN=1; done
-if [ "$HAS_VEHICLE_KEY" = "1" ] && [ "$VEHICLE_GIVEN" -eq 0 ]; then
+# (a non-null vehicle-asset in the config pins the vehicle and skips the prompt, like tire-asset)
+if [ "$HAS_VEHICLE_KEY" = "1" ] && ! given vehicle-asset; then
     mapfile -t VEHICLES < <(cd "$NEWTON_DIR/newton/examples/ancf/assets" && ls *_vehicle.usd* 2>/dev/null)
     if [ "${#VEHICLES[@]}" -eq 0 ]; then
         echo "Error: no vehicle assets (*_vehicle.usd*) in newton/examples/ancf/assets — run newton-tire-tool/scripts/regenerate_all.sh" >&2
         exit 1
     fi
-    VDEFAULT=1
-    for i in "${!VEHICLES[@]}"; do [ "${VEHICLES[$i]}" = "sherp_vehicle.usdc" ] && VDEFAULT=$((i+1)); done
-    echo "Vehicle (USD asset):"
-    for i in "${!VEHICLES[@]}"; do printf "  %3d) %s\n" $((i+1)) "${VEHICLES[$i]}"; done
-    read -p "Select vehicle (1-${#VEHICLES[@]}, Enter for ${VDEFAULT}=${VEHICLES[$((VDEFAULT-1))]}): " vchoice
-    vchoice="${vchoice:-$VDEFAULT}"
-    if ! [[ "$vchoice" =~ ^[0-9]+$ ]] || [ "$vchoice" -lt 1 ] || [ "$vchoice" -gt "${#VEHICLES[@]}" ]; then
-        echo "Error: invalid vehicle choice." >&2
+    prompt_choice VEHICLE vehicle "Vehicle (USD asset):" warthog_vehicle.usdc VEHICLES
+    RESOLVE_CMD+=(--set "vehicle-asset=${VEHICLE}")
+    echo ""
+fi
+
+# ─── Tire resolution prompt: vehicles baked with a low-resolution tire (simpleTireAsset) ─────
+# A vehicle <name>_vehicle.usdc that ships assets/<name>_ancf_tire_simple.usda (the super-jeep
+# tire's 240-node layout: smooth, no lugs) asks which tire mesh to run (default low); high = the
+# vehicle's defaultTireAsset (no override). Skipped when --set tire-asset=... / a raw --tire-asset was given.
+VEH_NAME=""
+for s in "${SETS[@]}"; do [[ "$s" == vehicle-asset=* ]] && VEH_NAME="${s#vehicle-asset=}"; done
+for i in "${!RAW_ARGS[@]}"; do
+    case "${RAW_ARGS[$i]}" in
+        --vehicle-asset=*) VEH_NAME="${RAW_ARGS[$i]#--vehicle-asset=}" ;;
+        --vehicle-asset) VEH_NAME="${RAW_ARGS[$((i+1))]:-}" ;;
+    esac
+done
+[ -n "${VEHICLE:-}" ] && VEH_NAME="$VEHICLE"
+if [ -n "$VEH_NAME" ] && ! given tire-asset; then
+    VEH_BASE=$(basename "$VEH_NAME"); VEH_BASE="${VEH_BASE%%_vehicle.usd*}"
+    SIMPLE_TIRE=$(cd "$NEWTON_DIR/newton/examples/ancf/assets" && ls "${VEH_BASE}"_*tire_simple.usda 2>/dev/null | head -1)
+    if [ -n "$SIMPLE_TIRE" ]; then
+        echo "Tire resolution for ${VEH_BASE}:"
+        echo "    1) high   the vehicle's own tire mesh (lugs, full detail)"
+        echo "    2) low    ${SIMPLE_TIRE} (smooth, 240 nodes / 224 elems, like the super-jeep tire)"
+        read -p "Select resolution (1-2, Enter for 2=low): " rchoice
+        case "${rchoice:-}" in
+            1|high) ;;
+            ""|2|low) RESOLVE_CMD+=(--set "tire-asset=${SIMPLE_TIRE}") ;;
+            *) echo "Error: invalid resolution choice." >&2; exit 1 ;;
+        esac
+        echo ""
+    fi
+fi
+
+# ─── Terrain prompt: configs with a "terrain" key run any terrain bundle ─────────────────
+# (newton/examples/ancf/assets/terrain/<name>/<name>_terrain.json: boulders / craters from
+# newton-terrain-tool, rellis_0000N from newton-rellis-3d-tool — one format). Ask which one
+# unless --set terrain=... / a raw --terrain was given; Enter keeps the config's value.
+if [ "$HAS_TERRAIN_KEY" = "1" ] && ! given terrain; then
+    TERRAIN_DIR="$NEWTON_DIR/newton/examples/ancf/assets/terrain"
+    mapfile -t TERRAINS < <(cd "$TERRAIN_DIR" 2>/dev/null && for d in */; do d="${d%/}"; [ -f "$d/${d}_terrain.json" ] && echo "$d"; done)
+    # configs with a "telemetry-vehicle" key (vehicle_telemetry) need a recording of that vehicle on the terrain
+    if [ -n "$TELEMETRY_VEHICLE" ]; then
+        TELEMETRY_DIR="$NEWTON_DIR/newton/examples/ancf/assets/vehicle_telemetry/$TELEMETRY_VEHICLE"
+        FILTERED=()
+        for d in "${TERRAINS[@]}"; do [ -f "$TELEMETRY_DIR/$d/metadata.json" ] && FILTERED+=("$d"); done
+        TERRAINS=("${FILTERED[@]}")
+        if [ "${#TERRAINS[@]}" -eq 0 ]; then
+            echo "Error: no terrain has $TELEMETRY_VEHICLE telemetry under $TELEMETRY_DIR" >&2
+            exit 1
+        fi
+    fi
+    if [ "${#TERRAINS[@]}" -eq 0 ]; then
+        echo "Error: no terrain bundles in newton/examples/ancf/assets/terrain — run newton-terrain-tool/regenerate_all.sh --no-trackgen" >&2
         exit 1
     fi
-    RESOLVE_CMD+=(--set "vehicle-asset=${VEHICLES[$((vchoice-1))]}")
+    TERRAIN_LABELS=()
+    for i in "${!TERRAINS[@]}"; do
+        # one line per bundle: grid size, reference track (length, open/closed) or none
+        info=$(python3 - "$TERRAIN_DIR/${TERRAINS[$i]}/${TERRAINS[$i]}_terrain.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); g = m["grid"]; rt = m.get("reference_track")
+s = f"{g['size'][0]:.0f} x {g['size'][1]:.0f} m, cell {g['cell']} m"
+s += f", track {rt['length_m']:.0f} m {'loop' if rt.get('closed') else 'open'}" if rt else ", no track"
+print(s)
+PY
+)
+        printf -v "TERRAIN_LABELS[$i]" "%-14s %s" "${TERRAINS[$i]}" "$info"
+    done
+    prompt_choice TERRAIN terrain "Terrain (bundle under assets/terrain/):" "$CONFIG_TERRAIN" TERRAINS TERRAIN_LABELS
+    RESOLVE_CMD+=(--set "terrain=${TERRAIN}")
     echo ""
 fi
 
 # ─── Tire prompt: tire-only configs (a "tire-asset" key, no vehicle) run any ANCF tire USD ──
-# (newton/examples/ancf/assets/*_tire.usda). Default: the super-jeep tire (the validated one; the Sherp bake is not stable yet). Skipped when given.
-HAS_TIRE_KEY=$(python3 -c "import json; a=json.load(open('$CONFIG_DIR/$EXAMPLE.json')).get('args', {}); print(int('tire-asset' in a and 'vehicle-asset' not in a))")
-TIRE_GIVEN=0
-for s in "${SETS[@]}"; do [[ "$s" == tire-asset=* ]] && TIRE_GIVEN=1; done
-for r in "${RAW_ARGS[@]}"; do [[ "$r" == --tire-asset* ]] && TIRE_GIVEN=1; done
-if [ "$HAS_TIRE_KEY" = "1" ] && [ "$TIRE_GIVEN" -eq 0 ]; then
-    mapfile -t TIRES < <(cd "$NEWTON_DIR/newton/examples/ancf/assets" && ls *_tire.usda 2>/dev/null)
+# (newton/examples/ancf/assets/*.usda — tires and the minimal ball; vehicles are .usdc). Default: the super-jeep tire
+# (the validated one; the Sherp bake is not stable yet). Skipped when the config pins a non-null tire-asset, or when given on the CLI.
+if [ "$HAS_TIRE_KEY" = "1" ] && ! given tire-asset; then
+    mapfile -t TIRES < <(cd "$NEWTON_DIR/newton/examples/ancf/assets" && ls *.usda 2>/dev/null)
     if [ "${#TIRES[@]}" -eq 0 ]; then
-        echo "Error: no tire assets (*_tire.usda) in newton/examples/ancf/assets — run newton-tire-tool/scripts/regenerate_all.sh" >&2
+        echo "Error: no ANCF shell assets (*.usda) in newton/examples/ancf/assets — run newton-tire-tool/scripts/regenerate_all.sh" >&2
         exit 1
     fi
-    TDEFAULT=1
-    for i in "${!TIRES[@]}"; do [ "${TIRES[$i]}" = "superjeep_tire.usda" ] && TDEFAULT=$((i+1)); done
-    echo "Tire (ANCF USD asset):"
-    for i in "${!TIRES[@]}"; do printf "  %3d) %s\n" $((i+1)) "${TIRES[$i]}"; done
-    read -p "Select tire (1-${#TIRES[@]}, Enter for ${TDEFAULT}=${TIRES[$((TDEFAULT-1))]}): " tchoice
-    tchoice="${tchoice:-$TDEFAULT}"
-    if ! [[ "$tchoice" =~ ^[0-9]+$ ]] || [ "$tchoice" -lt 1 ] || [ "$tchoice" -gt "${#TIRES[@]}" ]; then
-        echo "Error: invalid tire choice." >&2
-        exit 1
-    fi
-    RESOLVE_CMD+=(--set "tire-asset=${TIRES[$((tchoice-1))]}")
+    prompt_choice TIRE tire "Tire (ANCF USD asset):" superjeep_tire.usda TIRES
+    RESOLVE_CMD+=(--set "tire-asset=${TIRE}")
     echo ""
 fi
 
-RESOLVED=$("${RESOLVE_CMD[@]}")
-# Raw args (after '--') go last and win per argparse's last-value rule.
-RAW_STR=""
-if [ "${#RAW_ARGS[@]}" -gt 0 ]; then
-    RAW_STR=$(printf ' %q' "${RAW_ARGS[@]}")
+# ─── Substeps prompt: configs with a "substeps" key ─────────────────────────────────────────
+# The implicit solver retains the config timestep; fewer substeps need an accuracy check.
+# Skipped when --set substeps=... or a raw --substeps was given; Enter keeps
+# the config's value.
+if [ "$HAS_SUBSTEPS_KEY" = "1" ] && ! given substeps; then
+    echo "Substeps per 60 Hz frame (implicit solver):"
+    read -p "Substeps (positive integer, Enter for ${CONFIG_SUBSTEPS}): " nchoice
+    case "${nchoice:-}" in
+        "")  ;;
+        ''|*[!0-9]*) echo "Error: substeps must be a positive integer." >&2; exit 1 ;;
+        0) echo "Error: substeps must be a positive integer." >&2; exit 1 ;;
+        *) RESOLVE_CMD+=(--set "substeps=${nchoice}") ;;
+    esac
+    echo ""
 fi
-EXTRA_ARGS="$RESOLVED$RAW_STR"
+
+# Validate the final argument selection, including raw arguments, before launching Docker.
+# Raw arguments remain last and retain argparse's last-value precedence.
+RESOLVE_CMD+=(--raw-args "${RAW_ARGS[@]}")
+EXTRA_ARGS=$("${RESOLVE_CMD[@]}")
+
+# Optional per-example environment (config "env"), passed as array arguments.
+CONFIG_ENV_ARGS=()
+for assignment in "${CONFIG_ENV[@]}"; do CONFIG_ENV_ARGS+=(-e "$assignment"); done
 
 # ─── Profile output directory ────────────────────────────────────────────────
 PROFILE_MOUNT_ARGS=()
@@ -319,7 +429,9 @@ docker run --rm -it \
     --ulimit stack=67108864 \
     "${DOCKER_X11_ARGS[@]}" \
     "${PROFILE_MOUNT_ARGS[@]}" \
+    "${CONFIG_ENV_ARGS[@]}" \
     -v "$NEWTON_DIR/newton:/workspace/newton/newton" \
+    -v "$NEWTON_DIR/third_party/mujoco_warp:/workspace/newton/third_party/mujoco_warp:ro" \
     -v "$NEWTON_DIR/docker/config:/workspace/newton/docker/config" \
     -v "$WARP_CACHE_DIR:/root/.cache/warp" \
     -v "$NEWTON_CACHE_DIR:/root/.cache/newton" \

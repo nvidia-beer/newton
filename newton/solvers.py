@@ -42,7 +42,9 @@ from ._src.solvers import (
     style3d,
 )
 from ._src.solvers import coupled as _coupled
-from ._src.solvers.coupling import InterfaceCouplerGS
+from ._src.solvers.ancf_shell.coupling import InterfaceCouplerGS
+from ._src.solvers.ancf_shell.differentiation import ANCFTireEquilibrium
+from ._src.solvers.ancf_shell.traction import ANCFTireTraction
 
 # solver flags
 from ._src.solvers.flags import SolverNotifyFlags
@@ -61,6 +63,8 @@ sys.modules[f"{__name__}.experimental.coupled"] = _coupled
 
 __all__ = [
     "ANCFShellModel",
+    "ANCFTireEquilibrium",
+    "ANCFTireTraction",
     "InterfaceCouplerGS",
     "SolverANCFShell",
     "SolverANCFShellRigid",

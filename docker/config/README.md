@@ -22,6 +22,9 @@ All fields optional. Unknown fields are ignored.
         "viewer":     "gl",
         "num-frames": 100,
         "headless":   false
+    },
+    "env": {
+        "OPENBLAS_NUM_THREADS": "1"
     }
 }
 ```
@@ -31,6 +34,11 @@ invoked. When omitted, the JSON filename (without `.json`) is used. Set
 it when one Python example should appear in the menu under multiple
 configs (e.g. `baymax_demo.json` → `inflatable` with
 `"shape": "baymax"`).
+
+The optional `"env"` object lists environment variables for the
+container: `run-examples.sh` passes each `KEY: value` pair to
+`docker run` as `-e KEY=value`. Values are strings; they are never
+evaluated by the shell.
 
 ### Key → CLI mapping
 

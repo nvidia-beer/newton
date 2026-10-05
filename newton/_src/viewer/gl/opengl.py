@@ -23,7 +23,9 @@ from .shaders import (
     ShadowShader,
 )
 
-ENABLE_CUDA_INTEROP = False
+# CUDA-GL buffer sharing for dynamic meshes/lines; off on Windows, where the pinned-host
+# upload path avoids driver overhead.
+ENABLE_CUDA_INTEROP = sys.platform == "linux"
 ENABLE_GL_CHECKS = False
 
 wp.set_module_options({"enable_backward": False})
@@ -232,6 +234,8 @@ class MeshGL:
         # Per-mesh albedo and material (applied in render()).
         self.color = (0.7, 0.7, 0.7)
         self.material = (0.5, 0.0, 0.0, 0.0)
+        # Opacity in [0, 1]; below 1 the mesh is depth-prepassed and alpha-blended over the scene.
+        self.alpha = 1.0
 
         # Create CUDA-GL interop buffer for efficient updates
         if ENABLE_CUDA_INTEROP and self.device.is_cuda:
@@ -368,7 +372,24 @@ class MeshGL:
             gl.glVertexAttrib4f(8, *self.material)
 
             gl.glBindVertexArray(self.vao)
-            gl.glDrawElements(gl.GL_TRIANGLES, self.num_indices, gl.GL_UNSIGNED_INT, None)
+            if self.alpha < 1.0:
+                # Depth pre-pass so only the nearest layer of the mesh is blended (no see-through
+                # to its own far side), then the blended colour pass on top of the opaque scene.
+                gl.glColorMask(gl.GL_FALSE, gl.GL_FALSE, gl.GL_FALSE, gl.GL_FALSE)
+                gl.glDrawElements(gl.GL_TRIANGLES, self.num_indices, gl.GL_UNSIGNED_INT, None)
+                gl.glColorMask(gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE)
+                gl.glVertexAttrib1f(9, 1.0 - self.alpha)
+                gl.glEnable(gl.GL_BLEND)
+                gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+                gl.glDepthFunc(gl.GL_LEQUAL)
+                gl.glDepthMask(gl.GL_FALSE)
+                gl.glDrawElements(gl.GL_TRIANGLES, self.num_indices, gl.GL_UNSIGNED_INT, None)
+                gl.glDepthMask(gl.GL_TRUE)
+                gl.glDepthFunc(gl.GL_LESS)
+                gl.glDisable(gl.GL_BLEND)
+                gl.glVertexAttrib1f(9, 0.0)
+            else:
+                gl.glDrawElements(gl.GL_TRIANGLES, self.num_indices, gl.GL_UNSIGNED_INT, None)
             gl.glBindVertexArray(0)
 
 

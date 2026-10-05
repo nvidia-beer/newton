@@ -668,7 +668,8 @@ Discovery and registration
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Examples are discovered automatically: any file matching
-``newton/examples/<category>/example_*.py`` is picked up by ``newton.examples.get_examples()``.
+``newton/examples/<category>/example_*.py`` (or in a sub-package such as
+``newton/examples/ancf/diffsim/``) is picked up by ``newton.examples.get_examples()``.
 The short name used on the command line is the filename without the ``example_`` prefix and
 ``.py`` extension (e.g. ``basic_pendulum``).
 

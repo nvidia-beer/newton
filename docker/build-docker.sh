@@ -20,9 +20,13 @@ usage() {
     echo "  x86      - Build for x86_64/amd64"
     echo "  both     - Build for both platforms (creates multi-arch image)"
     echo ""
+    echo "WARP_LOCAL_PATCHES=0 disables the local CUDA 13 compiler patch (default: 1)."
+    echo "ARM64 Warp selection: WARP_VERSION=1.17.0+cu13 (default) or locked"
+    echo ""
     echo "Examples:"
     echo "  $0           # Auto-detect and build for current platform"
     echo "  $0 arm64     # Force build for ARM64"
+    echo "  WARP_VERSION=locked $0 arm64  # Restore the lockfile Warp version"
     echo "  $0 both      # Build multi-arch image for both platforms"
     exit 1
 }
@@ -47,15 +51,33 @@ if [ "$PLATFORM" = "auto" ]; then
     echo ""
 fi
 
+# The pinned wheels are ARM64 only; preserve the x86 lockfile default.
+if [ "$PLATFORM" = arm64 ] || [ "$PLATFORM" = both ]; then
+    WARP_VERSION="${WARP_VERSION:-1.17.0+cu13}"
+else
+    WARP_VERSION="${WARP_VERSION:-locked}"
+fi
+WARP_LOCAL_PATCHES="${WARP_LOCAL_PATCHES:-1}"
+case "$WARP_LOCAL_PATCHES" in
+    0|1) ;;
+    *) echo "WARP_LOCAL_PATCHES must be 0 or 1" >&2; exit 1 ;;
+esac
+case "$WARP_VERSION" in
+    locked|1.17.0+cu13) ;;
+    *) echo "Unsupported WARP_VERSION: $WARP_VERSION" >&2; exit 1 ;;
+esac
+
 case "$PLATFORM" in
     arm64)
         ARCH_TAG="arm64"
         echo -e "${BLUE}Building Newton for ARM64 (aarch64)...${NC}"
-        echo "Using NVIDIA CUDA 13 base image"
+        echo "Using NVIDIA CUDA 13 base image; Warp: $WARP_VERSION"
         echo ""
 
         DOCKER_BUILDKIT=1 docker build \
             --platform linux/${ARCH_TAG} \
+            --build-arg "WARP_VERSION=$WARP_VERSION" \
+            --build-arg "WARP_LOCAL_PATCHES=$WARP_LOCAL_PATCHES" \
             -t newton:${ARCH_TAG} \
             -t newton:latest \
             -f "$SCRIPT_DIR/Dockerfile.arm64" \
@@ -68,6 +90,10 @@ case "$PLATFORM" in
         ;;
 
     x86)
+        if [ "$WARP_VERSION" != locked ]; then
+            echo "The pinned Warp override is currently ARM64 only." >&2
+            exit 1
+        fi
         ARCH_TAG="amd64"
         echo -e "${BLUE}Building Newton for x86_64 (amd64)...${NC}"
         echo "Using UV Python 3.11 base image"
@@ -108,6 +134,8 @@ case "$PLATFORM" in
         echo -e "${BLUE}Building ARM64 image...${NC}"
         DOCKER_BUILDKIT=1 docker buildx build \
             --platform linux/arm64 \
+            --build-arg "WARP_VERSION=$WARP_VERSION" \
+            --build-arg "WARP_LOCAL_PATCHES=$WARP_LOCAL_PATCHES" \
             -t newton:arm64 \
             -f "$SCRIPT_DIR/Dockerfile.arm64" \
             --load \

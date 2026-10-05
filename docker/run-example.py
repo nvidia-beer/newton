@@ -53,6 +53,9 @@ def list_configs(config_dir: Path) -> list[tuple[str, str]]:
         if not isinstance(data, dict):
             print(f"warning: {path} top-level is not an object; skipping", file=sys.stderr)
             continue
+        if not isinstance(data.get("args"), dict):
+            # not an example config (no "args" section)
+            continue
         entries.append((path.stem, str(data.get("description", ""))))
     return entries
 
@@ -215,6 +218,13 @@ def main() -> int:
         help="Override a parameter without the interactive prompt.",
     )
 
+    p_resolve.add_argument(
+        "--raw-args",
+        nargs=argparse.REMAINDER,
+        default=[],
+        help="Append raw example arguments after config overrides; must be the final helper option.",
+    )
+
     ns = parser.parse_args()
 
     if ns.cmd == "list":
@@ -229,7 +239,7 @@ def main() -> int:
         if not ns.config.is_file():
             print(f"error: config file not found: {ns.config}", file=sys.stderr)
             return 2
-        cli = resolve(ns.config, ns.edit, ns.set)
+        cli = resolve(ns.config, ns.edit, ns.set) + ns.raw_args
         print(" ".join(shlex.quote(tok) for tok in cli))
         return 0
 

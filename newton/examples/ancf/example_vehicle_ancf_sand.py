@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Vehicle on 4 ANCF FEM tires driving on implicit-MPM sand (vehicle from --vehicle-asset).
 
-Extends vehicle_ancf_tires (3): a granular sand bed (SolverImplicitMPM) sits on
+Extends the shared VehicleSimulation runtime: a granular sand bed (SolverImplicitMPM) sits on
 the floor (z in [0, h]) and the vehicle starts on top of it; the analytic ANCF ground
 plane stays at the floor so the tires are always supported.
 
@@ -32,7 +32,9 @@ import warp.fem as fem
 
 import newton
 import newton.examples
-from newton.examples.ancf import example_vehicle_ancf_tires as _dw
+from newton.examples.ancf import _vehicle_config as vehicle_config
+from newton.examples.ancf._vehicle_kernels import gather_contact_spikes
+from newton.examples.ancf._vehicle_simulation import VehicleSimulation
 from newton.solvers import SolverImplicitMPM
 
 # ── Sand bed defaults ─────────────────────────────────────────────────────────
@@ -90,7 +92,7 @@ def _gather_stride(src: wp.array[wp.vec3], stride: int, dst: wp.array[wp.vec3]):
 # ── Example ───────────────────────────────────────────────────────────────────
 
 
-class Example(_dw.Example):
+class Example(VehicleSimulation):
     """Vehicle (--vehicle-asset) + 4 ANCF tires on implicit-MPM sand."""
 
     def __init__(self, viewer=None, args=None):
@@ -109,7 +111,7 @@ class Example(_dw.Example):
     def _build_sand(self, args) -> None:
         dev = "cuda:0"
         n_nodes = self._n_nodes
-        n_tire_pts = _dw._N_TIRES * n_nodes
+        n_tire_pts = vehicle_config.N_TIRES * n_nodes
 
         size = tuple(float(v) for v in args.sand_size)
         voxel = float(args.sand_voxel)
@@ -160,7 +162,7 @@ class Example(_dw.Example):
         tris = self._closed_tire_triangles()
         meshes = []
         particle_ids = []
-        for e in range(_dw._N_TIRES):
+        for e in range(vehicle_config.N_TIRES):
             pts = wp.array(tire_zu[e * n_nodes : (e + 1) * n_nodes], dtype=wp.vec3, device=dev)
             meshes.append(wp.Mesh(pts, wp.array(tris.flatten(), dtype=wp.int32, device=dev), wp.zeros_like(pts)))
             particle_ids.append(list(range(n_sand + e * n_nodes, n_sand + (e + 1) * n_nodes)))
@@ -187,19 +189,19 @@ class Example(_dw.Example):
         cfg.transfer_scheme = "pic"
         cfg.collider_velocity_mode = "forward"
         self.mpm = SolverImplicitMPM(self.sand_model, cfg, temporary_store=fem.TemporaryStore())
-        n_t = _dw._N_TIRES
+        n_t = vehicle_config.N_TIRES
         self.mpm.setup_collider(
             collider_meshes=[*meshes, None],
             collider_body_ids=[None] * n_t + [-1],
             collider_margins=[0.5 * voxel] * n_t + [None],
-            collider_friction=[float(getattr(args, "mu", _dw._MU))] * n_t + [_FLOOR_FRIC],
+            collider_friction=[float(getattr(args, "mu", vehicle_config.MU))] * n_t + [_FLOOR_FRIC],
             collider_particle_ids=[*particle_ids, None],
         )
 
         # Pre-settle the whole bed before the vehicle starts interacting with it.
         n_presettle = int(args.presettle_steps)
         for _ in range(n_presettle):
-            self.mpm.step(self.sand_state, self.sand_state, None, None, _dw._FRAME_DT)
+            self.mpm.step(self.sand_state, self.sand_state, None, None, vehicle_config.FRAME_DT)
 
         # Render buffers, allocated once.  The GL viewer draws each point as an instanced
         # 72-triangle sphere and rebuilds a 4x4 transform per instance every frame, so only
@@ -263,7 +265,8 @@ class Example(_dw.Example):
         ax = x0[:, 0]
         left = np.where(np.isclose(ax, ax.min(), atol=1e-4))[0]
         right = np.where(np.isclose(ax, ax.max(), atol=1e-4))[0]
-        assert len(left) == len(right), f"bead rings differ: {len(left)} vs {len(right)}"
+        if len(left) != len(right):
+            raise ValueError(f"bead rings differ: {len(left)} vs {len(right)}")
         ang = np.arctan2(x0[:, 2], x0[:, 1])
         left = left[np.argsort(ang[left])]
         right = right[np.argsort(ang[right])]
@@ -293,7 +296,7 @@ class Example(_dw.Example):
     def _sand_step(self) -> None:
         dev = "cuda:0"
         ancf = self.ancf_solver
-        n = _dw._N_TIRES * self._n_nodes
+        n = vehicle_config.N_TIRES * self._n_nodes
         n_sand = self._n_sand
 
         wp.launch(
@@ -306,10 +309,10 @@ class Example(_dw.Example):
             self.sand_state, newton.StateFlags.PARTICLE_Q | newton.StateFlags.PARTICLE_QD
         )
 
-        self.mpm.step(self.sand_state, self.sand_state, None, None, _dw._FRAME_DT)
+        self.mpm.step(self.sand_state, self.sand_state, None, None, vehicle_config.FRAME_DT)
 
         self._tire_f.zero_()
-        self.mpm.collect_deformable_collider_particle_forces(self.sand_state, _dw._FRAME_DT, self._tire_f)
+        self.mpm.collect_deformable_collider_particle_forces(self.sand_state, vehicle_config.FRAME_DT, self._tire_f)
         wp.launch(
             _sand_force_to_ancf,
             dim=n,
@@ -331,14 +334,14 @@ class Example(_dw.Example):
         self._tire_f_sum.zero_()
         wp.launch(
             _sum_tire_force,
-            dim=_dw._N_TIRES * self._n_nodes,
+            dim=vehicle_config.N_TIRES * self._n_nodes,
             inputs=[self._tire_f, self._n_sand, self._n_nodes, self._tire_f_sum],
             device="cuda:0",
         )
         f_sum = self._tire_f_sum.numpy()
         xpos_all = self.solver.xpos.numpy()
         smj = self._spindle_mj_arr.numpy()
-        for label, e in _dw._WHEEL_ORDER:
+        for label, e in vehicle_config.WHEEL_ORDER:
             sink = self.spec.tire_R_outer + self._sand_h - float(xpos_all[0, int(smj[e])][2])
             self._gui_sand_fz[e] = float(f_sum[e][2])
             self._gui_sink[e] = sink
@@ -351,7 +354,7 @@ class Example(_dw.Example):
         super().gui(ui)
         ui.separator()
         ui.text(f"Sand  {self._n_sand:,} particles   (tire loads updated every --diag-period frames)")
-        for label, e in _dw._WHEEL_ORDER:
+        for label, e in vehicle_config.WHEEL_ORDER:
             ui.text(f"  {label}  Fz_sand={self._gui_sand_fz[e]:+.0f} N  hub_drop={self._gui_sink[e] * 1e3:.1f} mm")
 
     # ── Render ────────────────────────────────────────────────────────────────
@@ -377,8 +380,8 @@ class Example(_dw.Example):
         self.viewer.log_lines("bead_rings", self._ring_line_s, self._ring_line_e, colors=(1.0, 0.45, 0.0))
         self.viewer.log_lines("bead_spokes", self._spoke_start_zu, self._bead_pos_zu, colors=(1.0, 0.90, 0.1))
         wp.launch(
-            _dw._gather_contact_spikes,
-            dim=_dw._N_TIRES * self._n_nodes,
+            gather_contact_spikes,
+            dim=vehicle_config.N_TIRES * self._n_nodes,
             inputs=[
                 self.ancf_solver.node_x,
                 self._n_nodes,
@@ -394,22 +397,24 @@ class Example(_dw.Example):
 
     # ── Tests ─────────────────────────────────────────────────────────────────
 
+    # The runner requires these hooks; test code is loaded only in test mode.
+    def test_post_step(self) -> None:
+        from newton.tests.ancf_vehicle_checks import check_vehicle_step  # noqa: PLC0415
+
+        check_vehicle_step(self)
+
     def test_final(self) -> None:
-        super().test_final()
-        sand_q = self.sand_state.particle_q.numpy()[: self._n_sand]
-        assert np.all(np.isfinite(sand_q)), "non-finite sand particle positions"
-        xpos_all = self.solver.xpos.numpy()
-        smj = self._spindle_mj_arr.numpy()
-        for e in range(_dw._N_TIRES):
-            drop = self.spec.tire_R_outer + self._sand_h - float(xpos_all[0, int(smj[e])][2])
-            assert 0.005 < drop < 0.3, f"FAIL tire {e}: hub drop {drop * 1e3:.1f} mm not in (5, 300) mm"
-        print(f"[PASS] sand: {self._n_sand:,} particles finite, all 4 tires supported by the bed")
+        from newton.tests.ancf_vehicle_checks import check_sand_final  # noqa: PLC0415
+
+        check_sand_final(self)
 
     # ── Parser ────────────────────────────────────────────────────────────────
 
     @staticmethod
     def create_parser():
-        parser = _dw.Example.create_parser()
+        parser = VehicleSimulation.create_parser()
+        # Sand uses a separate, frame-lagged MPM coupling and keeps its existing default.
+        parser.set_defaults(coupling_method="aitken")
         parser.add_argument(
             "--sand-size",
             type=float,

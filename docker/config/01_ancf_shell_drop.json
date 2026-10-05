@@ -1,5 +1,5 @@
 {
-    "description": "ANCF3423 shell tire(s) dropped onto rigid ground. run-examples.sh asks which ANCF tire USD to load (default: sherp_ancf_tire.usda \u2014 the Sherp's carcass + 26 flat-topped lugs at x10 from its STL). Each tire entry is independent \u2014 position and material are per tire; the mesh and its per-section thickness come from the asset (E null = the asset's baked orthotropic material). Global solver params apply to all tires; pcg-iters null = the tire asset's recommendation (10, the locked budget, for every baked tire).",
+    "description": "ANCF3423 shell tire(s) dropped onto rigid ground. run-examples.sh asks which ANCF tire USD to load (default: superjeep_tire.usda). Each tire entry is independent \u2014 position and material are per tire; the mesh and its per-section thickness come from the asset (E null = the asset's baked orthotropic material). Global solver params apply to all tires; pcg-iters null = the tire asset's recommendation (10, the locked budget, for every baked tire). Contact stiffness defaults to the larger of the tire USD value and a drop-energy estimate for the contact-penetration target; explicit kn overrides it. Damping defaults to the USD. The implicit solver uses 6 substeps / 2 NR / 10 PCG.",
     "example": "ancf_shell_drop",
     "args": {
         "viewer": "gl",
@@ -7,11 +7,11 @@
         "headless": false,
         "n-envs": 1,
         "tire-asset": null,
-        "substeps": 15,
+        "substeps": 6,
         "nr-iters": 2,
         "pcg-iters": 10,
-        "kn": 2000.0,
-        "kd": 2.0,
+        "kn": null,
+        "kd": null,
         "shell-tires": [
             {
                 "_material": "Reference \u2014 the asset's baked orthotropic 3-section material (Polaris recipe)",
@@ -77,6 +77,7 @@
                 "max-gauge-pressure": 8000.0,
                 "gauge-rate": 500.0
             }
-        ]
+        ],
+        "contact-penetration": 0.01
     }
 }

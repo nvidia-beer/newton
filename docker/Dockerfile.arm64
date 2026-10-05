@@ -1,5 +1,5 @@
 # Newton with UV - ARM64 Build (CUDA Optimized)
-# Uses NVIDIA CUDA 13 base image to match warp-lang v1.12.0+cu13
+# Use the pinned Warp 1.17 CUDA 13 build; retain other builds for comparison.
 FROM nvidia/cuda:13.0.0-devel-ubuntu22.04 AS base
 
 WORKDIR /workspace/newton
@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10-dev \
     python3-pip \
     git \
+    patch \
     curl \
     ca-certificates \
     build-essential \
@@ -61,26 +62,57 @@ COPY newton/licenses newton/licenses
 # dependency resolution fails with "Distribution not found".
 COPY third_party/mujoco_warp third_party/mujoco_warp
 
-# Install Python deps from the lockfile exactly.
-# --frozen avoids re-resolution: mujoco 3.8.x is no longer on PyPI but is pinned
-# in uv.lock, and the arm64 warp wheel is already in the lockfile too.
-RUN uv sync --frozen --prerelease=allow --no-install-workspace --extra dev --extra cudss
+# Validate project metadata against the lockfile and install its exact versions.
+# Keep native MuJoCo paired with the editable, locally patched MuJoCo Warp.
+# Upgrading only one of them can break Newton's solver integration.
+RUN uv sync --locked --prerelease=allow --no-install-workspace --extra dev
 
 # Copy source code
 COPY . ./
 
-# Install workspace packages
-RUN uv sync --frozen --prerelease=allow --extra dev --extra cudss
+# Install workspace packages.
+RUN uv sync --locked --prerelease=allow --extra dev
 
-# Install Nsight Systems CLI — placed after uv sync to preserve dep-resolution
-# cache. cuda-nsight-systems-13-0 is in the pre-configured CUDA 13 apt repo.
-# nvtx Python package: required by wp.ScopedTimer(use_nvtx=True).
-# On CUDA 13 libnvToolsExt.so is gone (header-only); nvidia-nvtx-cu12 still
-# ships the Python bindings + stubs that nsys can intercept at the API level.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    cuda-nsight-systems-13-0 \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir nvidia-nvtx-cu12
+# Apply the selected Warp build after both syncs; a later sync would restore
+# uv.lock's version. This does not replace the patched MuJoCo Warp source.
+ARG WARP_VERSION=1.17.0+cu13
+ARG WARP_LOCAL_PATCHES=1
+# Avoid sharing generated binaries between Warp builds and patch settings.
+ENV WARP_CACHE_PATH=/root/.cache/warp/build-${WARP_VERSION}-patches-${WARP_LOCAL_PATCHES}
+RUN case "$WARP_VERSION" in \
+      locked) ;; \
+      1.17.0+cu13) uv pip install --python .venv/bin/python --no-deps \
+        --require-hashes -r "docker/requirements-warp-${WARP_VERSION##*+}.txt" ;; \
+      *) echo "Unsupported WARP_VERSION: $WARP_VERSION" >&2; exit 1 ;; \
+    esac \
+    && .venv/bin/python -c "import importlib.metadata as m; import mujoco_warp, warp; print({p: m.version(p) for p in ('warp-lang', 'mujoco', 'mujoco-warp')}); print('Warp source:', warp.__file__); print('MuJoCo Warp source:', mujoco_warp.__file__)"
+
+# Local Warp compiler changes are exported from third_party/warp at v1.17.0.
+# Keep the verified wheel's native CUDA 13 libraries; patch only Python codegen.
+# Other versions remain unmodified so they are useful comparison baselines.
+RUN case "$WARP_LOCAL_PATCHES" in 0|1) ;; *) exit 1 ;; esac \
+    && if [ "$WARP_VERSION:$WARP_LOCAL_PATCHES" = "1.17.0+cu13:1" ]; then \
+      WARP_SITE=$(.venv/bin/python -c "import site; print(site.getsitepackages()[0])") \
+      && patch --batch --forward --fuzz=0 -p1 -d "$WARP_SITE" \
+        < docker/patches/warp-1.17-auto-launch-bounds.patch \
+      && .venv/bin/python -c "import warp; assert warp.get_module_options()['cuda_auto_launch_bounds']; print('Warp automatic CUDA launch bounds: enabled')"; \
+    else echo "Using unmodified Warp $WARP_VERSION"; fi
+
+# ScopedTimer(use_nvtx=True) imports nvtx, which is separate from the CUDA library.
+RUN uv pip install --python .venv/bin/python "nvtx==0.2.16"
+
+# Install the profiler CLI. Python dependencies stay in the project environment.
+# Nsight Systems 2026.5.1 instead of CUDA 13.0's 2025.3.2: node-level graph
+# tracing (--cuda-graph-trace=node) of the ANCF vehicle graphs faulted with
+# CUDA error 700 under 2025.3.2.
+ARG NSYS_DEB=nsight-systems-2026.5.1_2026.5.1.161-1_arm64.deb
+RUN apt-get update \
+    && curl -fsSL -o /tmp/nsys.deb https://developer.download.nvidia.com/devtools/repos/ubuntu2204/arm64/${NSYS_DEB} \
+    && apt-get install -y --no-install-recommends /tmp/nsys.deb \
+    && rm -f /tmp/nsys.deb && rm -rf /var/lib/apt/lists/* \
+    && ln -sf "$(ls -d /opt/nvidia/nsight-systems/2026.5.1*/bin/nsys)" /usr/local/bin/nsys \
+    && rm -f /usr/local/cuda/bin/nsys \
+    && nsys --version | grep -q 2026.5.1
 
 ENV PATH="/workspace/newton/.venv/bin:$PATH"
 

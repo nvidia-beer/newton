@@ -8,7 +8,7 @@ spanning ``[-hx, hx] x [-hy, hy]`` (Z-up).  ANCF nodes are Y-up ``(x_lat, y_up, 
 are mapped to Z-up with ``(x, y, z) -> (z, x, y)`` before the lookup.
 
 Why a heightfield and not a mesh: the tire is a point cloud (one contact per node), so the
-surface query is one bilinear lookup and its gradient - O(1), no BVH, graph-capturable - and
+surface query is one cell lookup and its gradient - O(1), no BVH, graph-capturable - and
 the plastic soil state lives on the same grid.
 
 Soil model
@@ -29,7 +29,8 @@ surface, both measured along the local normal:
   the regularised Coulomb friction of the flat kernel is the ``j >> K_j`` limit.
 
 With the soil disabled (``rigid=True``) the plastic update is skipped, ``z_p == 0`` and the
-kernel is a pure penalty contact against the heightfield.
+kernel is a pure penalty contact against the triangulated heightfield, matching
+MuJoCo and the rendered mesh. The deformable soil retains its bilinear surface.
 """
 
 from __future__ import annotations
@@ -84,8 +85,9 @@ def _surface(
     z_p: wp.array2d[float],
     x: float,
     y: float,
+    triangulated: bool = False,
 ):
-    """Bilinear current surface height h0 - z_p, its undeformed height h0, and the unit normal."""
+    """Current/undeformed heights and normal; rigid grids match the rendered/MuJoCo triangles."""
     c0, r0, tx, ty = _cell(grid, origin, x, y)
     c1 = c0 + 1
     r1 = r0 + 1
@@ -96,10 +98,26 @@ def _surface(
     h = (a00 * (1.0 - tx) + a10 * tx) * (1.0 - ty) + (a01 * (1.0 - tx) + a11 * tx) * ty
     dhdx = ((a10 - a00) * (1.0 - ty) + (a11 - a01) * ty) / grid.dx
     dhdy = ((a01 - a00) * (1.0 - tx) + (a11 - a10) * tx) / grid.dy
+    if triangulated:
+        # Both MuJoCo prisms and the rendered mesh split each cell along (0,0)-(1,1).
+        # Bilinear interpolation can put the tire below the rigid collider on a saddle.
+        if tx >= ty:
+            h = a00 + tx * (a10 - a00) + ty * (a11 - a10)
+            dhdx = (a10 - a00) / grid.dx
+            dhdy = (a11 - a10) / grid.dy
+        else:
+            h = a00 + tx * (a11 - a01) + ty * (a01 - a00)
+            dhdx = (a11 - a01) / grid.dx
+            dhdy = (a01 - a00) / grid.dy
     n = wp.normalize(wp.vec3(-dhdx, -dhdy, 1.0))
     h_undeformed = (h0[r0, c0] * (1.0 - tx) + h0[r0, c1] * tx) * (1.0 - ty) + (
         h0[r1, c0] * (1.0 - tx) + h0[r1, c1] * tx
     ) * ty
+    if triangulated:
+        if tx >= ty:
+            h_undeformed = h0[r0, c0] + tx * (h0[r0, c1] - h0[r0, c0]) + ty * (h0[r1, c1] - h0[r0, c1])
+        else:
+            h_undeformed = h0[r0, c0] + tx * (h0[r1, c1] - h0[r1, c0]) + ty * (h0[r1, c0] - h0[r0, c0])
     return h, h_undeformed, n
 
 
@@ -184,6 +202,7 @@ def _apply_terrain_contact(
     global_f: wp.array[float],  # flat [N*n_nodes*6] DOF vector (Y-up)
     K_contact_diag: wp.array[float],
     node_f: wp.array[wp.vec3],  # per-node terrain force (Z-up), diagnostics
+    rigid: bool,
 ):
     """dim = N*n_nodes.  Penalty normal + Janosi/Coulomb tangential force against the current surface."""
     tid = wp.tid()
@@ -191,7 +210,7 @@ def _apply_terrain_contact(
     x = p[2]
     y = p[0]
     z = p[1]
-    h, _h_und, n = _surface(grid, origin, h0, z_p, x, y)
+    h, _h_und, n = _surface(grid, origin, h0, z_p, x, y, rigid)
     pen = (h - z) * n[2]
     if pen <= 0.0:
         node_f[tid] = wp.vec3(0.0)
@@ -221,7 +240,7 @@ def _apply_terrain_contact(
     wp.atomic_add(global_f, base + 1, f_zu[2])
     wp.atomic_add(global_f, base + 2, f_zu[0])
 
-    # Diagonal of -df/du (see kernels_contact._contact_tangent_diag for the flat-plane case):
+    # The soil path uses the diagonal of -df/du; the rigid path below uses a majorizer:
     #   normal   : (kn + kd*c_v*[closing]) * n_i^2
     #   friction : ft_max*c_v*( g/|vt| * (1 - n_i^2 - u_i^2) + g' * u_i^2 ),  g' = sech^2/v_reg
     k_n = kn
@@ -233,6 +252,14 @@ def _apply_terrain_contact(
         ni2 = n[i] * n[i]
         ui2 = u[i] * u[i]
         k_i = k_n * ni2 + ft_max * c_v * (g_over_v * wp.max(1.0 - ni2 - ui2, 0.0) + g_prime * ui2)
+        if rigid:
+            # For frozen normal/load, tanh(s)/s >= sech(s)^2 bounds the
+            # friction tangent by k_t*(I-n*n^T). A Gershgorin diagonal
+            # majorizes k_n*n*n^T + k_t*(I-n*n^T), without adding artificial
+            # normal stiffness on a flat plane. The physical force is unchanged.
+            k_t = ft_max * c_v * g_over_v
+            normal_l1 = wp.abs(n[0]) + wp.abs(n[1]) + wp.abs(n[2])
+            k_i = k_n * ni2 + k_t * (1.0 - ni2) + wp.abs(k_n - k_t) * wp.abs(n[i]) * (normal_l1 - wp.abs(n[i]))
         # Z-up axis i lands on Y-up DOF (i + 2) % 3 ... explicitly: x->2, y->0, z->1
         j = 2
         if i == 1:
@@ -386,6 +413,7 @@ class TerrainSCM:
                 global_f,
                 K_contact_diag,
                 self.node_f,
+                self.rigid,
             ],
             device=self.device,
         )

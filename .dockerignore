@@ -1,0 +1,3 @@
+# The local Warp development checkout includes native build outputs.
+# Images use checksum-pinned wheels and the exported patch in docker/patches/.
+/third_party/warp/

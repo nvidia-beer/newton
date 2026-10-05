@@ -1,0 +1,23 @@
+{
+  "example": "diffsim_ancf_skid_steer",
+  "description": "Learn skid-steer speed/turning response on example 03's MuJoCo vehicle and four ANCF tires, using 07's physical settings. Compare before/after motion to a gray target vehicle.",
+  "args": {
+    "viewer": "gl",
+    "num-frames": 4000,
+    "target-speed": 0.6,
+    "target-yaw-deg": 2.0,
+    "train": true,
+    "telemetry-config": null,
+    "report": null
+  },
+  "arg_help": {
+    "target-speed": "Requested forward speed [m/s], 0.2–0.9; changing it replays before/after using the fitted response.",
+    "target-yaw-deg": "Requested yaw rate [degrees/s], -3 to 3; positive turns left.",
+    "train": "Collect straight and gentle/strong left/right maneuvers, fit with Warp gradients, then test the learned commands. False runs only the initial comparison until Learn again is pressed.",
+    "telemetry-config": "Source vehicle_telemetry JSON; null uses 07_vehicle_telemetry.json. Physical vehicle/tire settings are reused on flat ground.",
+    "report": "Optional new .json report and sibling observation .csv. These synthetic response fits do not overwrite or recalibrate the source 07 preset."
+  },
+  "env": {
+    "OPENBLAS_NUM_THREADS": "1"
+  }
+}

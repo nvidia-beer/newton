@@ -52,15 +52,14 @@ from .kernels_element import (  # noqa: E402
     _e13_at,
     _e23_at,
     _e33_at,
-    _g_grad,
-    _g_pos,
-    _gl_shear,
-    _gl_strain,
+    _g_grad_natural,
+    _g_pos_natural,
     _gp2,
     _gpw,
     _gpz,
     _jacobian,
-    _matmul33,
+    _natural_shear,
+    _natural_strain,
     _shape,
 )
 
@@ -258,6 +257,7 @@ def compute_element_forces_stiffness(
     elem_J0inv_tB: wp.array[wp.mat33],
     elem_J0inv_tC: wp.array[wp.mat33],
     elem_J0inv_tD: wp.array[wp.mat33],
+    update_eas: bool,
 ):
     """One GPU thread per element.  Accumulates f_int and K_mat."""
     e = wp.tid()
@@ -339,27 +339,23 @@ def compute_element_forces_stiffness(
     dNxi_a = _dshape_dxi(-1.0)
     dNeta_a = _dshape_deta(-1.0)
     J_a = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi_a, dNeta_a, N_a, 0.0, h)
-    F_a = _matmul33(J_a, J0inv_a)
 
     N_b = _shape(+1.0, -1.0)
     dNxi_b = _dshape_dxi(-1.0)
     dNeta_b = _dshape_deta(+1.0)
     J_b = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi_b, dNeta_b, N_b, 0.0, h)
-    F_b = _matmul33(J_b, J0inv_b)
 
     N_cc = _shape(+1.0, +1.0)
     dNxi_cc = _dshape_dxi(+1.0)
     dNeta_cc = _dshape_deta(+1.0)
     J_cc = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi_cc, dNeta_cc, N_cc, 0.0, h)
-    F_cc = _matmul33(J_cc, J0inv_cc)
 
     N_d = _shape(-1.0, +1.0)
     dNxi_d = _dshape_dxi(+1.0)
     dNeta_d = _dshape_deta(-1.0)
     J_d = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi_d, dNeta_d, N_d, 0.0, h)
-    F_d = _matmul33(J_d, J0inv_d)
 
-    # --- ANS shear tying-point F (ζ=0) — same note as above, J0inv precomputed.
+    # --- ANS shear tying-point Jacobians (ζ=0) — same note as above, J0inv precomputed.
     # Needed so _b13_at / _b23_at linearise the ANS shear strain correctly:
     # the reference gradient g and deformation gradient F must be evaluated at
     # the same tying point used for the strain (not at the Gauss point).
@@ -369,25 +365,21 @@ def compute_element_forces_stiffness(
     dNxi_tA = _dshape_dxi(-1.0)
     dNeta_tA = _dshape_deta(0.0)
     J_tA = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi_tA, dNeta_tA, N_tA, 0.0, h)
-    F_tA = _matmul33(J_tA, J0inv_tA)
 
     N_tC = _shape(0.0, +1.0)
     dNxi_tC = _dshape_dxi(+1.0)
     dNeta_tC = _dshape_deta(0.0)
     J_tC = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi_tC, dNeta_tC, N_tC, 0.0, h)
-    F_tC = _matmul33(J_tC, J0inv_tC)
 
     N_tB = _shape(+1.0, 0.0)
     dNxi_tB = _dshape_dxi(0.0)
     dNeta_tB = _dshape_deta(+1.0)
     J_tB = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi_tB, dNeta_tB, N_tB, 0.0, h)
-    F_tB = _matmul33(J_tB, J0inv_tB)
 
     N_tD = _shape(-1.0, 0.0)
     dNxi_tD = _dshape_dxi(0.0)
     dNeta_tD = _dshape_deta(-1.0)
     J_tD = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi_tD, dNeta_tD, N_tD, 0.0, h)
-    F_tD = _matmul33(J_tD, J0inv_tD)
 
     # --- Existing ANS for γ_13, γ_23 (4 mid-edge tying points, ζ=0) ---
     e13_A = _e13_at(x0, x1, x2, x3, D0, D1, D2, D3, X0, X1, X2, X3, R0, R1, R2, R3, 0.0, -1.0, h)
@@ -446,24 +438,11 @@ def compute_element_forces_stiffness(
                 J = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi, dNeta, N, zeta, h)
 
                 det_J0 = wp.abs(wp.determinant(J0))
-                J0inv = wp.inverse(J0)
                 w_detJ0 = w * det_J0
 
-                F = wp.mat33(
-                    J[0, 0] * J0inv[0, 0] + J[0, 1] * J0inv[1, 0] + J[0, 2] * J0inv[2, 0],
-                    J[0, 0] * J0inv[0, 1] + J[0, 1] * J0inv[1, 1] + J[0, 2] * J0inv[2, 1],
-                    J[0, 0] * J0inv[0, 2] + J[0, 1] * J0inv[1, 2] + J[0, 2] * J0inv[2, 2],
-                    J[1, 0] * J0inv[0, 0] + J[1, 1] * J0inv[1, 0] + J[1, 2] * J0inv[2, 0],
-                    J[1, 0] * J0inv[0, 1] + J[1, 1] * J0inv[1, 1] + J[1, 2] * J0inv[2, 1],
-                    J[1, 0] * J0inv[0, 2] + J[1, 1] * J0inv[1, 2] + J[1, 2] * J0inv[2, 2],
-                    J[2, 0] * J0inv[0, 0] + J[2, 1] * J0inv[1, 0] + J[2, 2] * J0inv[2, 0],
-                    J[2, 0] * J0inv[0, 1] + J[2, 1] * J0inv[1, 1] + J[2, 2] * J0inv[2, 1],
-                    J[2, 0] * J0inv[0, 2] + J[2, 1] * J0inv[1, 2] + J[2, 2] * J0inv[2, 2],
-                )
-
                 # Natural strains
-                e_diag_nat = _gl_strain(F)
-                e_shear_nat = _gl_shear(F)
+                e_diag_nat = _natural_strain(J, J0)
+                e_shear_nat = _natural_shear(J, J0)
 
                 # ANS: replace ε_zz with corner interpolation
                 e33_ans = N[0] * e33_c0 + N[1] * e33_c1 + N[2] * e33_c2 + N[3] * e33_c3
@@ -585,8 +564,8 @@ def compute_element_forces_stiffness(
                     Na_k = N[node_k]
                     dNxi_k = dNxi[node_k]
                     dNeta_k = dNeta[node_k]
-                    g_p_k = _g_pos(dNxi_k, dNeta_k, J0inv)
-                    g_d_k = _g_grad(dNxi_k, dNeta_k, Na_k, h, zeta, J0inv)
+                    g_p_k = _g_pos_natural(dNxi_k, dNeta_k)
+                    g_d_k = _g_grad_natural(dNxi_k, dNeta_k, Na_k, h, zeta)
 
                     for is_grad_k in range(2):
                         if is_grad_k == 0:
@@ -597,22 +576,22 @@ def compute_element_forces_stiffness(
                         for alpha_k in range(3):
                             k = node_k * 6 + is_grad_k * 3 + alpha_k
 
-                            bd_k = _b_diag(g_k, F, alpha_k)
-                            bs_k = _b_shear(g_k, F, alpha_k)
+                            bd_k = _b_diag(g_k, J, alpha_k)
+                            bs_k = _b_shear(g_k, J, alpha_k)
 
-                            # ANS transverse shear B-rows: use F and J0inv at each
+                            # ANS transverse shear B-rows: use the covariant Jacobian at each
                             # tying point, not at the current Gauss point — the
                             # linearisation of the ANS-interpolated strain must
                             # be consistent with where the strain was sampled.
                             b13_k = w_A * _b13_at(
-                                X0, X1, X2, X3, R0, R1, R2, R3, F_tA, J0inv_tA, 0.0, -1.0, h, node_k, is_grad_k, alpha_k
+                                X0, X1, X2, X3, R0, R1, R2, R3, J_tA, J0inv_tA, 0.0, -1.0, h, node_k, is_grad_k, alpha_k
                             ) + w_C * _b13_at(
-                                X0, X1, X2, X3, R0, R1, R2, R3, F_tC, J0inv_tC, 0.0, +1.0, h, node_k, is_grad_k, alpha_k
+                                X0, X1, X2, X3, R0, R1, R2, R3, J_tC, J0inv_tC, 0.0, +1.0, h, node_k, is_grad_k, alpha_k
                             )
                             b23_k = w_D * _b23_at(
-                                X0, X1, X2, X3, R0, R1, R2, R3, F_tD, J0inv_tD, -1.0, 0.0, h, node_k, is_grad_k, alpha_k
+                                X0, X1, X2, X3, R0, R1, R2, R3, J_tD, J0inv_tD, -1.0, 0.0, h, node_k, is_grad_k, alpha_k
                             ) + w_B * _b23_at(
-                                X0, X1, X2, X3, R0, R1, R2, R3, F_tB, J0inv_tB, +1.0, 0.0, h, node_k, is_grad_k, alpha_k
+                                X0, X1, X2, X3, R0, R1, R2, R3, J_tB, J0inv_tB, +1.0, 0.0, h, node_k, is_grad_k, alpha_k
                             )
 
                             # ANS ε_zz B-row: interpolate from 4 corners
@@ -627,7 +606,7 @@ def compute_element_forces_stiffness(
                                     R1,
                                     R2,
                                     R3,
-                                    F_a,
+                                    J_a,
                                     J0inv_a,
                                     -1.0,
                                     -1.0,
@@ -646,7 +625,7 @@ def compute_element_forces_stiffness(
                                     R1,
                                     R2,
                                     R3,
-                                    F_b,
+                                    J_b,
                                     J0inv_b,
                                     +1.0,
                                     -1.0,
@@ -665,7 +644,7 @@ def compute_element_forces_stiffness(
                                     R1,
                                     R2,
                                     R3,
-                                    F_cc,
+                                    J_cc,
                                     J0inv_cc,
                                     +1.0,
                                     +1.0,
@@ -684,7 +663,7 @@ def compute_element_forces_stiffness(
                                     R1,
                                     R2,
                                     R3,
-                                    F_d,
+                                    J_d,
                                     J0inv_d,
                                     -1.0,
                                     +1.0,
@@ -748,75 +727,77 @@ def compute_element_forces_stiffness(
                         ) * w_detJ0
                         elem_K[e, k, j] = elem_K[e, k, j] + kval
 
-    # === EAS one Newton step: solve K_alpha · Δα = HE ===
-    # Forward elimination (Gaussian, exploiting symmetry)
-    # Pivot on row 0
-    inv00 = float(1.0) / wp.max(KA00, 1.0e-30)
-    m10 = KA01 * inv00
-    m20 = KA02 * inv00
-    m30 = KA03 * inv00
-    m40 = KA04 * inv00
-    KA11 = KA11 - m10 * KA01
-    KA12 = KA12 - m10 * KA02
-    KA13 = KA13 - m10 * KA03
-    KA14 = KA14 - m10 * KA04
-    HE1 = HE1 - m10 * HE0
-    KA22 = KA22 - m20 * KA02
-    KA23 = KA23 - m20 * KA03
-    KA24 = KA24 - m20 * KA04
-    HE2 = HE2 - m20 * HE0
-    KA33 = KA33 - m30 * KA03
-    KA34 = KA34 - m30 * KA04
-    HE3 = HE3 - m30 * HE0
-    KA44 = KA44 - m40 * KA04
-    HE4 = HE4 - m40 * HE0
-    # Pivot on row 1
-    inv11 = float(1.0) / wp.max(KA11, 1.0e-30)
-    m21 = KA12 * inv11
-    m31 = KA13 * inv11
-    m41 = KA14 * inv11
-    KA22 = KA22 - m21 * KA12
-    KA23 = KA23 - m21 * KA13
-    KA24 = KA24 - m21 * KA14
-    HE2 = HE2 - m21 * HE1
-    KA33 = KA33 - m31 * KA13
-    KA34 = KA34 - m31 * KA14
-    HE3 = HE3 - m31 * HE1
-    KA44 = KA44 - m41 * KA14
-    HE4 = HE4 - m41 * HE1
-    # Pivot on row 2
-    inv22 = float(1.0) / wp.max(KA22, 1.0e-30)
-    m32 = KA23 * inv22
-    m42 = KA24 * inv22
-    KA33 = KA33 - m32 * KA23
-    KA34 = KA34 - m32 * KA24
-    HE3 = HE3 - m32 * HE2
-    KA44 = KA44 - m42 * KA24
-    HE4 = HE4 - m42 * HE2
-    # Pivot on row 3
-    inv33 = float(1.0) / wp.max(KA33, 1.0e-30)
-    m43 = KA34 * inv33
-    KA44 = KA44 - m43 * KA34
-    HE4 = HE4 - m43 * HE3
-    # Back-substitution
-    da4 = HE4 / wp.max(KA44, 1.0e-30)
-    da3 = (HE3 - KA34 * da4) * inv33
-    da2 = (HE2 - KA24 * da4 - KA23 * da3) * inv22
-    da1 = (HE1 - KA14 * da4 - KA13 * da3 - KA12 * da2) * inv11
-    da0 = (HE0 - KA04 * da4 - KA03 * da3 - KA02 * da2 - KA01 * da1) * inv00
+    # Force-only evaluations must preserve the accepted internal variables.
+    if update_eas:
+        # === EAS one Newton step: solve K_alpha · Δα = HE ===
+        # Forward elimination (Gaussian, exploiting symmetry)
+        # Pivot on row 0
+        inv00 = float(1.0) / wp.max(KA00, 1.0e-30)
+        m10 = KA01 * inv00
+        m20 = KA02 * inv00
+        m30 = KA03 * inv00
+        m40 = KA04 * inv00
+        KA11 = KA11 - m10 * KA01
+        KA12 = KA12 - m10 * KA02
+        KA13 = KA13 - m10 * KA03
+        KA14 = KA14 - m10 * KA04
+        HE1 = HE1 - m10 * HE0
+        KA22 = KA22 - m20 * KA02
+        KA23 = KA23 - m20 * KA03
+        KA24 = KA24 - m20 * KA04
+        HE2 = HE2 - m20 * HE0
+        KA33 = KA33 - m30 * KA03
+        KA34 = KA34 - m30 * KA04
+        HE3 = HE3 - m30 * HE0
+        KA44 = KA44 - m40 * KA04
+        HE4 = HE4 - m40 * HE0
+        # Pivot on row 1
+        inv11 = float(1.0) / wp.max(KA11, 1.0e-30)
+        m21 = KA12 * inv11
+        m31 = KA13 * inv11
+        m41 = KA14 * inv11
+        KA22 = KA22 - m21 * KA12
+        KA23 = KA23 - m21 * KA13
+        KA24 = KA24 - m21 * KA14
+        HE2 = HE2 - m21 * HE1
+        KA33 = KA33 - m31 * KA13
+        KA34 = KA34 - m31 * KA14
+        HE3 = HE3 - m31 * HE1
+        KA44 = KA44 - m41 * KA14
+        HE4 = HE4 - m41 * HE1
+        # Pivot on row 2
+        inv22 = float(1.0) / wp.max(KA22, 1.0e-30)
+        m32 = KA23 * inv22
+        m42 = KA24 * inv22
+        KA33 = KA33 - m32 * KA23
+        KA34 = KA34 - m32 * KA24
+        HE3 = HE3 - m32 * HE2
+        KA44 = KA44 - m42 * KA24
+        HE4 = HE4 - m42 * HE2
+        # Pivot on row 3
+        inv33 = float(1.0) / wp.max(KA33, 1.0e-30)
+        m43 = KA34 * inv33
+        KA44 = KA44 - m43 * KA34
+        HE4 = HE4 - m43 * HE3
+        # Back-substitution
+        da4 = HE4 / wp.max(KA44, 1.0e-30)
+        da3 = (HE3 - KA34 * da4) * inv33
+        da2 = (HE2 - KA24 * da4 - KA23 * da3) * inv22
+        da1 = (HE1 - KA14 * da4 - KA13 * da3 - KA12 * da2) * inv11
+        da0 = (HE0 - KA04 * da4 - KA03 * da3 - KA02 * da2 - KA01 * da1) * inv00
 
-    # Update α (warm-started within a timestep, reset to 0 at step start by
-    # the solver).  Clamp to ±0.1: the inflated Polaris tyre has ~6% hoop
-    # strain so |α| ≈ O(0.06) at peak; 0.1 gives headroom while capping the
-    # ill-conditioned-pivot fallout (Gaussian elimination without partial
-    # pivoting can produce |Δα| ≫ 1 when a reduced pivot is near zero due to
-    # catastrophic cancellation in the forward-elimination row operations).
-    _EAS_MAX = float(1.0e-1)
-    elem_eas_alpha[e, 0] = wp.clamp(alpha0 - da0, -_EAS_MAX, _EAS_MAX)
-    elem_eas_alpha[e, 1] = wp.clamp(alpha1 - da1, -_EAS_MAX, _EAS_MAX)
-    elem_eas_alpha[e, 2] = wp.clamp(alpha2 - da2, -_EAS_MAX, _EAS_MAX)
-    elem_eas_alpha[e, 3] = wp.clamp(alpha3 - da3, -_EAS_MAX, _EAS_MAX)
-    elem_eas_alpha[e, 4] = wp.clamp(alpha4 - da4, -_EAS_MAX, _EAS_MAX)
+        # Update α (warm-started within a timestep, reset to 0 at step start by
+        # the solver).  Clamp to ±0.1: the inflated Polaris tyre has ~6% hoop
+        # strain so |α| ≈ O(0.06) at peak; 0.1 gives headroom while capping the
+        # ill-conditioned-pivot fallout (Gaussian elimination without partial
+        # pivoting can produce |Δα| ≫ 1 when a reduced pivot is near zero due to
+        # catastrophic cancellation in the forward-elimination row operations).
+        _EAS_MAX = float(1.0e-1)
+        elem_eas_alpha[e, 0] = wp.clamp(alpha0 - da0, -_EAS_MAX, _EAS_MAX)
+        elem_eas_alpha[e, 1] = wp.clamp(alpha1 - da1, -_EAS_MAX, _EAS_MAX)
+        elem_eas_alpha[e, 2] = wp.clamp(alpha2 - da2, -_EAS_MAX, _EAS_MAX)
+        elem_eas_alpha[e, 3] = wp.clamp(alpha3 - da3, -_EAS_MAX, _EAS_MAX)
+        elem_eas_alpha[e, 4] = wp.clamp(alpha4 - da4, -_EAS_MAX, _EAS_MAX)
 
     # Stiffness-proportional Rayleigh damping: f_damp = alpha_damp * K_t * v
     alpha_d = elem_mat[e, 10]
@@ -858,14 +839,33 @@ def compute_element_forces_stiffness(
         elem_f[e, i] = elem_f[e, i] + alpha_d * kv
 
 
-# ---------------------------------------------------------------------------
-# GP-parallel stiffness kernels
-# Restructured for "1 thread per (element, Gauss point)" to improve occupancy.
-# Three-kernel sequence:
-#   1. _zero_eas_and_accum_batched  — zero EAS alpha + HE/KA accumulators
-#   2. compute_element_forces_stiffness_batched_gp — GP body (atomic accum)
-#   3. _eas_solve_damping_batched   — EAS Newton step + Rayleigh damping
-# ---------------------------------------------------------------------------
+# Batched ANS forces include Rayleigh damping; stiffness is assembled separately.
+
+
+@wp.func
+def _natural_strain_rate(J: wp.mat33, V: wp.mat33) -> wp.vec3:
+    """Time derivative of the covariant Green strain diagonal."""
+    out = wp.vec3()
+    for i in range(3):
+        out[i] = J[0, i] * V[0, i] + J[1, i] * V[1, i] + J[2, i] * V[2, i]
+    return out
+
+
+@wp.func
+def _natural_shear_rate(J: wp.mat33, V: wp.mat33) -> wp.vec3:
+    """Time derivative of engineering covariant shear."""
+    out = wp.vec3()
+    for i in range(3):
+        a = int(0)
+        b = int(1)
+        if i == 1:
+            b = 2
+        elif i == 2:
+            a = 1
+            b = 2
+        for j in range(3):
+            out[i] += J[j, a] * V[j, b] + V[j, a] * J[j, b]
+    return out
 
 
 @wp.kernel
@@ -883,7 +883,7 @@ def compute_element_forces_stiffness_batched_gp(
     elem_h: wp.array[float],
     elem_mat: wp.array2d[float],
     # Outputs — flat first-dim [N*n_elems]
-    elem_f: wp.array2d[float],
+    elem_f: wp.array3d[float],
     elem_K: wp.array3d[float],
     # B rows per element with the Gauss point innermost: the GP threads of an element are
     # consecutive tids, and compute_element_K_from_B reads one contiguous block per element.
@@ -947,6 +947,15 @@ def compute_element_forces_stiffness_batched_gp(
     D2 = node_D[node_off + na2]
     D3 = node_D[node_off + na3]
 
+    v0 = node_xd[node_off + na0]
+    dv0 = node_Dd[node_off + na0]
+    v1 = node_xd[node_off + na1]
+    dv1 = node_Dd[node_off + na1]
+    v2 = node_xd[node_off + na2]
+    dv2 = node_Dd[node_off + na2]
+    v3 = node_xd[node_off + na3]
+    dv3 = node_Dd[node_off + na3]
+
     X0 = node_x0[na0]
     X1 = node_x0[na1]
     X2 = node_x0[na2]
@@ -993,49 +1002,41 @@ def compute_element_forces_stiffness_batched_gp(
     dNxi_a = _dshape_dxi(-1.0)
     dNeta_a = _dshape_deta(-1.0)
     J_a = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi_a, dNeta_a, N_a, 0.0, h)
-    F_a = _matmul33(J_a, J0inv_a)
 
     N_b = _shape(+1.0, -1.0)
     dNxi_b = _dshape_dxi(-1.0)
     dNeta_b = _dshape_deta(+1.0)
     J_b = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi_b, dNeta_b, N_b, 0.0, h)
-    F_b = _matmul33(J_b, J0inv_b)
 
     N_cc = _shape(+1.0, +1.0)
     dNxi_cc = _dshape_dxi(+1.0)
     dNeta_cc = _dshape_deta(+1.0)
     J_cc = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi_cc, dNeta_cc, N_cc, 0.0, h)
-    F_cc = _matmul33(J_cc, J0inv_cc)
 
     N_d = _shape(-1.0, +1.0)
     dNxi_d = _dshape_dxi(+1.0)
     dNeta_d = _dshape_deta(-1.0)
     J_d = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi_d, dNeta_d, N_d, 0.0, h)
-    F_d = _matmul33(J_d, J0inv_d)
 
     N_tA = _shape(0.0, -1.0)
     dNxi_tA = _dshape_dxi(-1.0)
     dNeta_tA = _dshape_deta(0.0)
     J_tA = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi_tA, dNeta_tA, N_tA, 0.0, h)
-    F_tA = _matmul33(J_tA, J0inv_tA)
 
     N_tC = _shape(0.0, +1.0)
     dNxi_tC = _dshape_dxi(+1.0)
     dNeta_tC = _dshape_deta(0.0)
     J_tC = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi_tC, dNeta_tC, N_tC, 0.0, h)
-    F_tC = _matmul33(J_tC, J0inv_tC)
 
     N_tB = _shape(+1.0, 0.0)
     dNxi_tB = _dshape_dxi(0.0)
     dNeta_tB = _dshape_deta(+1.0)
     J_tB = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi_tB, dNeta_tB, N_tB, 0.0, h)
-    F_tB = _matmul33(J_tB, J0inv_tB)
 
     N_tD = _shape(-1.0, 0.0)
     dNxi_tD = _dshape_dxi(0.0)
     dNeta_tD = _dshape_deta(-1.0)
     J_tD = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi_tD, dNeta_tD, N_tD, 0.0, h)
-    F_tD = _matmul33(J_tD, J0inv_tD)
 
     e13_A = _e13_at(x0, x1, x2, x3, D0, D1, D2, D3, X0, X1, X2, X3, R0, R1, R2, R3, 0.0, -1.0, h)
     e13_C = _e13_at(x0, x1, x2, x3, D0, D1, D2, D3, X0, X1, X2, X3, R0, R1, R2, R3, 0.0, +1.0, h)
@@ -1061,24 +1062,11 @@ def compute_element_forces_stiffness_batched_gp(
     J = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi, dNeta, N, zeta, h)
 
     det_J0 = wp.abs(wp.determinant(J0))
-    J0inv = wp.inverse(J0)
     w_detJ0 = w * det_J0
     gp_w[tid] = w_detJ0
 
-    F = wp.mat33(
-        J[0, 0] * J0inv[0, 0] + J[0, 1] * J0inv[1, 0] + J[0, 2] * J0inv[2, 0],
-        J[0, 0] * J0inv[0, 1] + J[0, 1] * J0inv[1, 1] + J[0, 2] * J0inv[2, 1],
-        J[0, 0] * J0inv[0, 2] + J[0, 1] * J0inv[1, 2] + J[0, 2] * J0inv[2, 2],
-        J[1, 0] * J0inv[0, 0] + J[1, 1] * J0inv[1, 0] + J[1, 2] * J0inv[2, 0],
-        J[1, 0] * J0inv[0, 1] + J[1, 1] * J0inv[1, 1] + J[1, 2] * J0inv[2, 1],
-        J[1, 0] * J0inv[0, 2] + J[1, 1] * J0inv[1, 2] + J[1, 2] * J0inv[2, 2],
-        J[2, 0] * J0inv[0, 0] + J[2, 1] * J0inv[1, 0] + J[2, 2] * J0inv[2, 0],
-        J[2, 0] * J0inv[0, 1] + J[2, 1] * J0inv[1, 1] + J[2, 2] * J0inv[2, 1],
-        J[2, 0] * J0inv[0, 2] + J[2, 1] * J0inv[1, 2] + J[2, 2] * J0inv[2, 2],
-    )
-
-    e_diag_nat = _gl_strain(F)
-    e_shear_nat = _gl_shear(F)
+    e_diag_nat = _natural_strain(J, J0)
+    e_shear_nat = _natural_shear(J, J0)
 
     e33_ans = N[0] * e33_c0 + N[1] * e33_c1 + N[2] * e33_c2 + N[3] * e33_c3
     e_diag_nat = wp.vec3(e_diag_nat[0], e_diag_nat[1], e33_ans)
@@ -1088,6 +1076,35 @@ def compute_element_forces_stiffness_batched_gp(
     e_shear_nat = wp.vec3(e_shear_nat[0], e13_ans, e23_ans)
 
     beta_gp = _compute_beta(J0, cos_t, sin_t)
+
+    # Rayleigh damping: B^T C (strain + alpha * Bv), using analytic strain rates.
+    # This supplies the same force without assembling K = B^T C B first.
+    Jv = _jacobian(v0, v1, v2, v3, dv0, dv1, dv2, dv3, dNxi, dNeta, N, zeta, h)
+    Jv_a = _jacobian(v0, v1, v2, v3, dv0, dv1, dv2, dv3, dNxi_a, dNeta_a, N_a, 0.0, h)
+    Jv_b = _jacobian(v0, v1, v2, v3, dv0, dv1, dv2, dv3, dNxi_b, dNeta_b, N_b, 0.0, h)
+    Jv_cc = _jacobian(v0, v1, v2, v3, dv0, dv1, dv2, dv3, dNxi_cc, dNeta_cc, N_cc, 0.0, h)
+    Jv_d = _jacobian(v0, v1, v2, v3, dv0, dv1, dv2, dv3, dNxi_d, dNeta_d, N_d, 0.0, h)
+    Jv_tA = _jacobian(v0, v1, v2, v3, dv0, dv1, dv2, dv3, dNxi_tA, dNeta_tA, N_tA, 0.0, h)
+    Jv_tC = _jacobian(v0, v1, v2, v3, dv0, dv1, dv2, dv3, dNxi_tC, dNeta_tC, N_tC, 0.0, h)
+    Jv_tB = _jacobian(v0, v1, v2, v3, dv0, dv1, dv2, dv3, dNxi_tB, dNeta_tB, N_tB, 0.0, h)
+    Jv_tD = _jacobian(v0, v1, v2, v3, dv0, dv1, dv2, dv3, dNxi_tD, dNeta_tD, N_tD, 0.0, h)
+    edot_d = _natural_strain_rate(J, Jv)
+    edot_s = _natural_shear_rate(J, Jv)
+    edot_d = wp.vec3(
+        edot_d[0],
+        edot_d[1],
+        N[0] * _natural_strain_rate(J_a, Jv_a)[2]
+        + N[1] * _natural_strain_rate(J_b, Jv_b)[2]
+        + N[2] * _natural_strain_rate(J_cc, Jv_cc)[2]
+        + N[3] * _natural_strain_rate(J_d, Jv_d)[2],
+    )
+    edot_s = wp.vec3(
+        edot_s[0],
+        w_A * _natural_shear_rate(J_tA, Jv_tA)[1] + w_C * _natural_shear_rate(J_tC, Jv_tC)[1],
+        w_D * _natural_shear_rate(J_tD, Jv_tD)[2] + w_B * _natural_shear_rate(J_tB, Jv_tB)[2],
+    )
+    e_diag_nat += elem_mat[e_global, 10] * edot_d
+    e_shear_nat += elem_mat[e_global, 10] * edot_s
 
     e_d = _beta_transform_diag(e_diag_nat, e_shear_nat, beta_gp)
     e_s = _beta_transform_shear(e_diag_nat, e_shear_nat, beta_gp)
@@ -1107,8 +1124,8 @@ def compute_element_forces_stiffness_batched_gp(
         Na_k = N[node_k]
         dNxi_k = dNxi[node_k]
         dNeta_k = dNeta[node_k]
-        g_p_k = _g_pos(dNxi_k, dNeta_k, J0inv)
-        g_d_k = _g_grad(dNxi_k, dNeta_k, Na_k, h, zeta, J0inv)
+        g_p_k = _g_pos_natural(dNxi_k, dNeta_k)
+        g_d_k = _g_grad_natural(dNxi_k, dNeta_k, Na_k, h, zeta)
 
         for is_grad_k in range(2):
             if is_grad_k == 0:
@@ -1119,29 +1136,29 @@ def compute_element_forces_stiffness_batched_gp(
             for alpha_k in range(3):
                 k = node_k * 6 + is_grad_k * 3 + alpha_k
 
-                bd_k = _b_diag(g_k, F, alpha_k)
-                bs_k = _b_shear(g_k, F, alpha_k)
+                bd_k = _b_diag(g_k, J, alpha_k)
+                bs_k = _b_shear(g_k, J, alpha_k)
 
                 b13_k = w_A * _b13_at(
-                    X0, X1, X2, X3, R0, R1, R2, R3, F_tA, J0inv_tA, 0.0, -1.0, h, node_k, is_grad_k, alpha_k
+                    X0, X1, X2, X3, R0, R1, R2, R3, J_tA, J0inv_tA, 0.0, -1.0, h, node_k, is_grad_k, alpha_k
                 ) + w_C * _b13_at(
-                    X0, X1, X2, X3, R0, R1, R2, R3, F_tC, J0inv_tC, 0.0, +1.0, h, node_k, is_grad_k, alpha_k
+                    X0, X1, X2, X3, R0, R1, R2, R3, J_tC, J0inv_tC, 0.0, +1.0, h, node_k, is_grad_k, alpha_k
                 )
                 b23_k = w_D * _b23_at(
-                    X0, X1, X2, X3, R0, R1, R2, R3, F_tD, J0inv_tD, -1.0, 0.0, h, node_k, is_grad_k, alpha_k
+                    X0, X1, X2, X3, R0, R1, R2, R3, J_tD, J0inv_tD, -1.0, 0.0, h, node_k, is_grad_k, alpha_k
                 ) + w_B * _b23_at(
-                    X0, X1, X2, X3, R0, R1, R2, R3, F_tB, J0inv_tB, +1.0, 0.0, h, node_k, is_grad_k, alpha_k
+                    X0, X1, X2, X3, R0, R1, R2, R3, J_tB, J0inv_tB, +1.0, 0.0, h, node_k, is_grad_k, alpha_k
                 )
 
                 b33_k = (
                     N[0]
-                    * _b33_at(X0, X1, X2, X3, R0, R1, R2, R3, F_a, J0inv_a, -1.0, -1.0, h, node_k, is_grad_k, alpha_k)
+                    * _b33_at(X0, X1, X2, X3, R0, R1, R2, R3, J_a, J0inv_a, -1.0, -1.0, h, node_k, is_grad_k, alpha_k)
                     + N[1]
-                    * _b33_at(X0, X1, X2, X3, R0, R1, R2, R3, F_b, J0inv_b, +1.0, -1.0, h, node_k, is_grad_k, alpha_k)
+                    * _b33_at(X0, X1, X2, X3, R0, R1, R2, R3, J_b, J0inv_b, +1.0, -1.0, h, node_k, is_grad_k, alpha_k)
                     + N[2]
-                    * _b33_at(X0, X1, X2, X3, R0, R1, R2, R3, F_cc, J0inv_cc, +1.0, +1.0, h, node_k, is_grad_k, alpha_k)
+                    * _b33_at(X0, X1, X2, X3, R0, R1, R2, R3, J_cc, J0inv_cc, +1.0, +1.0, h, node_k, is_grad_k, alpha_k)
                     + N[3]
-                    * _b33_at(X0, X1, X2, X3, R0, R1, R2, R3, F_d, J0inv_d, -1.0, +1.0, h, node_k, is_grad_k, alpha_k)
+                    * _b33_at(X0, X1, X2, X3, R0, R1, R2, R3, J_d, J0inv_d, -1.0, +1.0, h, node_k, is_grad_k, alpha_k)
                 )
 
                 b_d_nat = wp.vec3(bd_k[0], bd_k[1], b33_k)
@@ -1158,7 +1175,7 @@ def compute_element_forces_stiffness_batched_gp(
                 gp_b13[e_global, k, gp_flat] = b_s_mat[1]
                 gp_b23[e_global, k, gp_flat] = b_s_mat[2]
 
-                # Force contribution — atomic add across GP threads for same element
+                # Store each quadrature contribution separately for ordered reduction.
                 fk = (
                     b_d_mat[0] * S_d[0]
                     + b_d_mat[1] * S_d[1]
@@ -1167,7 +1184,16 @@ def compute_element_forces_stiffness_batched_gp(
                     + b_s_mat[1] * S_s[1]
                     + b_s_mat[2] * S_s[2]
                 ) * w_detJ0
-                wp.atomic_add(elem_f, e_global, k, fk)
+                elem_f[e_global, k, gp_flat] = fk
+
+
+@wp.kernel
+def sum_element_quadrature_forces(gp_force: wp.array3d[float], n_gp: int, force: wp.array2d[float]):
+    element, dof = wp.tid()
+    total = wp.float64(0.0)
+    for gp in range(n_gp):
+        total += wp.float64(gp_force[element, dof, gp])
+    force[element, dof] = float(total)
 
 
 @wp.kernel
@@ -1249,64 +1275,3 @@ def compute_element_K_from_B(
             v = acc[a, b]
             elem_K[e_global, k0 + a, j0 + b] = v
             elem_K[e_global, j0 + b, k0 + a] = v
-
-
-@wp.kernel
-def _rayleigh_damping_batched(
-    elem_mat: wp.array2d[float],  # (Nne, 11) for alpha_damp
-    node_xd: wp.array[wp.vec3],
-    node_Dd: wp.array[wp.vec3],
-    elem_nodes: wp.array2d[wp.int32],
-    elem_K: wp.array3d[float],  # assembled K (read)
-    elem_f: wp.array2d[float],  # in/out forces
-    n_elems_per_env: int,
-    n_nodes_per_env: int,
-):
-    """dim = Nne.  Stiffness-proportional Rayleigh damping ``f += alpha_damp K_t v`` after the K assembly."""
-    e_global = wp.tid()
-    env = e_global // n_elems_per_env
-    e = e_global % n_elems_per_env
-    node_off = env * n_nodes_per_env
-
-    # Stiffness-proportional Rayleigh damping: f_damp = alpha_damp * K_t * v
-    na0 = elem_nodes[e, 0]
-    na1 = elem_nodes[e, 1]
-    na2 = elem_nodes[e, 2]
-    na3 = elem_nodes[e, 3]
-    alpha_d = elem_mat[e_global, 10]
-    xd0 = node_xd[node_off + na0]
-    xd1 = node_xd[node_off + na1]
-    xd2 = node_xd[node_off + na2]
-    xd3 = node_xd[node_off + na3]
-    Dd0 = node_Dd[node_off + na0]
-    Dd1 = node_Dd[node_off + na1]
-    Dd2 = node_Dd[node_off + na2]
-    Dd3 = node_Dd[node_off + na3]
-    for i in range(24):
-        kv = (
-            elem_K[e_global, i, 0] * xd0[0]
-            + elem_K[e_global, i, 1] * xd0[1]
-            + elem_K[e_global, i, 2] * xd0[2]
-            + elem_K[e_global, i, 3] * Dd0[0]
-            + elem_K[e_global, i, 4] * Dd0[1]
-            + elem_K[e_global, i, 5] * Dd0[2]
-            + elem_K[e_global, i, 6] * xd1[0]
-            + elem_K[e_global, i, 7] * xd1[1]
-            + elem_K[e_global, i, 8] * xd1[2]
-            + elem_K[e_global, i, 9] * Dd1[0]
-            + elem_K[e_global, i, 10] * Dd1[1]
-            + elem_K[e_global, i, 11] * Dd1[2]
-            + elem_K[e_global, i, 12] * xd2[0]
-            + elem_K[e_global, i, 13] * xd2[1]
-            + elem_K[e_global, i, 14] * xd2[2]
-            + elem_K[e_global, i, 15] * Dd2[0]
-            + elem_K[e_global, i, 16] * Dd2[1]
-            + elem_K[e_global, i, 17] * Dd2[2]
-            + elem_K[e_global, i, 18] * xd3[0]
-            + elem_K[e_global, i, 19] * xd3[1]
-            + elem_K[e_global, i, 20] * xd3[2]
-            + elem_K[e_global, i, 21] * Dd3[0]
-            + elem_K[e_global, i, 22] * Dd3[1]
-            + elem_K[e_global, i, 23] * Dd3[2]
-        )
-        elem_f[e_global, i] = elem_f[e_global, i] + alpha_d * kv

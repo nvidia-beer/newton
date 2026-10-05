@@ -168,10 +168,13 @@ def _jacobian(
     r(ξ,η,ζ) = Σ Ni·(xi + ζ·h/2·Di)
     """
     hz = 0.5 * h * zeta
-    r_xi = dNxi[0] * (x0 + hz * D0) + dNxi[1] * (x1 + hz * D1) + dNxi[2] * (x2 + hz * D2) + dNxi[3] * (x3 + hz * D3)
-    r_eta = (
-        dNeta[0] * (x0 + hz * D0) + dNeta[1] * (x1 + hz * D1) + dNeta[2] * (x2 + hz * D2) + dNeta[3] * (x3 + hz * D3)
-    )
+    # Shape derivatives sum to zero. Form edge differences before weighting,
+    # and add thickness offsets separately so world coordinates cannot erase
+    # the small bending contribution in float32.
+    r_xi = dNxi[1] * (x1 - x0) + dNxi[2] * (x2 - x0) + dNxi[3] * (x3 - x0)
+    r_eta = dNeta[1] * (x1 - x0) + dNeta[2] * (x2 - x0) + dNeta[3] * (x3 - x0)
+    r_xi += hz * (dNxi[0] * D0 + dNxi[1] * D1 + dNxi[2] * D2 + dNxi[3] * D3)
+    r_eta += hz * (dNeta[0] * D0 + dNeta[1] * D1 + dNeta[2] * D2 + dNeta[3] * D3)
     r_zeta = 0.5 * h * (N[0] * D0 + N[1] * D1 + N[2] * D2 + N[3] * D3)
     return wp.mat33(
         r_xi[0],
@@ -208,23 +211,40 @@ def _matmul33(A: wp.mat33, B: wp.mat33) -> wp.mat33:
 
 
 @wp.func
-def _gl_strain(F: wp.mat33) -> wp.vec3:
-    """Diagonal Green-Lagrange components: [E11, E22, E33]."""
+def _natural_strain(J: wp.mat33, J0: wp.mat33) -> wp.vec3:
+    """Covariant Green strain, before ANS interpolation and material transformation."""
+    out = wp.vec3(0.0)
+    for i in range(3):
+        a = wp.vec3(J[0, i], J[1, i], J[2, i])
+        b = wp.vec3(J0[0, i], J0[1, i], J0[2, i])
+        out[i] = 0.5 * wp.dot(a - b, a + b)
+    return out
+
+
+@wp.func
+def _natural_shear(J: wp.mat33, J0: wp.mat33) -> wp.vec3:
+    """Engineering covariant shear [2 E_xi_eta, 2 E_xi_zeta, 2 E_eta_zeta]."""
+    a = wp.vec3(J[0, 0], J[1, 0], J[2, 0])
+    b = wp.vec3(J[0, 1], J[1, 1], J[2, 1])
+    c = wp.vec3(J[0, 2], J[1, 2], J[2, 2])
+    a0 = wp.vec3(J0[0, 0], J0[1, 0], J0[2, 0])
+    b0 = wp.vec3(J0[0, 1], J0[1, 1], J0[2, 1])
+    c0 = wp.vec3(J0[0, 2], J0[1, 2], J0[2, 2])
     return wp.vec3(
-        0.5 * (F[0, 0] * F[0, 0] + F[1, 0] * F[1, 0] + F[2, 0] * F[2, 0] - 1.0),
-        0.5 * (F[0, 1] * F[0, 1] + F[1, 1] * F[1, 1] + F[2, 1] * F[2, 1] - 1.0),
-        0.5 * (F[0, 2] * F[0, 2] + F[1, 2] * F[1, 2] + F[2, 2] * F[2, 2] - 1.0),
+        wp.dot(a - a0, b) + wp.dot(a0, b - b0),
+        wp.dot(a - a0, c) + wp.dot(a0, c - c0),
+        wp.dot(b - b0, c) + wp.dot(b0, c - c0),
     )
 
 
 @wp.func
-def _gl_shear(F: wp.mat33) -> wp.vec3:
-    """Off-diagonal Green-Lagrange: [2·E12, 2·E13, 2·E23]."""
-    return wp.vec3(
-        F[0, 0] * F[0, 1] + F[1, 0] * F[1, 1] + F[2, 0] * F[2, 1],  # 2·E12
-        F[0, 0] * F[0, 2] + F[1, 0] * F[1, 2] + F[2, 0] * F[2, 2],  # 2·E13
-        F[0, 1] * F[0, 2] + F[1, 1] * F[1, 2] + F[2, 1] * F[2, 2],  # 2·E23
-    )
+def _g_pos_natural(dNa_xi: float, dNa_eta: float) -> wp.vec3:
+    return wp.vec3(dNa_xi, dNa_eta, 0.0)
+
+
+@wp.func
+def _g_grad_natural(dNa_xi: float, dNa_eta: float, Na: float, h: float, zeta: float) -> wp.vec3:
+    return 0.5 * h * wp.vec3(zeta * dNa_xi, zeta * dNa_eta, Na)
 
 
 # ---------------------------------------------------------------------------
@@ -264,35 +284,6 @@ def _b_shear(g: wp.vec3, F: wp.mat33, alpha: int) -> wp.vec3:
     )
 
 
-@wp.func
-def _g_pos(dNa_xi: float, dNa_eta: float, J0inv: wp.mat33) -> wp.vec3:
-    """Reference-space gradient G_a for position DOFs of node a.
-
-    G_a = [∂Na/∂ξ, ∂Na/∂η, 0] · J0^{-1}
-    """
-    v = wp.vec3(dNa_xi, dNa_eta, 0.0)
-    return wp.vec3(
-        J0inv[0, 0] * v[0] + J0inv[1, 0] * v[1],
-        J0inv[0, 1] * v[0] + J0inv[1, 1] * v[1],
-        J0inv[0, 2] * v[0] + J0inv[1, 2] * v[1],
-    )
-
-
-@wp.func
-def _g_grad(dNa_xi: float, dNa_eta: float, Na: float, h: float, zeta: float, J0inv: wp.mat33) -> wp.vec3:
-    """Reference-space gradient H_a for gradient (D) DOFs of node a.
-
-    H_a = [ζ·h/2·∂Na/∂ξ, ζ·h/2·∂Na/∂η, Na·h/2] · J0^{-1}
-    """
-    hz2 = 0.5 * h
-    v = wp.vec3(zeta * hz2 * dNa_xi, zeta * hz2 * dNa_eta, Na * hz2)
-    return wp.vec3(
-        J0inv[0, 0] * v[0] + J0inv[1, 0] * v[1] + J0inv[2, 0] * v[2],
-        J0inv[0, 1] * v[0] + J0inv[1, 1] * v[1] + J0inv[2, 1] * v[2],
-        J0inv[0, 2] * v[0] + J0inv[1, 2] * v[1] + J0inv[2, 2] * v[2],
-    )
-
-
 # ---------------------------------------------------------------------------
 # ANS tying-point shear strain evaluation
 # ---------------------------------------------------------------------------
@@ -326,10 +317,7 @@ def _e13_at(
     dNeta = _dshape_deta(xi)
     J0 = _jacobian(x0_ref, x1_ref, x2_ref, x3_ref, D0_ref, D1_ref, D2_ref, D3_ref, dNxi, dNeta, N, 0.0, h)
     J = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi, dNeta, N, 0.0, h)
-    J0inv = wp.inverse(J0)
-    F = _matmul33(J, J0inv)
-    sh = _gl_shear(F)
-    return sh[1]  # 2·E13
+    return _natural_shear(J, J0)[1]
 
 
 @wp.func
@@ -360,10 +348,7 @@ def _e23_at(
     dNeta = _dshape_deta(xi)
     J0 = _jacobian(x0_ref, x1_ref, x2_ref, x3_ref, D0_ref, D1_ref, D2_ref, D3_ref, dNxi, dNeta, N, 0.0, h)
     J = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi, dNeta, N, 0.0, h)
-    J0inv = wp.inverse(J0)
-    F = _matmul33(J, J0inv)
-    sh = _gl_shear(F)
-    return sh[2]  # 2·E23
+    return _natural_shear(J, J0)[2]
 
 
 @wp.func
@@ -376,7 +361,7 @@ def _b13_at(
     D1_ref: wp.vec3,
     D2_ref: wp.vec3,
     D3_ref: wp.vec3,
-    F: wp.mat33,
+    J: wp.mat33,
     J0inv: wp.mat33,
     xi: float,
     eta: float,
@@ -393,10 +378,10 @@ def _b13_at(
     dNa_xi = dNxi[node]
     dNa_eta = dNeta[node]
     if is_grad == 0:
-        g = _g_pos(dNa_xi, dNa_eta, J0inv)
+        g = _g_pos_natural(dNa_xi, dNa_eta)
     else:
-        g = _g_grad(dNa_xi, dNa_eta, Na, h, 0.0, J0inv)
-    b_sh = _b_shear(g, F, alpha)
+        g = _g_grad_natural(dNa_xi, dNa_eta, Na, h, 0.0)
+    b_sh = _b_shear(g, J, alpha)
     return b_sh[1]  # index 1 = 2·E13 contribution
 
 
@@ -410,7 +395,7 @@ def _b23_at(
     D1_ref: wp.vec3,
     D2_ref: wp.vec3,
     D3_ref: wp.vec3,
-    F: wp.mat33,
+    J: wp.mat33,
     J0inv: wp.mat33,
     xi: float,
     eta: float,
@@ -427,10 +412,10 @@ def _b23_at(
     dNa_xi = dNxi[node]
     dNa_eta = dNeta[node]
     if is_grad == 0:
-        g = _g_pos(dNa_xi, dNa_eta, J0inv)
+        g = _g_pos_natural(dNa_xi, dNa_eta)
     else:
-        g = _g_grad(dNa_xi, dNa_eta, Na, h, 0.0, J0inv)
-    b_sh = _b_shear(g, F, alpha)
+        g = _g_grad_natural(dNa_xi, dNa_eta, Na, h, 0.0)
+    b_sh = _b_shear(g, J, alpha)
     return b_sh[2]  # index 2 = 2·E23 contribution
 
 
@@ -467,9 +452,7 @@ def _e33_at(
     dNeta = _dshape_deta(xi)
     J0 = _jacobian(x0_ref, x1_ref, x2_ref, x3_ref, D0_ref, D1_ref, D2_ref, D3_ref, dNxi, dNeta, N, 0.0, h)
     J = _jacobian(x0, x1, x2, x3, D0, D1, D2, D3, dNxi, dNeta, N, 0.0, h)
-    J0inv = wp.inverse(J0)
-    F = _matmul33(J, J0inv)
-    return _gl_strain(F)[2]
+    return _natural_strain(J, J0)[2]
 
 
 @wp.func
@@ -482,7 +465,7 @@ def _b33_at(
     D1_ref: wp.vec3,
     D2_ref: wp.vec3,
     D3_ref: wp.vec3,
-    F: wp.mat33,
+    J: wp.mat33,
     J0inv: wp.mat33,
     xi: float,
     eta: float,
@@ -499,10 +482,10 @@ def _b33_at(
     dNa_xi = dNxi[node]
     dNa_eta = dNeta[node]
     if is_grad == 0:
-        g = _g_pos(dNa_xi, dNa_eta, J0inv)
+        g = _g_pos_natural(dNa_xi, dNa_eta)
     else:
-        g = _g_grad(dNa_xi, dNa_eta, Na, h, 0.0, J0inv)
-    return _b_diag(g, F, alpha)[2]
+        g = _g_grad_natural(dNa_xi, dNa_eta, Na, h, 0.0)
+    return _b_diag(g, J, alpha)[2]
 
 
 # ---------------------------------------------------------------------------
@@ -512,12 +495,10 @@ def _b33_at(
 
 @wp.func
 def _compute_beta(J0: wp.mat33, cos_theta: float, sin_theta: float) -> wp.mat33:
-    """Rotation matrix β[α,i] = AA_α[i] mapping global Cartesian → material frame.
+    """Map covariant natural strain to material components: A^T J0^{-T}.
 
-    F = J·J₀⁻¹ is a Cartesian deformation gradient, so E = ½(FᵀF−I) has global
-    Cartesian components.  β is therefore a pure rotation (entries ≤ 1) — no J₀⁻¹
-    involved.  Using J₀⁻¹ columns instead would inflate β by ~1/h ≈ 400 m⁻¹ for
-    thin shells and blow up the float32 EAS K_alpha to ~10¹⁴.
+    ANS acts on covariant components, so this transformation includes the
+    reference metric. Rotating both configurations leaves these components invariant.
     """
     G1 = wp.vec3(J0[0, 0], J0[1, 0], J0[2, 0])
     G2 = wp.vec3(J0[0, 1], J0[1, 1], J0[2, 1])
@@ -526,7 +507,7 @@ def _compute_beta(J0: wp.mat33, cos_theta: float, sin_theta: float) -> wp.mat33:
     A2 = wp.cross(A3, A1)
     AA1 = cos_theta * A1 + sin_theta * A2
     AA2 = -sin_theta * A1 + cos_theta * A2
-    return wp.mat33(
+    axes = wp.mat33(
         AA1[0],
         AA1[1],
         AA1[2],
@@ -537,6 +518,8 @@ def _compute_beta(J0: wp.mat33, cos_theta: float, sin_theta: float) -> wp.mat33:
         A3[1],
         A3[2],
     )
+
+    return _matmul33(axes, wp.transpose(wp.inverse(J0)))
 
 
 @wp.func
@@ -610,7 +593,9 @@ def _beta_transform_shear(e_d: wp.vec3, e_s: wp.vec3, b: wp.mat33) -> wp.vec3:
 # ---------------------------------------------------------------------------
 
 
-@wp.kernel
+# Assemble shared-node masses reproducibly; rounding differences otherwise seed
+# different contact trajectories when rebuilding the same model for identification.
+@wp.kernel(module="unique", module_options={"deterministic": wp.DeterministicMode.RUN_TO_RUN})
 def compute_lumped_mass(
     node_x0: wp.array[wp.vec3],
     node_D0: wp.array[wp.vec3],
@@ -619,15 +604,11 @@ def compute_lumped_mass(
     elem_mat: wp.array2d[float],
     lumped_mass: wp.array[float],  # (n_nodes * 6,) accumulated
 ):
-    """Diagonal (lumped) mass per DOF via element-volume distribution.
+    """Block-lumped translational mass and through-thickness director inertia.
 
-    Integrates element mass over the reference configuration and distributes:
-      - Position DOFs  (sub 0-2): m_elem / (4 * 3) per DOF
-      - Gradient DOFs  (sub 3-5): m_pos * (h/2)^2 / 3  (thickness inertia)
-
-    This replaces the full 24x24 consistent-mass kernel. The consistent mass
-    would be row-summed into a lumped diagonal anyway, and the 24x24 loop is
-    the bottleneck for nvcc compile time.
+    Row-sum each translational/director mass block separately: integral rho*N_a
+    and integral rho*N_a*(h*zeta/2)^2. Every Cartesian component carries the
+    full nodal mass; position and director coordinates have different units.
     """
     e = wp.tid()
 
@@ -648,8 +629,8 @@ def compute_lumped_mass(
     h = elem_h[e]
     rho = elem_mat[e, 9]
 
-    # Integrate element mass: m = ∫ ρ dV
-    m_elem = float(0.0)
+    m_pos = wp.vec4(0.0)
+    m_dir = wp.vec4(0.0)
     for gi in range(2):
         xi = _gp2(gi)
         for gj in range(2):
@@ -661,19 +642,12 @@ def compute_lumped_mass(
                 dNxi = _dshape_dxi(eta)
                 dNeta = _dshape_deta(xi)
                 J0 = _jacobian(X0, X1, X2, X3, R0, R1, R2, R3, dNxi, dNeta, N, zeta, h)
-                m_elem = m_elem + rho * w * wp.abs(wp.determinant(J0))
-
-    # Distribute uniformly to all 4 nodes × 3 position directions
-    m_per_pos = m_elem / float(4 * 3)
-    # Director DOFs get the same lumped mass as position DOFs.
-    # Physical rotational inertia m_pos*(h/2)^2/3 ≈ 5e-6*m_pos gives
-    # K_eff[dir] ≈ 38 N/m vs K_eff[contact-pos] ≈ 2.3e6 N/m at impact →
-    # κ ≈ 60 000, requiring ~2000 PCG iters to converge (we only have 300).
-    # Equal mass collapses κ to ≈ 11; 300 iters is then ample.
-    m_per_grad = m_per_pos
+                dm = rho * w * wp.abs(wp.determinant(J0))
+                m_pos = m_pos + dm * N
+                m_dir = m_dir + dm * (0.5 * h * zeta) ** 2.0 * N
 
     for ni in range(4):
         na = elem_nodes[e, ni]
         for alpha in range(3):
-            wp.atomic_add(lumped_mass, na * 6 + alpha, m_per_pos)
-            wp.atomic_add(lumped_mass, na * 6 + 3 + alpha, m_per_grad)
+            wp.atomic_add(lumped_mass, na * 6 + alpha, m_pos[ni])
+            wp.atomic_add(lumped_mass, na * 6 + 3 + alpha, m_dir[ni])

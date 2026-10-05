@@ -201,6 +201,9 @@ class TireAssetMeta:
     """Rigid hub baked with the tire, or None if the asset has no ``/Tire/Spindle`` prim."""
     contact_kn: float | None = None
     """Recommended ground-contact stiffness per node [N/m] (scaled with node area at bake time), or None."""
+    contact_kd: float | None = None
+    """Recommended ground-contact damping per node [N·s/m] (sized to the vehicle's ride mode at bake
+    time), or None (the consumer falls back to its baseline kd/kn ratio)."""
     pcg_iters: int | None = None
     """Recommended PCG iterations per Newton step for this mesh's element size, or None."""
     shell_thickness: float | None = None
@@ -265,6 +268,7 @@ def load_ancf_tire_usd(
         pressure=float(custom["pressure"]),
         spindle=spindle,
         contact_kn=float(custom["contactKn"]) if "contactKn" in custom else None,
+        contact_kd=float(custom["contactKd"]) if "contactKd" in custom else None,
         pcg_iters=int(custom["pcgIters"]) if "pcgIters" in custom else None,
         shell_thickness=float(custom["shellThickness"]) if "shellThickness" in custom else None,
     )

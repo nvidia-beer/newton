@@ -59,8 +59,13 @@ from newton.examples.ancf._ancf_viz import (
     quad_triangles,
     ring_segments,
 )
+from newton.examples.ancf._capture_utils import restore_arrays, snapshot_arrays, try_capture
 from newton.examples.ancf._vehicle_usd import VehicleUSD, find_body
-from newton.solvers import SolverANCFShellRigid, isotropic_ancf_material, load_ancf_tire_usd
+from newton.solvers import (
+    SolverANCFShellRigid,
+    isotropic_ancf_material,
+    load_ancf_tire_usd,
+)
 
 _ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 
@@ -80,7 +85,7 @@ _PCG_ITERS = 25
 _FRAME_DT = 1.0 / 60.0
 
 # ── Vertical spindle load (simulates vehicle body weight) ─────────────────────
-# Clamped at runtime to kn * 0.025 m (beyond ~25 mm penetration the shell inverts).
+# Screened against reference contact-patch support at 25 mm indentation.
 # F_load acts downward (-Z in MuJoCo Z-up) on each spindle independently.
 _F_LOAD = 0.0  # [N] per-spindle downward load (0 = tire weight only)
 
@@ -498,22 +503,32 @@ class Example:
         drop_heights = [drop_h] * n_envs  # all tires at same height; spaced laterally
 
         m_tire = rho_tire * h_shell * (2.0 * math.pi * r_outer * width + 2.0 * math.pi * (r_outer**2 - r_inner**2))
-        fz_tare = m_tire * 9.81
+        # The spindle and the FEM shell are separate masses.
+        fz_tare = 0.0
 
         # ── Mass-proportional Rayleigh damping (auto-derived) ─────────────────
         _l_sw = math.sqrt((r_outer - r_inner) ** 2 + (width / 2.0) ** 2)
         _k_sw = e_tire * h_shell * 2.0 * math.pi * r_outer / _l_sw
         _m_free = m_tire * (1.0 - n_bead / n_nodes)
         _omega_n = math.sqrt(_k_sw / max(_m_free, 1e-9))
-        alpha_m_damp = float(getattr(args, "alpha_m_damp", 2.0 * 0.10 * _omega_n))
+        _amd = getattr(args, "alpha_m_damp", None)
+        alpha_m_damp = float(_amd) if _amd is not None else 2.0 * 0.10 * _omega_n
 
         _f_load_raw = float(args.f_load)
-        _f_load_safe = kn * 0.025  # 25mm max penetration = safe shell deformation
+        # kn is a per-node penalty. Screen the load against the complete undeformed
+        # contact patch at 25 mm indentation, rather than a single contact node.
+        _spindle_mass = (
+            float(args.m_rigid)
+            if args.m_rigid is not None
+            else float(self.vehicle.wheel_mass if self.vehicle else tire_meta.spindle.mass)
+        )
+        _patch_support = kn * float(np.maximum(0.025 - (x0_np[:, 1] + r_roll), 0.0).sum())
+        _f_load_safe = max(0.0, _patch_support - (_spindle_mass + m_tire) * _GRAVITY)
         if _f_load_raw > _f_load_safe:
             print(
                 f"[WARN] --f-load {_f_load_raw:.0f}N exceeds safe limit "
-                f"{_f_load_safe:.0f}N at kn={kn:.0f} → clamped. "
-                f"Raise kn to apply more load (kn=300k → safe up to 7500N)."
+                f"{_f_load_safe:.0f}N for the reference contact patch at kn={kn:.0f} → clamped. "
+                f"Use contact parameters appropriate to the experiment."
             )
             _f_load_raw = _f_load_safe
         self._f_load = _f_load_raw
@@ -548,18 +563,17 @@ class Example:
         # ── ANCF solver (Y-up, gravity along -Y) ─────────────────────────────
         ancf_builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
         ancf_newton_model = ancf_builder.finalize(device=device)
-        self.ancf_solver = SolverANCFShellRigid(
-            model=ancf_newton_model,
-            ancf_model=self.ancf_model,
-            ground_z=0.0,
-            kn=kn,
-            kd=kd,
-            mu=mu,
-            nr_max_iter=nr_iters,
-            pcg_max_iter=pcg_iters,
-            n_envs=n_envs,
-            thickness_gp=thickness_gp,
-        )
+        solver_kwargs = {
+            "model": ancf_newton_model,
+            "ancf_model": self.ancf_model,
+            "ground_z": 0.0,
+            "kn": kn,
+            "kd": kd,
+            "mu": mu,
+            "n_envs": n_envs,
+            "thickness_gp": thickness_gp,
+        }
+        self.ancf_solver = SolverANCFShellRigid(nr_max_iter=nr_iters, pcg_max_iter=pcg_iters, **solver_kwargs)
 
         # Place each ANCF tire at its config position (ANCF X = lateral = Z-up Y). The MuJoCo
         # rigs all sit at Y=0; the per-tire lateral offsets in the coupling kernels supply the
@@ -572,11 +586,12 @@ class Example:
         # _step_batched requires GLOBAL flat indices (env * n_nodes + local_idx).
         bead_global_np = np.concatenate([bead_np + e * n_nodes for e in range(n_envs)])
         self.ancf_solver.set_dirichlet_nodes(bead_global_np)
-        self._build_pressures = pressures
+        build_pressure = getattr(args, "build_pressure", None)
+        self._build_pressures = list(pressures) if build_pressure is None else [float(build_pressure)] * n_envs
         self._pressure_targets = list(pressures)
         self._pressure_currents = list(pressures)
-        self._build_pressure = pressures[0]  # > 0 enables the CTIS panel / ramp
-        self.ancf_solver.set_cavity(pressures, pressures)
+        self._build_pressure = pressures[0]  # Initial nominal pressure enables the legacy CTIS panel / ramp.
+        self.ancf_solver.set_cavity(pressures, self._build_pressures)
 
         # ── MuJoCo rigid-body rig (Z-up) from the asset's spindle ────────────
         # Chrono ChTireTestRig topology: world -slide_x- chassis -slide_z- spindle.
@@ -792,6 +807,9 @@ class Example:
         self.ancf_solver.node_Ddd.zero_()
         self.ancf_solver.global_f_int.zero_()
         self.ancf_solver.global_f_int0.zero_()
+        self.ancf_solver.global_f_ext.zero_()
+        if hasattr(self.ancf_solver, "global_f_ext0"):
+            self.ancf_solver.global_f_ext0.zero_()
         self.ancf_solver.node_f_ext_persistent.zero_()
         self.ancf_model.elem_eas_alpha.zero_()
         self.solver.step_kinematics(self.state_0, self.state_rigid, self.control, None, self._sim_dt)
@@ -825,13 +843,13 @@ class Example:
         )
 
         # MuJoCo kinematics / dynamics as standalone graphs (the fallback substep loop uses
-        # them), then the full substep as one CUDA graph. Uses ancf.step() (unrolled NR+PCG)
+        # them), then all implicit substeps as one CUDA graph. Uses ancf.step() (unrolled NR+PCG)
         # because a graph launch is not capturable inside another capture.
         self._kin_graph = None
         self._dyn_graph = None
-        self._substep_graph = None
+        self._simulation_graph = None
         self._try_capture_mujoco_graphs()
-        self._try_capture_substep_graph()
+        self._try_capture_simulation_graph()
 
         if viewer is not None:
             viewer.set_model(self.model)
@@ -846,8 +864,8 @@ class Example:
 
     # ── Substep graph capture ─────────────────────────────────────────────────
 
-    def _try_capture_substep_graph(self) -> None:
-        """Capture one complete substep as a single CUDA graph.
+    def _try_capture_simulation_graph(self) -> None:
+        """Capture all frame substeps as a single CUDA graph.
 
         Saves and restores ALL simulation state — ANCF, state_0, and state_rigid —
         around the capture warmup.  ancf.step() is used (unrolled NR+PCG) because
@@ -857,49 +875,47 @@ class Example:
         ancf = self.ancf_solver
         dt = self._sim_dt
 
+        def live_ancf():
+            return {
+                "node_x": ancf.node_x,
+                "node_xd": ancf.node_xd,
+                "node_xdd": ancf.node_xdd,
+                "node_D": ancf.node_D,
+                "node_Dd": ancf.node_Dd,
+                "node_Ddd": ancf.node_Ddd,
+                "f_int": ancf.global_f_int,
+                "f_int0": ancf.global_f_int0,
+                "eas": self.ancf_model.elem_eas_alpha,
+                "f_ext": ancf.node_f_ext_persistent,
+            }
+
+        def live_rigid():
+            return {
+                "s0_bq": self.state_0.body_q,
+                "s0_bqd": self.state_0.body_qd,
+                "s0_jq": self.state_0.joint_q,
+                "s0_jqd": self.state_0.joint_qd,
+                "sr_bq": self.state_rigid.body_q,
+                "sr_bqd": self.state_rigid.body_qd,
+                "sr_jq": self.state_rigid.joint_q,
+                "sr_jqd": self.state_rigid.joint_qd,
+            }
+
         wp.synchronize_device(dev)
-        s = {
-            "node_x": ancf.node_x.numpy().copy(),
-            "node_xd": ancf.node_xd.numpy().copy(),
-            "node_xdd": ancf.node_xdd.numpy().copy(),
-            "node_D": ancf.node_D.numpy().copy(),
-            "node_Dd": ancf.node_Dd.numpy().copy(),
-            "node_Ddd": ancf.node_Ddd.numpy().copy(),
-            "f_int": ancf.global_f_int.numpy().copy(),
-            "f_int0": ancf.global_f_int0.numpy().copy(),
-            "eas": self.ancf_model.elem_eas_alpha.numpy().copy(),
-            "f_ext": ancf.node_f_ext_persistent.numpy().copy(),
-            "s0_bq": self.state_0.body_q.numpy().copy(),
-            "s0_bqd": self.state_0.body_qd.numpy().copy(),
-            "s0_jq": self.state_0.joint_q.numpy().copy(),
-            "s0_jqd": self.state_0.joint_qd.numpy().copy(),
-            "sr_bq": self.state_rigid.body_q.numpy().copy(),
-            "sr_bqd": self.state_rigid.body_qd.numpy().copy(),
-            "sr_jq": self.state_rigid.joint_q.numpy().copy(),
-            "sr_jqd": self.state_rigid.joint_qd.numpy().copy(),
+        saved_ancf = snapshot_arrays(live_ancf())
+        saved_rigid = snapshot_arrays(live_rigid())
+
+        force_history = {
+            name: wp.clone(getattr(ancf, name)) for name in ("global_f_ext", "global_f_ext0") if hasattr(ancf, name)
         }
 
         def _restore_ancf():
-            ancf.node_x.assign(s["node_x"])
-            ancf.node_xd.assign(s["node_xd"])
-            ancf.node_xdd.assign(s["node_xdd"])
-            ancf.node_D.assign(s["node_D"])
-            ancf.node_Dd.assign(s["node_Dd"])
-            ancf.node_Ddd.assign(s["node_Ddd"])
-            ancf.global_f_int.assign(s["f_int"])
-            ancf.global_f_int0.assign(s["f_int0"])
-            self.ancf_model.elem_eas_alpha.assign(s["eas"])
-            ancf.node_f_ext_persistent.assign(s["f_ext"])
+            for name, value in force_history.items():
+                wp.copy(getattr(ancf, name), value)
+            restore_arrays(saved_ancf, live_ancf())
 
         def _restore_rigid():
-            self.state_0.body_q.assign(s["s0_bq"])
-            self.state_0.body_qd.assign(s["s0_bqd"])
-            self.state_0.joint_q.assign(s["s0_jq"])
-            self.state_0.joint_qd.assign(s["s0_jqd"])
-            self.state_rigid.body_q.assign(s["sr_bq"])
-            self.state_rigid.body_qd.assign(s["sr_bqd"])
-            self.state_rigid.joint_q.assign(s["sr_jq"])
-            self.state_rigid.joint_qd.assign(s["sr_jqd"])
+            restore_arrays(saved_rigid, live_rigid())
 
         # Pre-warmup: wp.capture_end() creates the graph but NOT the exec (lazy). Launching
         # once here instantiates it OUTSIDE any capture context (error 900 otherwise).
@@ -919,18 +935,15 @@ class Example:
         def _dyn():
             self.solver.step_dynamics(self.state_rigid)
 
-        try:
-            wp.capture_begin(device=dev)
-            self._one_substep(_kin, _ancf_step, _dyn)  # capture ONE substep only
-            self._substep_graph = wp.capture_end(device=dev)
-            print(f"[SUBSTEP GRAPH] Captured 1 substep — {self._substeps} launches/frame")
-        except Exception as e:
-            try:
-                wp.capture_end(device=dev)
-            except Exception:
-                pass
-            self._substep_graph = None
-            print(f"[SUBSTEP GRAPH] Capture failed ({e!r}) — falling back to the per-substep loop")
+        def frame():
+            for _ in range(self._substeps):
+                self._one_substep(_kin, _ancf_step, _dyn)
+
+        self._simulation_graph = try_capture(
+            frame, "[SIMULATION GRAPH] Capture failed ({error!r}) — falling back to the per-substep loop", dev
+        )
+        if self._simulation_graph is not None:
+            print(f"[SIMULATION GRAPH] Captured {self._substeps} substeps")
 
         wp.synchronize_device(dev)
         _restore_ancf()
@@ -941,30 +954,15 @@ class Example:
         dev = "cuda:0"
         dt = self._sim_dt
         wp.synchronize_device(dev)
-        try:
-            wp.capture_begin(device=dev)
-            self.solver.step_kinematics(self.state_0, self.state_rigid, self.control, None, dt)
-            self._kin_graph = wp.capture_end(device=dev)
-        except Exception as e:
-            try:
-                wp.capture_end(device=dev)
-            except Exception:
-                pass
-            self._kin_graph = None
-            print(f"[MJ GRAPHS] Kinematics capture failed: {e!r}")
-
+        self._kin_graph = try_capture(
+            lambda: self.solver.step_kinematics(self.state_0, self.state_rigid, self.control, None, dt),
+            "[MJ GRAPHS] Kinematics capture failed: {error!r}",
+            dev,
+        )
         wp.synchronize_device(dev)
-        try:
-            wp.capture_begin(device=dev)
-            self.solver.step_dynamics(self.state_rigid)
-            self._dyn_graph = wp.capture_end(device=dev)
-        except Exception as e:
-            try:
-                wp.capture_end(device=dev)
-            except Exception:
-                pass
-            self._dyn_graph = None
-            print(f"[MJ GRAPHS] Dynamics capture failed: {e!r}")
+        self._dyn_graph = try_capture(
+            lambda: self.solver.step_dynamics(self.state_rigid), "[MJ GRAPHS] Dynamics capture failed: {error!r}", dev
+        )
 
         # Launch each graph once so its exec is instantiated outside any capture context.
         wp.synchronize_device(dev)
@@ -1074,8 +1072,11 @@ class Example:
                 device=dev,
             )
         ancf_step_fn()
-        # Corrector: pin beads to current spindle pos (no extrapolation) after FEM solve.
-        self._prescribe_beads(vel_predict_dt=0.0)
+        # Keep the beads at the END-of-step pose the FEM solve used (the same extrapolation as
+        # above).  Snapping them back to the start-of-step spindle pose left the bead ring offset
+        # from the carcass and from the rim MuJoCo is about to draw by v_hub·dt — 9 mm at 10
+        # substeps, 31 mm at 3 — a visible shear at the sidewall root and a false r_min/bead_drift.
+        self._prescribe_beads(vel_predict_dt=dt)
         self._accumulate_wrenches()
         dyn_fn()
         # Re-pin slide_x velocity after step_dynamics so the copy carries the
@@ -1100,12 +1101,11 @@ class Example:
     # ── Simulation ─────────────────────────────────────────────────────────────
 
     def simulate(self) -> None:
-        # One small graph per substep (~1 NR block): the GPU executes while the CPU
-        # launches the next one, so the frame is GPU-bound rather than launch-bound.
-        if self._substep_graph is not None:
-            for _sub in range(self._substeps):
-                wp.capture_launch(self._substep_graph)
-            wp.synchronize_device()
+        # Capture the complete frame to avoid repeated graph submission overhead.
+        if self._simulation_graph is not None:
+            wp.capture_launch(self._simulation_graph)
+            # Render-buffer updates use this stream, and consumers synchronize
+            # their transfers. Let CPU preparation overlap simulation work.
             return
 
         # Fallback: the same substep from the pre-captured kinematics / dynamics / ANCF graphs.
@@ -1127,14 +1127,17 @@ class Example:
     def step(self) -> None:
         # Ramp CTIS pressure per-env toward GUI targets (2000 Pa/frame each)
         if self._build_pressure > 0.0:
+            pressure_changed = False
             for e in range(self._n_envs):
                 d = self._pressure_targets[e] - self._pressure_currents[e]
                 step = min(abs(d), 2000.0) * (1.0 if d >= 0.0 else -1.0)
                 self._pressure_currents[e] += step
-            self.ancf_solver.set_cavity(
-                self._pressure_currents,
-                self._build_pressures,
-            )
+                pressure_changed = pressure_changed or step != 0.0
+            if pressure_changed:
+                self.ancf_solver.set_cavity(
+                    self._pressure_currents,
+                    self._build_pressures,
+                )
 
         # Ramp rim_omega_wp toward GUI target RPM.  The host is the sole writer of
         # rim_omega_wp (kernels only read it), so ramp the host mirror and upload
@@ -1194,16 +1197,12 @@ class Example:
         )
 
         if self._frame % self._diag_period == 0:
-            _now = time.perf_counter()
-            _fps = self._diag_period / max(_now - self._t_wall, 1e-9)
-            _ms = 1e3 / max(_fps, 1e-3)
-            self._print_diag(_fps, _ms)
-            self._t_wall = _now
+            self._print_diag()
             self._t_step = self._t_render = 0.0
 
     # ── Diagnostics (host readback only every --diag-period frames) ───────────
 
-    def _print_diag(self, fps: float = 0.0, ms: float = 0.0) -> None:
+    def _print_diag(self) -> None:
         with wp.ScopedTimer("diag", use_nvtx=False, color="red"):
             x_all = self.ancf_solver.node_x.numpy()  # (N*n_nodes, 3)
             xd_all = self.ancf_solver.node_xd.numpy()  # (N*n_nodes, 3)
@@ -1215,6 +1214,12 @@ class Example:
             xpos_all = self.solver.xpos.numpy()  # (N, nbody)
             cvel_all = self.solver.cvel.numpy()  # (N, nbody) spatial_vector
 
+        # The readbacks above complete queued work. Time completed frames,
+        # including in the null viewer, rather than CUDA graph submissions.
+        now = time.perf_counter()
+        fps = self._diag_period / max(now - self._t_wall, 1e-9)
+        ms = 1e3 / max(fps, 1e-3)
+        self._t_wall = now
         N = self._n_envs
         nn = self._n_nodes
         nf = nn * 6
@@ -1297,6 +1302,12 @@ class Example:
             axis=1,
         )
         bead_drift_mm = float(np.max(np.linalg.norm(bead_x - expected, axis=1))) * 1e3
+        # Cross-section shape (ANCF Y-up, axle along X): largest / smallest radius from the hub
+        # axis and the half-width (sidewall bulge) — the bulge is the shell's softest mode.
+        _rad = np.hypot(x_np[:, 1] - hub_ancf[1], x_np[:, 2] - hub_ancf[2])
+        r_max = float(np.max(_rad))
+        r_min = float(np.min(_rad))
+        w_half = float(np.max(np.abs(x_np[:, 0] - hub_ancf[0])))
         node_v_max = float(np.max(np.linalg.norm(xd_np, axis=1)))
         fi_np = fi_all[:nf]
         fi_finite = bool(np.all(np.isfinite(fi_np)))
@@ -1333,10 +1344,11 @@ class Example:
             f"  sp_Z={sp_z:+.4f}m"
             f"  F_z={fz_contact:+.0f}N (wt~{fz_exp:.0f}N)"
             f"  bead_drift={bead_drift_mm:.3f}mm"
+            f"  r_max={r_max:.4f}m r_min={r_min:.4f}m w_half={w_half:.4f}m"
             f"  v_max={node_v_max:.2f}m/s"
             f"  fi_max={fi_max:.2e}"
             f"  fps={fps:.1f} ({ms:.1f}ms/frame"
-            f"  step={_step_ms:.1f}ms  render={_render_ms:.1f}ms)"
+            f"  CPU submit={_step_ms:.1f}ms  render/wait={_render_ms:.1f}ms)"
         )
 
     # ── GUI ────────────────────────────────────────────────────────────────────
@@ -1377,7 +1389,7 @@ class Example:
             self._f_load = float(val)
         F_total = self._f_load + self._m_rigid * _GRAVITY
         ui.text(f"  F_normal ~{F_total:.0f} N")
-        ui.text(f"  safe max {self._f_load_safe_max:.0f} N  (raise kn=300k → 7500 N)")
+        ui.text(f"  reference contact-patch load limit {self._f_load_safe_max:.0f} N")
 
         ui.separator()
         ui.text("Contact spikes")
@@ -1496,6 +1508,12 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         parser.add_argument(
+            "--build-pressure",
+            type=float,
+            default=None,
+            help="Fixed reference pressure [Pa]; default: each tire's initial nominal pressure.",
+        )
+        parser.add_argument(
             "--n-envs",
             type=int,
             default=None,
@@ -1593,6 +1611,13 @@ class Example:
             'Example: \'[{"E": 1e7, "nu": 0.45, "pressure": 30000}, ...]\' ',
         )
         parser.add_argument(
+            "--alpha-m-damp",
+            type=float,
+            default=None,
+            help="Mass-proportional damping [1/s] on absolute node velocity (default: 2*0.1*omega_n of the "
+            "constrained breathing mode). 0 disables it; note it acts as drag on a translating/spinning tire.",
+        )
+        parser.add_argument(
             "--rpm",
             type=float,
             default=0.0,
@@ -1603,8 +1628,7 @@ class Example:
             type=float,
             default=_F_LOAD,
             help="Vertical preload per spindle [N] — simulates vehicle body weight. "
-            "Clamped to kn*0.025 at runtime to prevent shell inversion. "
-            "kn=10k → max 250 N.  kn=300k → max 7500 N.  Default: 0.",
+            "Screened against the reference contact patch at 25 mm indentation, minus weight. Default: 0.",
         )
         parser.add_argument(
             "--fast-math",

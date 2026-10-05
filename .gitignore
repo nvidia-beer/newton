@@ -76,3 +76,9 @@ docs/_static/viser/
 **/*.ipynb_checkpoints/
 
 docker/nsys
+# Local Warp development checkout (Docker uses docker/patches/)
+/third_party/warp/
+
+# Large ANCF example assets, kept out of git
+/newton/examples/ancf/assets/terrain/
+/newton/examples/ancf/assets/vehicle_telemetry/

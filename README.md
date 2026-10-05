@@ -654,6 +654,48 @@ If you run the examples from a source checkout with uv, use
     </td>
   </tr>
   <tr>
+    <td align="center" width="33%">
+      <a href="newton/examples/ancf/diffsim/example_diffsim_ancf_tire_lift.py">
+        <img width="320" src="docs/images/examples/example_diffsim_ancf_tire_lift.jpg" alt="ANCF tire preparation for vehicle telemetry">
+      </a>
+    </td>
+    <td colspan="2">Inspect a white tire across a tested 0.25–8 PSI demonstration range. Spindle cylinders show actual and target heights; the main panel compares low/high PSI tread shapes. Change flat-ground compliance and learn pressure for the same loaded height. Optional CSV stiffness fitting and replay export prepare the telemetry vehicle's tire.</td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <code>python -m newton.examples diffsim_ancf_tire_lift</code>
+    </td>
+    <td colspan="2"></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="newton/examples/ancf/diffsim/example_diffsim_ancf_skid_steer.py">
+        <img width="320" src="docs/images/examples/example_diffsim_ancf_skid_steer.jpg" alt="Skid-steer response learning with a gray reference vehicle">
+      </a>
+    </td>
+    <td colspan="2">Measure straight and turning maneuvers on the MuJoCo vehicle with four ANCF tires. Learn speed and nonlinear turning response with Warp gradients, then compare the physical before/after drives with a gray target vehicle. A flat-ground preparation step for vehicle telemetry calibration.</td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <code>python -m newton.examples diffsim_ancf_skid_steer</code>
+    </td>
+    <td colspan="2"></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="newton/examples/ancf/diffsim/example_diffsim_ancf_tire_traction.py">
+        <img width="320" src="docs/images/examples/example_diffsim_ancf_tire_traction.jpg" alt="ANCF tire learning ground friction against a gray reference tire">
+      </a>
+    </td>
+    <td colspan="2">Learn ground friction from the travel and speed of a rolling ANCF tire. The white simulated tire and gray reference receive the same spin-and-brake command. Implicit derivatives follow the shell, contact and translating spindle through time; a different motor command validates the learned friction. This CPU experiment bridges static tire fitting and vehicle telemetry calibration.</td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <code>python -m newton.examples diffsim_ancf_tire_traction</code>
+    </td>
+    <td colspan="2"></td>
+  </tr>
+  <tr>
     <td colspan="3"><h3>Multi-Physics Examples</h3></td>
   </tr>
   <tr>

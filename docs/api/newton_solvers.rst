@@ -34,9 +34,17 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
    :toctree: _generated
    :nosignatures:
 
+   ANCFShellModel
+   ANCFTireEquilibrium
+   ANCFTireTraction
+   InterfaceCouplerGS
+   SolverANCFShell
+   SolverANCFShellRigid
    SolverBase
    SolverFeatherstone
    SolverImplicitMPM
+   SolverImplicitSoft
+   SolverInflatable
    SolverKamino
    SolverMuJoCo
    SolverNotifyFlags
@@ -44,3 +52,16 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
    SolverStyle3D
    SolverVBD
    SolverXPBD
+   SpindleAsset
+   TerrainSCM
+   TireAssetMeta
+
+.. rubric:: Functions
+
+.. autosummary::
+   :toctree: _generated
+   :signatures: long
+
+   ancf_material_from_engineering
+   isotropic_ancf_material
+   load_ancf_tire_usd

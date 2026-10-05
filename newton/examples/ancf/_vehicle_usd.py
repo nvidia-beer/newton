@@ -30,9 +30,16 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton.actuators import ClampingMaxEffort, ControllerPD
+
+
+def asset_path(name: str) -> str:
+    """Resolve an absolute asset path or a name relative to the ANCF assets."""
+    return name if os.path.isabs(name) else os.path.join(os.path.dirname(__file__), "assets", name)
+
 
 # ANCF tire frame (Y-up, axle X) -> Z-up body frame (axle Y): (x, y, z) -> (z, x, y).
-_P_YUP_TO_ZU = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+P_YUP_TO_ZU = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
 # Box collider tiles: footprint side [m] that keeps one box under MuJoCo's 50-prism hfield cap
 # on the examples' 0.5 m collider cell at any yaw (see VehicleUSD._add_usd_shape).
 _HULL_BOX_MAX_SIDE = 1.6
@@ -126,6 +133,29 @@ def _drive_skid(
     w = cmd[1]
     joint_target_vel[left_dofs[tid]] = left_sign[tid] * w * (1.0 - wp.max(turn, 0.0))
     joint_target_vel[right_dofs[tid]] = right_sign[tid] * w * (1.0 - wp.max(-turn, 0.0))
+
+
+@wp.kernel
+def ghost_points(
+    local: wp.array[wp.vec3],
+    wheel: wp.array[int],
+    hub: wp.array[wp.vec3],
+    spin: wp.array[float],
+    pose: wp.transform,
+    out: wp.array[wp.vec3],
+):
+    """World points of a vehicle ghost (a drawn-only copy of hull plus tires) at ``pose``: hull points
+    (wheel = -1) are fixed to the vehicle frame, wheel points turn about their hub's axle (+Y; a
+    positive angle [rad] rolls the vehicle forward) first."""
+    i = wp.tid()
+    p = local[i]
+    b = wheel[i]
+    if b >= 0:
+        a = spin[b]
+        c = wp.cos(a)
+        s = wp.sin(a)
+        p = wp.vec3(c * p[0] + s * p[2], p[1], -s * p[0] + c * p[2]) + hub[b]
+    out[i] = wp.transform_point(pose, p)
 
 
 def _quat_wxyz_to_matrix(w: float, x: float, y: float, z: float) -> np.ndarray:
@@ -298,17 +328,30 @@ class VehicleUSD:
             self.hull_com = hull["com"]
             self.hull_inertia = hull["inertia"]
             self.hull_shapes = hull["shapes"]
-            vis = UsdGeom.Mesh(stage.GetPrimAtPath("/Vehicle/Hull/Visual"))
-            self.hull_points = np.array(vis.GetPointsAttr().Get(), dtype=np.float32)
-            self.hull_triangles = np.array(vis.GetFaceVertexIndicesAttr().Get(), dtype=np.int32).reshape(-1, 3)
+            # Display meshes: every Mesh child of /Vehicle/Hull (the colliders are Cube /
+            # Cylinder prims), coloured by its authored displayColor; legacy assets have a
+            # single uncoloured "Visual" and keep the old hull colour.
+            self.hull_visuals = []
+            for child in stage.GetPrimAtPath("/Vehicle/Hull").GetChildren():
+                if not child.IsA(UsdGeom.Mesh):
+                    continue
+                vis = UsdGeom.Mesh(child)
+                pts = np.array(vis.GetPointsAttr().Get(), dtype=np.float32)
+                tris = np.array(vis.GetFaceVertexIndicesAttr().Get(), dtype=np.int32).reshape(-1, 3)
+                dc = vis.GetDisplayColorAttr().Get()
+                color = tuple(float(c) for c in dc[0]) if dc else (0.55, 0.58, 0.45)
+                self.hull_visuals.append((child.GetName(), pts, tris, color))
+            if not self.hull_visuals:
+                raise ValueError(f"{self.name}: /Vehicle/Hull has no display Mesh")
             wc = stage.GetPrimAtPath("/Vehicle/Wheels").GetCustomData()
             self.hubs_local = np.array(wc["hubs"], dtype=np.float64).reshape(-1, 3)
             self.wheel_mass = float(wc["wheelMass"])
             self.axle_kv = float(wc["axleKv"])
             self.axle_damping = float(wc["axleDamping"])
             self.axle_effort_limit = float(wc.get("axleEffortLimit", 0.0)) or None  # [N m] per wheel; None = uncapped
-            # Centre the wheelbase on the world origin.
-            mid = 0.5 * (self.hubs_local[0] + self.hubs_local[2])
+            # Centre the vehicle on its origin: the mean of the four hubs in plan view (FL + RL alone
+            # put the LEFT wheel line on the origin and the car half a track to the right of the path)
+            mid = self.hubs_local[:, :2].mean(axis=0)
             self.hull_origin = np.array([-mid[0], -mid[1], 0.0])
             self.hubs = self.hubs_local + self.hull_origin
             # Ground footprint of the hull colliders and belly clearance (their lowest face over
@@ -321,7 +364,14 @@ class VehicleUSD:
             # shapes), so a single-wheel rig can build the very same spindle.
             self.spindle_body = read_usd_body(stage, self.spindle_bodies[0])
             self.wheel_mass = float(self.spindle_body["mass"])
-            self.footprint, self.belly = read_usd_chassis_footprint(stage)
+            # centre the USD on its origin (mean of the four hubs in plan view): the asset's root
+            # frame is wherever the bake left it, the examples want the car centred on the spawn pose
+            mid = self.hubs[:, :2].mean(axis=0)
+            self.usd_offset = np.array([-mid[0], -mid[1], 0.0])
+            self.hubs = self.hubs + self.usd_offset
+            (x0, x1, y0, y1), self.belly = read_usd_chassis_footprint(stage)
+            ox, oy = float(self.usd_offset[0]), float(self.usd_offset[1])
+            self.footprint = (x0 + ox, x1 + ox, y0 + oy, y1 + oy)
         else:
             raise ValueError(f"{self.name}: unknown vehicleKind '{self.kind}'")
         self.r_roll = float(self.hubs[0, 2])  # hub height above ground = rolling radius at rest
@@ -353,37 +403,52 @@ class VehicleUSD:
     # ── Rigid body construction ───────────────────────────────────────────────
 
     def build(
-        self, car: newton.ModelBuilder, z_off: float, tire_spindle=None, r_bead: float = 0.0, half_bead: float = 0.0
+        self,
+        car: newton.ModelBuilder,
+        z_off: float,
+        tire_spindle=None,
+        r_bead: float = 0.0,
+        half_bead: float = 0.0,
+        pose: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ) -> None:
-        """Add the vehicle to ``car`` lifted by ``z_off``; Newton's default ground plane at z = 0.
+        """Add the vehicle to ``car`` lifted by ``z_off`` at plan-view ``pose = (x, y, yaw)`` [m, m, rad];
+        Newton's default ground plane at z = 0.
 
         The vehicle assets carry no ground (the bake strips the MJCF world plane), so both
         vehicle kinds get the same ground here.
         """
+        # yaw about world z
+        world = wp.transform(
+            wp.vec3(float(pose[0]), float(pose[1]), z_off),
+            wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), float(pose[2])),
+        )
         if self.kind == "articulated":
             car.add_ground_plane()
-            car.add_usd(self.path, xform=wp.transform(wp.vec3(0.0, 0.0, z_off), wp.quat_identity()))
+            centred = wp.transform(wp.vec3(*self.usd_offset.tolist()), wp.quat_identity())
+            car.add_usd(self.path, xform=wp.transform_multiply(world, centred))
             return
-        self._build_rigid_hull(car, z_off, tire_spindle, r_bead, half_bead)
+        self._build_rigid_hull(car, world, tire_spindle, r_bead, half_bead)
 
-    def _build_rigid_hull(self, car, z_off, tire_spindle, r_bead, half_bead) -> None:
+    def _build_rigid_hull(self, car, world: wp.transform, tire_spindle, r_bead, half_bead) -> None:
         if tire_spindle is None:
             raise ValueError(f"{self.name}: a rigid-hull vehicle needs the tire asset's /Tire/Spindle for its wheels")
         vis_cfg = newton.ModelBuilder.ShapeConfig(density=0.0, has_shape_collision=False, has_particle_collision=False)
 
         car.add_ground_plane()
 
-        hull_pos = wp.vec3(*(self.hull_origin + np.array([0.0, 0.0, z_off])).tolist())
+        q_world = wp.transform_get_rotation(world)
+        hull_pos = wp.transform_point(world, wp.vec3(*self.hull_origin.tolist()))
         hull = car.add_link(
-            xform=wp.transform(hull_pos, wp.quat_identity()),
+            xform=wp.transform(hull_pos, q_world),
             mass=self.hull_mass,
             com=wp.vec3(*self.hull_com.tolist()),
             inertia=wp.mat33(*self.hull_inertia.reshape(-1).tolist()),
             label="chassis",
         )
         j_free = car.add_joint_free(hull, label="chassis_free")
-        hull_mesh = newton.Mesh(self.hull_points, self.hull_triangles.reshape(-1), compute_inertia=False)
-        car.add_shape_mesh(hull, mesh=hull_mesh, cfg=vis_cfg, color=(0.55, 0.58, 0.45), label="hull_vis")
+        for vname, vpts, vtris, vcolor in self.hull_visuals:
+            vmesh = newton.Mesh(vpts, vtris.reshape(-1), compute_inertia=False)
+            car.add_shape_mesh(hull, mesh=vmesh, cfg=vis_cfg, color=vcolor, label=f"hull_vis_{vname.lower()}")
         for s in self.hull_shapes:
             self._add_usd_shape(car, hull, s, label=f"hull_{s['name']}")
 
@@ -391,12 +456,12 @@ class VehicleUSD:
         self._axle_joint_idx = []
         for i, name in enumerate(self.spindle_bodies):
             hub_local = self.hubs_local[i]
-            hub_world = self.hubs[i] + np.array([0.0, 0.0, z_off])
+            hub_world = wp.transform_point(world, wp.vec3(*self.hubs[i].tolist()))
             spindle = self.add_spindle_link(
                 car,
                 tire_spindle,
                 label=name,
-                xform=wp.transform(wp.vec3(*hub_world.tolist()), wp.quat_identity()),
+                xform=wp.transform(hub_world, q_world),
                 r_bead=r_bead,
                 half_bead=half_bead,
                 mirror=bool(hub_local[1] < 0.0),  # right-hand wheels
@@ -497,7 +562,7 @@ class VehicleUSD:
             raise ValueError(f"{self.name}: a rigid-hull vehicle needs the tire asset's /Tire/Spindle for its wheels")
         if r_bead <= 0.0 or half_bead <= 0.0:
             raise ValueError(f"{self.name}: a rigid-hull wheel needs the tire's bead radius and half width")
-        P = _P_YUP_TO_ZU
+        P = P_YUP_TO_ZU
         if mirror:
             # Right-side wheel: the tire asset's spindle has its hub cap on the tire-frame +X
             # (= vehicle +Y, outboard on the left). Mirror across the wheel's mid-plane so the
@@ -535,27 +600,50 @@ class VehicleUSD:
 
     # ── Drive ─────────────────────────────────────────────────────────────────
 
-    def axle_forward_signs(self, car: newton.ModelBuilder) -> list[float]:
+    def axle_forward_signs(self, car: newton.ModelBuilder, yaw: float = 0.0) -> list[float]:
         """Per axle joint: +1 if a positive hinge speed rolls the vehicle forward, else -1.
 
         Rolling with the centre moving along +f (forward) on a Z-up ground has the angular
         velocity along +(z x f) = the vehicle's left axis; forward is the hub-derived side
         the front spindles sit on. Derived from the hinge's world axis, so an MJCF/USD axle
-        authored as ``0 -1 0`` (positive speed = reverse) drives the right way.
+        authored as ``0 -1 0`` (positive speed = reverse) drives the right way. ``yaw`` is the
+        heading the vehicle was built with: the hinge axis is a world vector, so the vehicle's
+        left axis must be turned by the same yaw (with the vehicle-frame axis the sign flipped for
+        every spawn heading beyond 90 deg - the RELLIS maps drove backwards, seen 2026-09-30).
         """
         fwd_x = 1.0 if float(self.hubs[0, 0]) >= 0.0 else -1.0  # hubs[0] = FL spindle
-        left = np.array([0.0, fwd_x, 0.0])  # z x (fwd_x, 0, 0)
+        left = fwd_x * np.array([-math.sin(yaw), math.cos(yaw), 0.0])  # z x (fwd, 0, 0), yawed
         signs = []
         for n in self.axle_joints:
             ax = joint_world_axis(car, find_joint(car, n))
             signs.append(1.0 if float(ax @ left) > 0.0 else -1.0)
         return signs
 
-    def setup_drive(self, car: newton.ModelBuilder, device: str) -> None:
+    def setup_drive(
+        self, car: newton.ModelBuilder, device: str, yaw: float = 0.0, wheel_actuators: bool = False
+    ) -> None:
+        """Resolve the drive DOFs and their forward signs; ``yaw`` = the heading the vehicle was built with.
+
+        ``wheel_actuators``: the axle velocity drives move from the solver to :mod:`newton.actuators`
+        (a PD on wheel speed with the same gain and effort limit); the caller then steps
+        ``model.actuators`` before every solver step (effort into ``control.joint_f``).
+        """
         axle = [find_dof(car, n) for n in self.axle_joints]  # FL, FR, RL, RR
-        sign = self.axle_forward_signs(car)
+        sign = self.axle_forward_signs(car, yaw)
         self._axle_dofs = wp.array(axle, dtype=wp.int32, device=device)
         self._axle_sign = wp.array(sign, dtype=wp.float32, device=device)
+        if wheel_actuators:
+            for name, dof in zip(self.axle_joints, axle, strict=True):
+                car.add_actuator(
+                    ControllerPD,
+                    index=dof,
+                    pos_index=int(car.joint_q_start[find_joint(car, name)]),  # the free chassis shifts q against qd
+                    kd=float(car.joint_target_kd[dof]),
+                    clamping=[(ClampingMaxEffort, {"max_effort": float(car.joint_effort_limit[dof])})],
+                )
+                car.joint_target_ke[dof] = 0.0
+                car.joint_target_kd[dof] = 0.0
+                car.joint_target_mode[dof] = int(newton.JointTargetMode.EFFORT)  # no MuJoCo actuator, joint_f only
         if self.steering == "skid":
             self._left_dofs = wp.array(axle[0::2], dtype=wp.int32, device=device)
             self._right_dofs = wp.array(axle[1::2], dtype=wp.int32, device=device)

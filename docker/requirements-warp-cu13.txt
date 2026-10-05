@@ -1,0 +1,4 @@
+# Official NVIDIA Warp 1.17.0 CUDA 13 wheel for Linux ARM64.
+# Keep the release and its published SHA-256 together when upgrading.
+warp-lang @ https://github.com/NVIDIA/warp/releases/download/v1.17.0/warp_lang-1.17.0%2Bcu13-py3-none-manylinux_2_34_aarch64.whl \
+    --hash=sha256:34feeea0f048677a6a8cb4b52534bf429755e0b384996983f35212065d232ac3

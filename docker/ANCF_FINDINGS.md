@@ -1,4 +1,8 @@
-# ANCF / super jeep — consolidated findings
+# ANCF / super jeep — consolidated findings (historical, 2026-09)
+
+> Historical record of the super-jeep / double-wishbone work. Example names, the
+> `TrackDriver` interface and the `pcg=25` budget below predate the current
+> examples 05-10 and the coupled-Newton / Schur coupling; see `docker/README.md`.
 
 Distilled from `AUDIT_ANCF_JEEP.md`, `TASK_ANCF_JEEP.md`, `PERF_ANCF_SAND_RL.md`,
 `warp-mpm-optimize.md` (2026-09-09 to 2026-09-14 sessions, deleted after consolidation).

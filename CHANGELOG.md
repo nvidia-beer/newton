@@ -1,5 +1,46 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Add optional `coupling-method=schur` for implicit vehicle tires: condense six spindle motion directions per tire, reuse the interface tangent, and fall back to finite differences when an estimate is invalid.
+- Add `coupling-method=coupled-newton` to share shell and wheel corrections across interface iterations, retain full reaction torque, and reserve additional corrections for difficult steps. Keep partitioned coupling for singular rigid mass matrices.
+- Add an opt-in, uncoupled wheel stiffness-recovery experiment with synthetic noise, a separate validation drop, and numerical accuracy gates.
+- Add `diffsim_ancf_skid_steer` (Docker example 09): learn speed and turning response from simulated MuJoCo/ANCF maneuvers, compare physical before/after motion against a gray target vehicle, and export observations as preparation for vehicle telemetry calibration.
+- Add `diffsim_ancf_tire_traction` (Docker example 10) and `ANCFTireTraction`: learn ground friction through an ANCF tire's dynamic spin-and-brake trajectory, with a freely translating spindle, analytic implicit sensitivities, and validation on a different motor command.
+- Add `diffsim_ancf_tire_lift` (Docker example 08) to learn tire pressure from a loaded MuJoCo rim's target height with analytic equilibrium gradients; reads the telemetry preset's tire, pressure limits and contact parameters, fits measured heights with `--calibration-csv`, and exports a replay configuration.
+- Add a local Warp 1.17 CUDA compiler patch that infers launch bounds from each compiled block size; ARM64 CUDA 13 builds apply it by default. Set `WARP_LOCAL_PATCHES=0` at build time to compare with the unmodified wheel.
+- Add a checksum-pinned Warp 1.17 CUDA 13 build for the ARM64 Docker image with its own kernel cache.
+
+### Changed
+
+- Default full-vehicle examples 03, 05, and 07 to `coupling-method=auto`, selecting joint shell/interface corrections on supported implicit vehicles on flat ground and rigid terrain. Retain partitioned coupling for unsupported rigid models and adaptive coupling for odd substeps. Use `coupling-method=adaptive` to restore the previous terrain/telemetry preset or `coupling-method=schur` for complete shell solves between interface corrections.
+- Share the full-vehicle runtime across flat-ground, terrain, sand, and telemetry examples; keep existing launcher commands and `--test`, with acceptance checks maintained in `newton/tests`.
+- Upgrade the ARM64 Docker default to Warp 1.17.0 with CUDA 13; set `WARP_VERSION=locked` when building to restore the lockfile version.
+
+### Fixed
+
+- Fix clean ARM64 Docker builds by resolving released MuJoCo 3.10.0 wheels from PyPI, validating lockfile metadata, and removing the obsolete `cudss` extra from dependency installation.
+- Transfer tire inertia and full reaction moments through accelerated wheel–tire coupling in the rigid-ground vehicle examples; retain shell weight separately from rim mass.
+- Extend coupled tire Newton reserve evaluations only for unresolved steps, and validate both RELLIS replay recordings.
+- Apply single-tire material overrides in the drop example and assemble shell masses reproducibly to avoid changes between identical calibration trials.
+- Align rigid ANCF terrain contact and height queries with the triangles used by the chassis collider and viewer.
+- Preserve small tire accelerations during rolling by evaluating reaction impulse changes without subtracting nearly equal momenta.
+- Install Python NVTX annotations in the Docker project environment for Nsight profiling.
+- Make shell force assembly and reductions reproducible across translated drop environments, and accelerate the symmetric block preconditioner.
+- Stabilize sticking and sliding at a fixed iteration budget without changing the rigid-ground contact force law.
+- Enable CUDA–OpenGL buffer sharing for dynamic viewer meshes and lines on Linux.
+- Reduce implicit ANCF vehicle cost at the fixed 6 / 2 / 10 solver budget: shared-memory symmetric sweeps and parallel damping for small tires, bounded coupling refresh work during motion, adaptive GPU wheel–tire coupling (`coupling-method=aitken` retains six fixed passes), and single-CUDA-graph wheel-rig frames; full torque transfer and tire damping are unchanged.
+- Size the rigid-floor drop penalty from gravitational energy and a penetration target; retain explicit `--kn` and `--kd` overrides.
+- Correct ANCF shell strain transformations, physical mass and director inertia, and rigid-mode convergence at fixed solver iteration budgets.
+- Preserve accepted HHT force history and prescribed wheel motion through integration, warm-up, resets, and coupling retries.
+- Correct recorded-command sampling at frame boundaries and include measured wheel speeds, targets, and motor efforts in terrain replay logs.
+
+### Removed
+
+- Remove the experimental ANCF VBD solvers and their example options. Use `SolverANCFShell` or `SolverANCFShellRigid` and `--solver implicit`; the general-purpose `SolverVBD` remains available.
+
 ## [1.4.0] - 2026-07-16
 
 ### Added
